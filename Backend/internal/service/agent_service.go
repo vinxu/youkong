@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"youkong/internal/model"
+	"youkong/internal/pkg/llm"
 	"youkong/internal/pkg/tencent"
 	"youkong/internal/repository"
 )
@@ -26,6 +28,7 @@ type AgentService struct {
 	redisClient    *tencent.RedisClient
 	userRepo       *repository.UserRepository
 	friendshipRepo *repository.FriendshipRepository
+	llmClient      *llm.OpenRouterClient
 }
 
 // NewAgentService 创建 Agent 服务
@@ -33,11 +36,13 @@ func NewAgentService(
 	redisClient *tencent.RedisClient,
 	userRepo *repository.UserRepository,
 	friendshipRepo *repository.FriendshipRepository,
+	llmClient *llm.OpenRouterClient,
 ) *AgentService {
 	return &AgentService{
 		redisClient:    redisClient,
 		userRepo:       userRepo,
 		friendshipRepo: friendshipRepo,
+		llmClient:      llmClient,
 	}
 }
 
@@ -188,8 +193,8 @@ func (s *AgentService) GetFriendsFreeProbability(ctx context.Context, userID str
 			continue
 		}
 
-		// 计算有空概率
-		probability, reason, confidence := s.calculateFreeProbability(agentData, now)
+		// 计算有空概率（使用 LLM 生成隐私安全的理由）
+		probability, reason, confidence := s.calculateFreeProbability(ctx, agentData, now)
 
 		rec := model.FriendRecommendation{
 			FriendID:    friend.FriendID,
@@ -220,11 +225,18 @@ func (s *AgentService) GetFriendsFreeProbability(ctx context.Context, userID str
 	}, nil
 }
 
-// calculateFreeProbability 计算有空概率（规则引擎版本）
-func (s *AgentService) calculateFreeProbability(data *model.AgentExposedData, now time.Time) (probability int, reason string, confidence string) {
+// calculateFreeProbability 计算有空概率
+func (s *AgentService) calculateFreeProbability(ctx context.Context, data *model.AgentExposedData, now time.Time) (probability int, reason string, confidence string) {
 	score := 50 // 基础分
-	reasons := []string{}
 	hasData := false
+
+	// 脱敏后的状态（用于 LLM）
+	sanitized := llm.SanitizedUserState{
+		ActivityLevel:    llm.ActivityLevelNone,
+		ActivityCategory: llm.ActivityCategoryIdle,
+		LocationCategory: llm.LocationCategoryUnknown,
+		TimePeriod:       getTimePeriod(now),
+	}
 
 	// ========== 屏幕状态分析 ==========
 	if data.DataQuality.ScreenDataAgeSeconds >= 0 && data.DataQuality.ScreenDataAgeSeconds < 300 {
@@ -232,29 +244,38 @@ func (s *AgentService) calculateFreeProbability(data *model.AgentExposedData, no
 		screen := data.Realtime.Screen
 
 		if screen.IsActive {
+			// 计算活跃度级别（脱敏）
+			if screen.SessionDurationMinutes >= 30 {
+				sanitized.ActivityLevel = llm.ActivityLevelHigh
+			} else if screen.SessionDurationMinutes >= 10 {
+				sanitized.ActivityLevel = llm.ActivityLevelMedium
+			} else {
+				sanitized.ActivityLevel = llm.ActivityLevelLow
+			}
+
+			// 活动类别（脱敏，不暴露具体 APP）
 			switch screen.ActivityType {
 			case model.ActivityEntertainment:
+				sanitized.ActivityCategory = llm.ActivityCategoryLeisure
 				if screen.SessionDurationMinutes >= 10 {
 					score += 30
-					reasons = append(reasons, fmt.Sprintf("刷了%d分钟手机", screen.SessionDurationMinutes))
 				} else {
 					score += 15
-					reasons = append(reasons, "在刷手机")
 				}
 			case model.ActivityProductivity:
+				sanitized.ActivityCategory = llm.ActivityCategoryWork
 				score -= 10
-				reasons = append(reasons, "在用工作APP")
 			case model.ActivityCommunication:
+				sanitized.ActivityCategory = llm.ActivityCategorySocial
 				score += 10
-				reasons = append(reasons, "在聊天")
 			}
 		} else {
+			sanitized.ActivityLevel = llm.ActivityLevelNone
+			sanitized.ActivityCategory = llm.ActivityCategoryIdle
 			if screen.LastActiveMinutesAgo > 120 {
 				score -= 25
-				reasons = append(reasons, "手机闲置很久")
 			} else if screen.LastActiveMinutesAgo > 30 {
 				score -= 10
-				reasons = append(reasons, "有一会没用手机")
 			}
 		}
 	}
@@ -266,28 +287,24 @@ func (s *AgentService) calculateFreeProbability(data *model.AgentExposedData, no
 
 		switch location.PlaceType {
 		case model.PlaceHome:
+			sanitized.LocationCategory = llm.LocationCategoryHome
 			score += 15
-			reasons = append(reasons, "在家")
 		case model.PlaceWork:
+			sanitized.LocationCategory = llm.LocationCategoryWork
 			if isWorkHours(now) {
 				score -= 20
-				reasons = append(reasons, "在公司上班")
 			} else {
 				score += 5
-				reasons = append(reasons, "在公司但已下班")
 			}
 		case model.PlaceLeisure:
+			sanitized.LocationCategory = llm.LocationCategoryOutside
 			score += 10
-			reasons = append(reasons, "在外面")
 		}
 	}
 
 	// ========== 时间分析 ==========
-	timeScore, timeReason := getTimeScore(now)
+	timeScore, _ := getTimeScore(now)
 	score += timeScore
-	if timeReason != "" {
-		reasons = append(reasons, timeReason)
-	}
 
 	// ========== 历史规律加成 ==========
 	if data.Patterns.CurrentHourFreeRate > 70 {
@@ -308,7 +325,7 @@ func (s *AgentService) calculateFreeProbability(data *model.AgentExposedData, no
 	if !hasData {
 		confidence = "low"
 		reason = "数据不足"
-		probability = -1 // 表示无数据
+		probability = -1
 		return
 	}
 
@@ -320,19 +337,77 @@ func (s *AgentService) calculateFreeProbability(data *model.AgentExposedData, no
 		confidence = "low"
 	}
 
-	// ========== 选择最佳理由 ==========
-	if len(reasons) > 0 {
-		// 优先选择屏幕状态相关的理由
-		reason = reasons[0]
-		if len(reasons) > 1 {
-			reason = reasons[0] + "，" + reasons[1]
+	// ========== 使用 LLM 生成隐私安全的理由 ==========
+	sanitized.Probability = score
+	if s.llmClient != nil {
+		llmReason, err := s.llmClient.GenerateFreeReason(ctx, sanitized)
+		if err == nil && llmReason != "" {
+			// 清理 LLM 输出
+			reason = strings.TrimSpace(llmReason)
+			// 限制长度
+			if len([]rune(reason)) > 15 {
+				reason = string([]rune(reason)[:15])
+			}
+		} else {
+			// LLM 失败，使用默认理由
+			reason = getDefaultReason(score)
 		}
 	} else {
-		reason = "数据不足"
+		// 无 LLM，使用默认理由
+		reason = getDefaultReason(score)
 	}
 
 	probability = score
 	return
+}
+
+// getTimePeriod 获取时间段（脱敏）
+func getTimePeriod(t time.Time) llm.TimePeriod {
+	weekday := t.Weekday()
+	hour := t.Hour()
+
+	isWeekend := weekday == time.Saturday || weekday == time.Sunday
+
+	if isWeekend {
+		return llm.TimePeriodWeekend
+	}
+
+	if hour >= 0 && hour < 7 {
+		return llm.TimePeriodLateNight
+	}
+	if hour >= 7 && hour < 9 {
+		return llm.TimePeriodEarlyMorning
+	}
+	if hour >= 9 && hour < 12 {
+		return llm.TimePeriodWorkHours
+	}
+	if hour >= 12 && hour < 14 {
+		return llm.TimePeriodLunchBreak
+	}
+	if hour >= 14 && hour < 18 {
+		return llm.TimePeriodWorkHours
+	}
+	if hour >= 18 && hour < 23 {
+		return llm.TimePeriodAfterWork
+	}
+	return llm.TimePeriodLateNight
+}
+
+// getDefaultReason 获取默认理由（无 LLM 时使用）
+func getDefaultReason(score int) string {
+	if score >= 80 {
+		return "可能有空"
+	}
+	if score >= 60 {
+		return "应该有空"
+	}
+	if score >= 40 {
+		return "不太确定"
+	}
+	if score >= 20 {
+		return "可能在忙"
+	}
+	return "应该在忙"
 }
 
 // isWorkHours 判断是否工作时间

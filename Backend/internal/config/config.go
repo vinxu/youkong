@@ -15,6 +15,13 @@ type Config struct {
 	Tencent    TencentConfig
 	Wechat     WechatConfig
 	Invitation InvitationConfig
+	LLM        LLMConfig
+}
+
+type LLMConfig struct {
+	Provider string // openrouter
+	APIKey   string
+	Model    string
 }
 
 type ServerConfig struct {
@@ -94,6 +101,8 @@ func Load() (*Config, error) {
 	viper.SetDefault("INVITATION_DEFAULT_EXPIRE_DAYS", 7)
 	viper.SetDefault("INVITATION_DEFAULT_MAX_USES", 100)
 	viper.SetDefault("INVITATION_RATE_LIMIT_PER_DAY", 10)
+	viper.SetDefault("LLM_PROVIDER", "openrouter")
+	viper.SetDefault("LLM_MODEL", "google/gemini-2.5-pro-preview-06-05")
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -141,6 +150,11 @@ func Load() (*Config, error) {
 			DefaultExpireDays: viper.GetInt("INVITATION_DEFAULT_EXPIRE_DAYS"),
 			DefaultMaxUses:    viper.GetInt("INVITATION_DEFAULT_MAX_USES"),
 			RateLimitPerDay:   viper.GetInt("INVITATION_RATE_LIMIT_PER_DAY"),
+		},
+		LLM: LLMConfig{
+			Provider: viper.GetString("LLM_PROVIDER"),
+			APIKey:   viper.GetString("LLM_API_KEY"),
+			Model:    viper.GetString("LLM_MODEL"),
 		},
 	}
 

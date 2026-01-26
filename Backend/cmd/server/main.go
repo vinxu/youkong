@@ -13,6 +13,7 @@ import (
 	"youkong/internal/handler"
 	"youkong/internal/middleware"
 	"youkong/internal/pkg/jwt"
+	"youkong/internal/pkg/llm"
 	"youkong/internal/pkg/poster"
 	"youkong/internal/pkg/tencent"
 	"youkong/internal/pkg/wechat"
@@ -100,7 +101,17 @@ func main() {
 	wechatService := service.NewWechatService(wechatRepo, userRepo, invitationRepo, friendshipRepo, circleRepo, wechatClient, jwtManager)
 	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
 	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo)
-	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo)
+
+	// 初始化 LLM 客户端
+	var llmClient *llm.OpenRouterClient
+	if cfg.LLM.APIKey != "" {
+		llmClient = llm.NewOpenRouterClient(cfg.LLM.APIKey, cfg.LLM.Model)
+		logger.Info("LLM 客户端初始化成功", zap.String("model", cfg.LLM.Model))
+	} else {
+		logger.Warn("LLM_API_KEY 未配置，将使用默认理由生成")
+	}
+
+	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 
 	// 初始化Handler
