@@ -14,10 +14,15 @@ import (
 
 const (
 	// Redis key 前缀
-	keyUserAnalysis = "agent:analysis:%s" // 用户分析结果缓存
+	keyUserAnalysis  = "agent:analysis:%s" // 用户分析结果缓存
+	keyLastStatus    = "agent:last:%s"     // 上一次状态数据
 
 	// 缓存过期时间
-	analysisTTL = 10 * time.Minute // 分析结果缓存 10 分钟
+	analysisTTL     = 10 * time.Minute // 分析结果缓存 10 分钟
+	lastStatusTTL   = 30 * time.Minute // 上次状态缓存 30 分钟
+
+	// 变化检测阈值
+	significantTimeGap = 30 * time.Minute // 超过 30 分钟视为显著变化
 )
 
 // MemoryService 记忆服务
@@ -46,21 +51,38 @@ func NewMemoryService(
 
 // AnalyzeAndUpdateMemory 分析状态并更新记忆
 func (s *MemoryService) AnalyzeAndUpdateMemory(ctx context.Context, userID string, status *model.ExtendedStatusReportRequest) (*model.AnalysisResult, error) {
-	// 1. 获取现有核心记忆
+	now := time.Now()
+
+	// 1. 检查是否有显著变化（决定是否需要调用 LLM）
+	lastStatus, lastTime := s.getLastStatus(ctx, userID)
+	hasSignificantChange := s.detectSignificantChange(status, lastStatus, lastTime, now)
+
+	// 2. 如果没有显著变化，尝试返回缓存结果
+	if !hasSignificantChange {
+		if cached, err := s.GetCachedAnalysis(ctx, userID); err == nil && cached != nil {
+			// 保存当前状态（用于下次对比）
+			s.saveLastStatus(ctx, userID, status)
+			// 保存历史记录
+			s.memoryRepo.SaveStatusHistory(ctx, userID, status)
+			return cached, nil
+		}
+		// 缓存不存在，需要调用 LLM
+	}
+
+	// 3. 获取现有核心记忆
 	memory, err := s.memoryRepo.GetCoreMemory(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get core memory: %w", err)
 	}
 
-	// 2. 获取最近历史记录（用于上下文）
+	// 4. 获取最近历史记录（用于上下文）
 	recentHistory, err := s.memoryRepo.GetRecentHistory(ctx, userID, 10)
 	if err != nil {
 		// 不影响主流程
 		recentHistory = nil
 	}
 
-	// 3. 构建分析输入
-	now := time.Now()
+	// 5. 构建分析输入
 	input := &llm.AnalysisInput{
 		CurrentStatus: status,
 		CurrentMemory: memory,
@@ -70,7 +92,7 @@ func (s *MemoryService) AnalyzeAndUpdateMemory(ctx context.Context, userID strin
 		Hour:          now.Hour(),
 	}
 
-	// 4. 调用分析器（LLM 或规则）
+	// 6. 调用分析器（LLM 或规则）
 	var result *model.AnalysisResult
 	if s.memoryAnalyzer != nil {
 		result, err = s.memoryAnalyzer.Analyze(ctx, input)
@@ -83,13 +105,16 @@ func (s *MemoryService) AnalyzeAndUpdateMemory(ctx context.Context, userID strin
 		result = s.getDefaultAnalysisResult()
 	}
 
-	// 5. 保存状态历史
+	// 7. 保存当前状态（用于下次对比）
+	s.saveLastStatus(ctx, userID, status)
+
+	// 8. 保存状态历史
 	if err := s.memoryRepo.SaveStatusHistory(ctx, userID, status); err != nil {
 		// 记录错误但不影响返回
 		fmt.Printf("save status history error: %v\n", err)
 	}
 
-	// 6. 更新核心记忆（如果需要）
+	// 9. 更新核心记忆（如果需要）
 	if result.MemoryUpdate != nil && result.MemoryUpdate.ShouldUpdate {
 		if err := s.updateCoreMemory(ctx, userID, memory, result.MemoryUpdate); err != nil {
 			fmt.Printf("update core memory error: %v\n", err)
@@ -108,12 +133,100 @@ func (s *MemoryService) AnalyzeAndUpdateMemory(ctx context.Context, userID strin
 		}
 	}
 
-	// 7. 缓存分析结果（Redis + MySQL）
+	// 10. 缓存分析结果（Redis + MySQL）
 	if err := s.cacheAnalysisResult(ctx, userID, result); err != nil {
 		fmt.Printf("cache analysis result error: %v\n", err)
 	}
 
 	return result, nil
+}
+
+// lastStatusData 上次状态数据（带时间戳）
+type lastStatusData struct {
+	Status    *model.ExtendedStatusReportRequest `json:"status"`
+	Timestamp time.Time                          `json:"timestamp"`
+}
+
+// getLastStatus 获取上次状态
+func (s *MemoryService) getLastStatus(ctx context.Context, userID string) (*model.ExtendedStatusReportRequest, time.Time) {
+	key := fmt.Sprintf(keyLastStatus, userID)
+	data, err := s.redisClient.GetBytes(ctx, key)
+	if err != nil || len(data) == 0 {
+		return nil, time.Time{}
+	}
+
+	var last lastStatusData
+	if err := json.Unmarshal(data, &last); err != nil {
+		return nil, time.Time{}
+	}
+
+	return last.Status, last.Timestamp
+}
+
+// saveLastStatus 保存当前状态
+func (s *MemoryService) saveLastStatus(ctx context.Context, userID string, status *model.ExtendedStatusReportRequest) {
+	key := fmt.Sprintf(keyLastStatus, userID)
+	data := lastStatusData{
+		Status:    status,
+		Timestamp: time.Now(),
+	}
+	if bytes, err := json.Marshal(data); err == nil {
+		s.redisClient.Set(ctx, key, bytes, lastStatusTTL)
+	}
+}
+
+// detectSignificantChange 检测是否有显著变化
+func (s *MemoryService) detectSignificantChange(current, last *model.ExtendedStatusReportRequest, lastTime, now time.Time) bool {
+	// 首次上报
+	if last == nil {
+		return true
+	}
+
+	// 时间间隔超过阈值
+	if now.Sub(lastTime) > significantTimeGap {
+		return true
+	}
+
+	// 比较关键字段
+
+	// 1. 屏幕活跃状态变化
+	if current.Screen != nil && last.Screen != nil {
+		if current.Screen.IsActive != last.Screen.IsActive {
+			return true
+		}
+		if current.Screen.ActivityType != last.Screen.ActivityType {
+			return true
+		}
+	} else if (current.Screen == nil) != (last.Screen == nil) {
+		// 一个有一个没有
+		return true
+	}
+
+	// 2. 位置类型变化
+	if current.Location != nil && last.Location != nil {
+		if current.Location.PlaceType != last.Location.PlaceType {
+			return true
+		}
+	} else if (current.Location == nil) != (last.Location == nil) {
+		return true
+	}
+
+	// 3. 专注模式变化
+	if current.Mode != nil && last.Mode != nil {
+		if current.Mode.IsFocusModeOn != last.Mode.IsFocusModeOn {
+			return true
+		}
+	}
+
+	// 4. 耳机连接状态变化
+	if current.Connection != nil && last.Connection != nil {
+		if current.Connection.IsHeadphonesConnected != last.Connection.IsHeadphonesConnected {
+			return true
+		}
+	}
+
+	// 没有显著变化
+	return false
 }
 
 // GetCoreMemory 获取用户核心记忆

@@ -42,3 +42,14 @@ type FriendWithInvitation struct {
 	CircleName string       `json:"circleName,omitempty"`
 	CreatedAt  time.Time    `json:"createdAt"`
 }
+
+// AddFriendByPhoneRequest 通过手机号加好友请求
+type AddFriendByPhoneRequest struct {
+	Phone string `json:"phone" binding:"required,len=11"`
+}
+
+// AddFriendByPhoneResponse 通过手机号加好友响应
+type AddFriendByPhoneResponse struct {
+	User  *UserProfile `json:"user"`
+	Added bool         `json:"added"` // true=新添加, false=已是好友
+}

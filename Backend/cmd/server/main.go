@@ -225,6 +225,7 @@ func main() {
 			friends := authorized.Group("/friends")
 			{
 				friends.GET("", friendshipHandler.GetFriends)
+				friends.POST("/add-by-phone", friendshipHandler.AddFriendByPhone)
 				friends.DELETE("/:userId", friendshipHandler.RemoveFriend)
 				friends.GET("/invited-by-me", friendshipHandler.GetInvitedByMe)
 				friends.GET("/invited-me", friendshipHandler.GetInvitedMe)

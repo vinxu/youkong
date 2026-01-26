@@ -229,6 +229,65 @@ func (s *FriendshipService) GetInvitedMe(ctx context.Context, userID string) ([]
 	return result, nil
 }
 
+// AddFriendByPhone 通过手机号添加好友
+func (s *FriendshipService) AddFriendByPhone(ctx context.Context, userID, phone string) (*model.AddFriendByPhoneResponse, error) {
+	// 1. 根据手机号查找用户
+	friend, err := s.userRepo.GetByPhone(ctx, phone)
+	if err != nil {
+		return nil, fmt.Errorf("查询用户失败: %w", err)
+	}
+	if friend == nil {
+		return nil, fmt.Errorf("该手机号未注册")
+	}
+
+	// 2. 不能添加自己
+	if friend.ID == userID {
+		return nil, fmt.Errorf("不能添加自己为好友")
+	}
+
+	// 3. 检查是否已是好友
+	areFriends, err := s.friendshipRepo.AreFriends(ctx, userID, friend.ID)
+	if err != nil {
+		return nil, fmt.Errorf("检查好友状态失败: %w", err)
+	}
+	if areFriends {
+		return &model.AddFriendByPhoneResponse{
+			User:  friend.ToProfile(),
+			Added: false, // 已是好友
+		}, nil
+	}
+
+	// 4. 创建双向好友关系
+	now := time.Now()
+	friendship1 := &model.Friendship{
+		ID:        uuid.New().String(),
+		UserID:    userID,
+		FriendID:  friend.ID,
+		Source:    model.FriendshipSourceSearch,
+		CreatedAt: now,
+	}
+	friendship2 := &model.Friendship{
+		ID:        uuid.New().String(),
+		UserID:    friend.ID,
+		FriendID:  userID,
+		Source:    model.FriendshipSourceSearch,
+		CreatedAt: now,
+	}
+
+	if err := s.friendshipRepo.Create(ctx, friendship1); err != nil {
+		return nil, fmt.Errorf("添加好友失败: %w", err)
+	}
+	if err := s.friendshipRepo.Create(ctx, friendship2); err != nil {
+		_ = s.friendshipRepo.Delete(ctx, userID, friend.ID)
+		return nil, fmt.Errorf("添加好友失败: %w", err)
+	}
+
+	return &model.AddFriendByPhoneResponse{
+		User:  friend.ToProfile(),
+		Added: true,
+	}, nil
+}
+
 func (s *FriendshipService) AddFriendWithInvitation(ctx context.Context, userID, friendID, invitationID string) error {
 	if userID == friendID {
 		return fmt.Errorf("不能添加自己为好友")

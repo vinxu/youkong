@@ -3,6 +3,7 @@ package handler
 import (
 	"github.com/gin-gonic/gin"
 	"youkong/internal/middleware"
+	"youkong/internal/model"
 	"youkong/internal/pkg/response"
 	"youkong/internal/service"
 )
@@ -76,6 +77,30 @@ func (h *FriendshipHandler) GetInvitedMe(c *gin.Context) {
 	}
 
 	result, err := h.friendshipService.GetInvitedMe(c.Request.Context(), userID)
+	if err != nil {
+		response.Error(c, response.CodeInternalError, err.Error())
+		return
+	}
+
+	response.Success(c, result)
+}
+
+// AddFriendByPhone 通过手机号加好友
+// POST /api/v1/friends/add-by-phone
+func (h *FriendshipHandler) AddFriendByPhone(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	var req model.AddFriendByPhoneRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "手机号格式错误，需要11位数字")
+		return
+	}
+
+	result, err := h.friendshipService.AddFriendByPhone(c.Request.Context(), userID, req.Phone)
 	if err != nil {
 		response.Error(c, response.CodeInternalError, err.Error())
 		return
