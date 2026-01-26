@@ -11,27 +11,31 @@ struct DebugPanelView: View {
             VStack(spacing: 0) {
                 // Tab Picker
                 Picker("", selection: $selectedTab) {
-                    Text("网络").tag(0)
-                    Text("日志").tag(1)
-                    Text("设置").tag(2)
-                    Text("信息").tag(3)
+                    Text("Agent").tag(0)
+                    Text("网络").tag(1)
+                    Text("日志").tag(2)
+                    Text("设置").tag(3)
+                    Text("信息").tag(4)
                 }
                 .pickerStyle(.segmented)
                 .padding()
 
                 // Content
                 TabView(selection: $selectedTab) {
-                    NetworkLogsView()
+                    AgentDataView()
                         .tag(0)
 
-                    ConsoleLogsView()
+                    NetworkLogsView()
                         .tag(1)
 
-                    DebugSettingsView()
+                    ConsoleLogsView()
                         .tag(2)
 
-                    AppInfoView()
+                    DebugSettingsView()
                         .tag(3)
+
+                    AppInfoView()
+                        .tag(4)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
             }
@@ -72,7 +76,15 @@ struct NetworkLogsView: View {
             .padding(.vertical, 8)
 
             if debugTool.networkLogs.isEmpty {
-                ContentUnavailableView("暂无网络请求", systemImage: "network.slash")
+                VStack(spacing: 8) {
+                    Image(systemName: "network.slash")
+                        .font(.system(size: 40))
+                        .foregroundColor(.secondary)
+                    Text("暂无网络请求")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
                     ForEach(debugTool.networkLogs) { log in
@@ -382,7 +394,15 @@ struct ConsoleLogsView: View {
             .padding(.vertical, 8)
 
             if filteredLogs.isEmpty {
-                ContentUnavailableView("暂无日志", systemImage: "doc.text")
+                VStack(spacing: 8) {
+                    Image(systemName: "doc.text")
+                        .font(.system(size: 40))
+                        .foregroundColor(.secondary)
+                    Text("暂无日志")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
                     ForEach(filteredLogs) { log in
@@ -690,4 +710,203 @@ extension View {
         modifier(FloatingDebugButton())
     }
 }
+
+// MARK: - Agent Data View
+
+struct AgentDataView: View {
+    @StateObject private var screenCollector = ScreenDataCollector.shared
+    @StateObject private var locationCollector = LocationDataCollector.shared
+    @StateObject private var permissionManager = PermissionManager.shared
+
+    @State private var refreshTimer: Timer?
+    @State private var lastRefresh = Date()
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                // 刷新按钮
+                HStack {
+                    Text("Agent 数据")
+                        .font(.headline)
+                    Spacer()
+                    Button {
+                        refreshData()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    Text(lastRefresh.formatted(.dateTime.hour().minute().second()))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal)
+
+                // 权限状态
+                GroupBox("权限状态") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        permissionRow("屏幕使用时间", granted: permissionManager.status.screenTime)
+                        permissionRow("地理位置", granted: permissionManager.status.location)
+                        permissionRow("通讯录", granted: permissionManager.status.contacts)
+                    }
+                }
+                .padding(.horizontal)
+
+                // 屏幕数据
+                GroupBox("屏幕使用数据 (ScreenStatus)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        let status = screenCollector.getCurrentStatus()
+                        dataRow("is_active", value: "\(status.isActive)")
+                        dataRow("activity_type", value: status.activityType.rawValue)
+                        dataRow("session_duration_minutes", value: "\(status.sessionDurationMinutes)")
+                        dataRow("last_active_minutes_ago", value: "\(status.lastActiveMinutesAgo)")
+
+                        Divider()
+
+                        dataRow("isMonitoring", value: "\(screenCollector.isMonitoring)")
+                        dataRow("isAuthorized", value: "\(screenCollector.isAuthorized)")
+                    }
+                }
+                .padding(.horizontal)
+
+                // 位置数据
+                GroupBox("位置数据 (LocationStatus)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        let status = locationCollector.getCurrentStatus()
+                        dataRow("place_type", value: status.placeType.rawValue)
+                        dataRow("at_place_since_minutes", value: "\(status.atPlaceSinceMinutes)")
+
+                        Divider()
+
+                        dataRow("isMonitoring", value: "\(locationCollector.isMonitoring)")
+
+                        if let location = locationCollector.currentLocation {
+                            dataRow("latitude", value: String(format: "%.6f", location.coordinate.latitude))
+                            dataRow("longitude", value: String(format: "%.6f", location.coordinate.longitude))
+                        } else {
+                            dataRow("location", value: "未获取")
+                        }
+
+                        // 学习到的位置
+                        Divider()
+                        Text("学习到的位置:").font(.caption).foregroundColor(.secondary)
+
+                        if let home = locationCollector.homeLocation {
+                            dataRow("🏠 家", value: String(format: "%.4f, %.4f", home.coordinate.latitude, home.coordinate.longitude))
+                        } else {
+                            dataRow("🏠 家", value: "未学习")
+                        }
+
+                        if let work = locationCollector.workLocation {
+                            dataRow("🏢 公司", value: String(format: "%.4f, %.4f", work.coordinate.latitude, work.coordinate.longitude))
+                        } else {
+                            dataRow("🏢 公司", value: "未学习")
+                        }
+                    }
+                }
+                .padding(.horizontal)
+
+                // App Group 共享数据
+                GroupBox("App Group 共享数据") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let defaults = UserDefaults(suiteName: "group.com.youkong.app") {
+                            let minutes = defaults.integer(forKey: "screenTimeMinutes")
+                            let lastUpdate = defaults.object(forKey: "screenTimeLastUpdate") as? Date
+
+                            dataRow("screenTimeMinutes", value: "\(minutes)")
+                            if let lastUpdate = lastUpdate {
+                                dataRow("lastUpdate", value: lastUpdate.formatted(.dateTime.hour().minute().second()))
+                            } else {
+                                dataRow("lastUpdate", value: "无")
+                            }
+                        } else {
+                            Text("无法访问 App Group")
+                                .foregroundColor(.red)
+                        }
+                    }
+                }
+                .padding(.horizontal)
+
+                // 上报预览
+                GroupBox("API 上报预览 (JSON)") {
+                    let screenStatus = screenCollector.getCurrentStatus()
+                    let locationStatus = locationCollector.getCurrentStatus()
+
+                    let json = """
+                    {
+                      "screen": {
+                        "is_active": \(screenStatus.isActive),
+                        "activity_type": "\(screenStatus.activityType.rawValue)",
+                        "session_duration_minutes": \(screenStatus.sessionDurationMinutes),
+                        "last_active_minutes_ago": \(screenStatus.lastActiveMinutesAgo)
+                      },
+                      "location": {
+                        "place_type": "\(locationStatus.placeType.rawValue)",
+                        "at_place_since_minutes": \(locationStatus.atPlaceSinceMinutes)
+                      }
+                    }
+                    """
+
+                    Text(json)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(Color(.systemGray6))
+                        .cornerRadius(8)
+
+                    Button("复制 JSON") {
+                        UIPasteboard.general.string = json
+                    }
+                    .font(.caption)
+                }
+                .padding(.horizontal)
+
+                Spacer(minLength: 50)
+            }
+            .padding(.vertical)
+        }
+        .onAppear {
+            refreshData()
+            // 每 5 秒自动刷新
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+                refreshData()
+            }
+        }
+        .onDisappear {
+            refreshTimer?.invalidate()
+        }
+    }
+
+    private func refreshData() {
+        lastRefresh = Date()
+        Task {
+            await permissionManager.checkAllPermissions()
+        }
+        _ = screenCollector.getCurrentStatus()
+        _ = locationCollector.getCurrentStatus()
+    }
+
+    private func permissionRow(_ name: String, granted: Bool) -> some View {
+        HStack {
+            Image(systemName: granted ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .foregroundColor(granted ? .green : .red)
+            Text(name)
+            Spacer()
+            Text(granted ? "已授权" : "未授权")
+                .font(.caption)
+                .foregroundColor(granted ? .green : .red)
+        }
+    }
+
+    private func dataRow(_ key: String, value: String) -> some View {
+        HStack {
+            Text(key)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.secondary)
+            Spacer()
+            Text(value)
+                .font(.system(.caption, design: .monospaced))
+                .fontWeight(.medium)
+        }
+    }
+}
+
 #endif

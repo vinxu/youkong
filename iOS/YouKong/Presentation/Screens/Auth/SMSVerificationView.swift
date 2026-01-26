@@ -24,7 +24,7 @@ struct SMSVerificationView: View {
             .padding(.top, UIConstants.Spacing.xxxl)
 
             CodeInputField(code: $viewModel.code)
-                .onChange(of: viewModel.code) { _, newValue in
+                .onChange(of: viewModel.code) { newValue in
                     if newValue.count == 6 {
                         Task {
                             await viewModel.verify()
@@ -84,7 +84,7 @@ struct SMSVerificationView: View {
         } message: {
             Text(viewModel.errorMessage)
         }
-        .onChange(of: viewModel.loginResult) { _, result in
+        .onChange(of: viewModel.loginResult) { result in
             if let result = result {
                 authManager.login(with: result)
             }
@@ -106,7 +106,7 @@ struct CodeInputField: View {
                 .textContentType(.oneTimeCode)
                 .focused($isFocused)
                 .opacity(0)
-                .onChange(of: code) { _, newValue in
+                .onChange(of: code) { newValue in
                     if newValue.count > 6 {
                         code = String(newValue.prefix(6))
                     }

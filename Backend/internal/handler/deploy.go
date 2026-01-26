@@ -226,10 +226,17 @@ func (h *DeployHandler) deployWeb(url string) error {
 	return nil
 }
 
-// downloadFile 下载文件
+// downloadFile 下载文件（支持代理）
 func (h *DeployHandler) downloadFile(url, dest string) error {
+	// 如果配置了代理且是 GitHub 地址，使用代理
+	downloadURL := url
+	if h.cfg.Proxy != "" && strings.Contains(url, "github.com") {
+		downloadURL = h.cfg.Proxy + url
+		h.logger.Info("使用代理下载", zap.String("proxy", h.cfg.Proxy))
+	}
+
 	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(url)
+	resp, err := client.Get(downloadURL)
 	if err != nil {
 		return err
 	}

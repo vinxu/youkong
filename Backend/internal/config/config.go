@@ -30,6 +30,7 @@ type DeployConfig struct {
 	GitHubRepo string // GitHub 仓库 (owner/repo)
 	WorkDir    string // 工作目录
 	WebDir     string // 前端静态文件目录
+	Proxy      string // GitHub 下载代理（国内服务器需要）
 }
 
 type ServerConfig struct {
@@ -114,6 +115,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("DEPLOY_GITHUB_REPO", "vinxu/youkong")
 	viper.SetDefault("DEPLOY_WORK_DIR", "/opt/youkong")
 	viper.SetDefault("DEPLOY_WEB_DIR", "/opt/youkong/web")
+	viper.SetDefault("DEPLOY_PROXY", "https://ghproxy.net/")
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -172,6 +174,7 @@ func Load() (*Config, error) {
 			GitHubRepo: viper.GetString("DEPLOY_GITHUB_REPO"),
 			WorkDir:    viper.GetString("DEPLOY_WORK_DIR"),
 			WebDir:     viper.GetString("DEPLOY_WEB_DIR"),
+			Proxy:      viper.GetString("DEPLOY_PROXY"),
 		},
 	}
 

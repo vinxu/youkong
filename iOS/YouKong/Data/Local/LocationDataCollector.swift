@@ -11,12 +11,12 @@ class LocationDataCollector: NSObject, ObservableObject {
     @Published private(set) var isMonitoring = false
 
     private let locationManager = CLLocationManager()
-    private var currentLocation: CLLocation?
+    private(set) var currentLocation: CLLocation?
     private var arrivalTime: Date?
 
-    // 学习到的地点
-    private var homeLocation: CLLocation?
-    private var workLocation: CLLocation?
+    // 学习到的地点（公开给调试视图）
+    private(set) var homeLocation: CLLocation?
+    private(set) var workLocation: CLLocation?
 
     private let homeLocationKey = "learnedHomeLocation"
     private let workLocationKey = "learnedWorkLocation"

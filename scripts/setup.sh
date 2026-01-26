@@ -127,7 +127,9 @@ fi
 echo "最新版本: $TAG_NAME"
 
 # 下载 backend
-BACKEND_URL="https://github.com/${GITHUB_REPO}/releases/download/${TAG_NAME}/youkong-backend.tar.gz"
+# 使用代理加速下载（腾讯云访问 GitHub 不稳定）
+PROXY="https://ghproxy.net/"
+BACKEND_URL="${PROXY}https://github.com/${GITHUB_REPO}/releases/download/${TAG_NAME}/youkong-backend.tar.gz"
 echo "下载 backend: $BACKEND_URL"
 curl -L -o /tmp/youkong-backend.tar.gz "$BACKEND_URL"
 tar -xzf /tmp/youkong-backend.tar.gz -C "$WORK_DIR"
@@ -135,7 +137,7 @@ chmod +x "$WORK_DIR/youkong-server"
 rm /tmp/youkong-backend.tar.gz
 
 # 下载 web
-WEB_URL="https://github.com/${GITHUB_REPO}/releases/download/${TAG_NAME}/youkong-web.tar.gz"
+WEB_URL="${PROXY}https://github.com/${GITHUB_REPO}/releases/download/${TAG_NAME}/youkong-web.tar.gz"
 echo "下载 web: $WEB_URL"
 curl -L -o /tmp/youkong-web.tar.gz "$WEB_URL"
 mkdir -p /tmp/youkong-web-extract
