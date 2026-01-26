@@ -111,18 +111,21 @@ func (h *DeployHandler) Deploy(c *gin.Context) {
 		}
 	}
 
-	// 重启服务
-	if err := h.restartService(); err != nil {
-		h.logger.Error("重启服务失败", zap.Error(err))
-		response.Error(c, response.CodeInternalError, "重启服务失败: "+err.Error())
-		return
-	}
+	h.logger.Info("部署完成，准备重启", zap.String("tag", release.TagName))
 
-	h.logger.Info("部署完成", zap.String("tag", release.TagName))
+	// 先返回响应，再异步重启（避免重启导致连接断开）
 	response.Success(c, gin.H{
-		"message": "部署成功",
+		"message": "部署成功，服务即将重启",
 		"version": release.TagName,
 	})
+
+	// 异步重启服务（延迟 1 秒确保响应已发送）
+	go func() {
+		time.Sleep(1 * time.Second)
+		if err := h.restartService(); err != nil {
+			h.logger.Error("重启服务失败", zap.Error(err))
+		}
+	}()
 }
 
 // getLatestRelease 获取最新 release

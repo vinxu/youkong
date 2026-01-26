@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(FamilyControls)
+import FamilyControls
+#endif
 
 // MARK: - Friends List View
 
@@ -143,11 +146,43 @@ struct MyAgentDataSheet: View {
     @State private var workCoordinate: (lat: Double, lng: Double)?
     @State private var extensionMinutes: Int = 0
     @State private var extensionLastUpdate: Date?
+    @State private var showAppPicker = false
+    @State private var selectedAppCount = 0
+    @State private var selectedCategoryCount = 0
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+
+                    // 应用选择（关键！）
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("需要选择要监控的应用才能获取屏幕时间数据")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            row("已选应用", value: "\(selectedAppCount) 个")
+                            row("已选分类", value: "\(selectedCategoryCount) 个")
+
+                            Button {
+                                showAppPicker = true
+                            } label: {
+                                HStack {
+                                    Image(systemName: "plus.app")
+                                    Text("选择要监控的应用")
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(Color.blue)
+                                .foregroundColor(.white)
+                                .cornerRadius(8)
+                            }
+                        }
+                    } label: {
+                        Label("应用选择", systemImage: "apps.iphone")
+                            .font(.headline)
+                    }
 
                     // 屏幕使用数据
                     GroupBox {
@@ -196,6 +231,15 @@ struct MyAgentDataSheet: View {
                         VStack(alignment: .leading, spacing: 12) {
                             row("屏幕时间", value: "\(extensionMinutes) 分钟")
                             row("更新时间", value: extensionLastUpdate?.formatted(.dateTime.hour().minute().second()) ?? "无")
+
+                            Divider()
+
+                            // 测试按钮：手动写入数据测试 App Group
+                            Button("测试写入 (模拟 Extension)") {
+                                testWriteToAppGroup()
+                            }
+                            .font(.caption)
+                            .foregroundColor(.orange)
                         }
                     } label: {
                         Label("Extension 数据", systemImage: "app.badge")
@@ -231,13 +275,47 @@ struct MyAgentDataSheet: View {
             .onAppear {
                 loadData()
             }
+            .familyActivityPicker(isPresented: $showAppPicker, selection: pickerSelection)
+            .onChange(of: showAppPicker) { newValue in
+                if !newValue {
+                    // Picker 关闭后保存选择并刷新
+                    saveSelectionAndReload()
+                }
+            }
         }
+    }
+
+    #if canImport(FamilyControls)
+    @available(iOS 16.0, *)
+    private var pickerSelection: Binding<FamilyActivitySelection> {
+        Binding(
+            get: { ScreenDataCollector.shared.activitySelection },
+            set: { ScreenDataCollector.shared.activitySelection = $0 }
+        )
+    }
+    #endif
+
+    private func saveSelectionAndReload() {
+        #if canImport(FamilyControls)
+        if #available(iOS 16.0, *) {
+            ScreenDataCollector.shared.saveSelection()
+            loadData()
+        }
+        #endif
     }
 
     private func loadData() {
         // 屏幕数据
         let screen = ScreenDataCollector.shared
         screenStatus = screen.currentStatus
+
+        // 选择的应用数量
+        #if canImport(FamilyControls)
+        if #available(iOS 16.0, *) {
+            selectedAppCount = screen.activitySelection.applicationTokens.count
+            selectedCategoryCount = screen.activitySelection.categoryTokens.count
+        }
+        #endif
 
         // 位置数据
         let location = LocationDataCollector.shared
@@ -257,6 +335,20 @@ struct MyAgentDataSheet: View {
         if let defaults = UserDefaults(suiteName: "group.com.youkong.app") {
             extensionMinutes = defaults.integer(forKey: "screenTimeMinutes")
             extensionLastUpdate = defaults.object(forKey: "screenTimeLastUpdate") as? Date
+        }
+    }
+
+    private func testWriteToAppGroup() {
+        // 模拟 Extension 写入数据，测试 App Group 是否正常
+        if let defaults = UserDefaults(suiteName: "group.com.youkong.app") {
+            defaults.set(99, forKey: "screenTimeMinutes")
+            defaults.set(Date(), forKey: "screenTimeLastUpdate")
+            defaults.synchronize()
+            print("Test write to App Group completed")
+            // 重新加载
+            loadData()
+        } else {
+            print("Failed to access App Group")
         }
     }
 

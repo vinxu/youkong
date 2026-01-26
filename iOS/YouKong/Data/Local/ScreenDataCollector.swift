@@ -20,6 +20,11 @@ class ScreenDataCollector: ObservableObject {
     @Published private(set) var isMonitoring = false
     @Published private(set) var isAuthorized = false
 
+    #if canImport(FamilyControls)
+    @available(iOS 16.0, *)
+    @Published var activitySelection = FamilyActivitySelection()
+    #endif
+
     private var sessionStartTime: Date?
     private var lastActiveTime: Date?
     private var screenOnMinutes: Int = 0  // 通过回调累计的屏幕使用时间
@@ -28,10 +33,12 @@ class ScreenDataCollector: ObservableObject {
     private let appGroupId = "group.com.youkong.app"
     private let screenTimeKey = "screenTimeMinutes"
     private let lastUpdateKey = "screenTimeLastUpdate"
+    private let selectionKey = "familyActivitySelection"
 
     private init() {
         setupNotifications()
         loadSharedData()
+        loadSelection()
     }
 
     deinit {
@@ -73,6 +80,58 @@ class ScreenDataCollector: ObservableObject {
         #endif
         isAuthorized = true
     }
+
+    // MARK: - Selection Management
+
+    #if canImport(FamilyControls)
+    @available(iOS 16.0, *)
+    func saveSelection() {
+        guard let defaults = UserDefaults(suiteName: appGroupId) else { return }
+
+        do {
+            let data = try JSONEncoder().encode(activitySelection)
+            defaults.set(data, forKey: selectionKey)
+            defaults.synchronize()
+            print("Activity selection saved")
+
+            // 重新启动监控以应用新选择
+            if isMonitoring {
+                stopMonitoring()
+                startMonitoring()
+            }
+        } catch {
+            print("Failed to save activity selection: \(error)")
+        }
+    }
+
+    @available(iOS 16.0, *)
+    var hasSelection: Bool {
+        !activitySelection.applicationTokens.isEmpty || !activitySelection.categoryTokens.isEmpty
+    }
+    #endif
+
+    private func loadSelection() {
+        #if canImport(FamilyControls)
+        if #available(iOS 16.0, *) {
+            loadSelectionImpl()
+        }
+        #endif
+    }
+
+    #if canImport(FamilyControls)
+    @available(iOS 16.0, *)
+    private func loadSelectionImpl() {
+        guard let defaults = UserDefaults(suiteName: appGroupId),
+              let data = defaults.data(forKey: selectionKey) else { return }
+
+        do {
+            activitySelection = try JSONDecoder().decode(FamilyActivitySelection.self, from: data)
+            print("Activity selection loaded: \(activitySelection.applicationTokens.count) apps, \(activitySelection.categoryTokens.count) categories")
+        } catch {
+            print("Failed to load activity selection: \(error)")
+        }
+    }
+    #endif
 
     // MARK: - Monitoring
 
@@ -118,6 +177,9 @@ class ScreenDataCollector: ObservableObject {
     private func startDeviceActivityMonitoring() {
         let center = DeviceActivityCenter()
 
+        // 先停止之前的监控
+        center.stopMonitoring()
+
         // 设置每日监控计划
         let schedule = DeviceActivitySchedule(
             intervalStart: DateComponents(hour: 0, minute: 0),
@@ -125,15 +187,30 @@ class ScreenDataCollector: ObservableObject {
             repeats: true
         )
 
-        // 设置多个阈值事件（5分钟、10分钟、15分钟...直到120分钟）
-        // 每当用户屏幕使用时间达到阈值，Extension 会收到回调
+        // 设置多个阈值事件（1分钟开始，便于测试）
         var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [:]
 
-        for minutes in stride(from: 5, through: 120, by: 5) {
-            let eventName = DeviceActivityEvent.Name("screenTime_\(minutes)min")
-            events[eventName] = DeviceActivityEvent(
-                threshold: DateComponents(minute: minutes)
-            )
+        // 如果用户选择了应用/分类，使用选择的内容
+        if hasSelection {
+            // 从 1 分钟开始，每分钟一个阈值（便于测试）
+            for minutes in [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120] {
+                let eventName = DeviceActivityEvent.Name("screenTime_\(minutes)min")
+                events[eventName] = DeviceActivityEvent(
+                    applications: activitySelection.applicationTokens,
+                    categories: activitySelection.categoryTokens,
+                    threshold: DateComponents(minute: minutes)
+                )
+            }
+            print("Monitoring with selection: \(activitySelection.applicationTokens.count) apps, \(activitySelection.categoryTokens.count) categories")
+        } else {
+            // 没有选择，使用简单的时间阈值（可能不会触发）
+            for minutes in [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120] {
+                let eventName = DeviceActivityEvent.Name("screenTime_\(minutes)min")
+                events[eventName] = DeviceActivityEvent(
+                    threshold: DateComponents(minute: minutes)
+                )
+            }
+            print("Monitoring without selection (may not trigger)")
         }
 
         do {
@@ -142,7 +219,7 @@ class ScreenDataCollector: ObservableObject {
                 during: schedule,
                 events: events
             )
-            print("Device Activity monitoring started")
+            print("Device Activity monitoring started with \(events.count) events")
         } catch {
             print("Failed to start Device Activity monitoring: \(error)")
         }
@@ -151,7 +228,7 @@ class ScreenDataCollector: ObservableObject {
     @available(iOS 16.0, *)
     private func stopDeviceActivityMonitoring() {
         let center = DeviceActivityCenter()
-        center.stopMonitoring([.daily])
+        center.stopMonitoring()
     }
     #endif
 

@@ -6,6 +6,7 @@ on:
     paths:
       - 'Backend/**'
       - 'Web/**'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
