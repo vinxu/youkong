@@ -82,6 +82,7 @@ func main() {
 	wechatRepo := repository.NewWechatRepository(db)
 	invitationRepo := repository.NewInvitationRepository(db)
 	friendshipRepo := repository.NewFriendshipRepository(db)
+	friendRequestRepo := repository.NewFriendRequestRepository(db)
 	memoryRepo := repository.NewMemoryRepository(db)
 
 	// 初始化微信客户端
@@ -105,7 +106,7 @@ func main() {
 	conversationService := service.NewConversationService(messageRepo, userRepo)
 	wechatService := service.NewWechatService(wechatRepo, userRepo, invitationRepo, friendshipRepo, circleRepo, wechatClient, jwtManager)
 	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
-	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo)
+	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo, friendRequestRepo)
 
 	// 初始化 LLM 客户端
 	var llmClient *llm.OpenRouterClient
@@ -230,6 +231,13 @@ func main() {
 				friends.GET("/invited-by-me", friendshipHandler.GetInvitedByMe)
 				friends.GET("/invited-me", friendshipHandler.GetInvitedMe)
 				friends.GET("/free-probability", agentHandler.GetFreeProbability)
+
+				// 好友请求
+				friends.POST("/request", friendshipHandler.SendFriendRequest)
+				friends.GET("/requests/received", friendshipHandler.GetReceivedRequests)
+				friends.GET("/requests/sent", friendshipHandler.GetSentRequests)
+				friends.POST("/requests/:id/handle", friendshipHandler.HandleFriendRequest)
+				friends.GET("/requests/count", friendshipHandler.GetPendingRequestCount)
 			}
 
 			// Agent 模块

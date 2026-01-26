@@ -12,10 +12,11 @@ import (
 )
 
 type FriendshipService struct {
-	friendshipRepo *repository.FriendshipRepository
-	userRepo       *repository.UserRepository
-	invitationRepo *repository.InvitationRepository
-	circleRepo     *repository.CircleRepository
+	friendshipRepo     *repository.FriendshipRepository
+	userRepo           *repository.UserRepository
+	invitationRepo     *repository.InvitationRepository
+	circleRepo         *repository.CircleRepository
+	friendRequestRepo  *repository.FriendRequestRepository
 }
 
 func NewFriendshipService(
@@ -23,12 +24,14 @@ func NewFriendshipService(
 	userRepo *repository.UserRepository,
 	invitationRepo *repository.InvitationRepository,
 	circleRepo *repository.CircleRepository,
+	friendRequestRepo *repository.FriendRequestRepository,
 ) *FriendshipService {
 	return &FriendshipService{
-		friendshipRepo: friendshipRepo,
-		userRepo:       userRepo,
-		invitationRepo: invitationRepo,
-		circleRepo:     circleRepo,
+		friendshipRepo:    friendshipRepo,
+		userRepo:          userRepo,
+		invitationRepo:    invitationRepo,
+		circleRepo:        circleRepo,
+		friendRequestRepo: friendRequestRepo,
 	}
 }
 
@@ -322,4 +325,229 @@ func (s *FriendshipService) AddFriendWithInvitation(ctx context.Context, userID,
 	_ = s.friendshipRepo.Create(ctx, friendship2)
 
 	return nil
+}
+
+// ==================== 好友请求相关方法 ====================
+
+// SendFriendRequest 发送好友请求
+func (s *FriendshipService) SendFriendRequest(ctx context.Context, fromUserID, phone, message string) (*model.SendFriendRequestResponse, error) {
+	// 1. 根据手机号查找用户
+	toUser, err := s.userRepo.GetByPhone(ctx, phone)
+	if err != nil {
+		return nil, fmt.Errorf("查询用户失败: %w", err)
+	}
+	if toUser == nil {
+		return nil, fmt.Errorf("该手机号未注册")
+	}
+
+	// 2. 不能添加自己
+	if toUser.ID == fromUserID {
+		return nil, fmt.Errorf("不能添加自己为好友")
+	}
+
+	// 3. 检查是否已是好友
+	areFriends, err := s.friendshipRepo.AreFriends(ctx, fromUserID, toUser.ID)
+	if err != nil {
+		return nil, fmt.Errorf("检查好友状态失败: %w", err)
+	}
+	if areFriends {
+		return &model.SendFriendRequestResponse{
+			User:   toUser.ToProfile(),
+			Status: "ALREADY_FRIENDS",
+		}, nil
+	}
+
+	// 4. 检查是否已有待处理的请求
+	existingRequest, err := s.friendRequestRepo.GetPendingRequest(ctx, fromUserID, toUser.ID)
+	if err != nil {
+		return nil, fmt.Errorf("检查请求状态失败: %w", err)
+	}
+	if existingRequest != nil {
+		return &model.SendFriendRequestResponse{
+			RequestID: existingRequest.ID,
+			User:      toUser.ToProfile(),
+			Status:    "ALREADY_REQUESTED",
+		}, nil
+	}
+
+	// 5. 检查对方是否已经向我发送了请求（如果是，直接同意）
+	reverseRequest, err := s.friendRequestRepo.GetPendingRequest(ctx, toUser.ID, fromUserID)
+	if err != nil {
+		return nil, fmt.Errorf("检查请求状态失败: %w", err)
+	}
+	if reverseRequest != nil {
+		// 对方已经向我发送请求，直接同意并成为好友
+		if err := s.acceptFriendRequest(ctx, reverseRequest); err != nil {
+			return nil, err
+		}
+		return &model.SendFriendRequestResponse{
+			RequestID: reverseRequest.ID,
+			User:      toUser.ToProfile(),
+			Status:    "ACCEPTED",
+		}, nil
+	}
+
+	// 6. 创建新的好友请求
+	request := &model.FriendRequest{
+		ID:         uuid.New().String(),
+		FromUserID: fromUserID,
+		ToUserID:   toUser.ID,
+		Message:    message,
+		Status:     model.FriendRequestStatusPending,
+	}
+	if err := s.friendRequestRepo.Create(ctx, request); err != nil {
+		return nil, fmt.Errorf("创建好友请求失败: %w", err)
+	}
+
+	return &model.SendFriendRequestResponse{
+		RequestID: request.ID,
+		User:      toUser.ToProfile(),
+		Status:    "PENDING",
+	}, nil
+}
+
+// GetReceivedRequests 获取收到的好友请求
+func (s *FriendshipService) GetReceivedRequests(ctx context.Context, userID string) ([]*model.FriendRequestInfo, error) {
+	requests, err := s.friendRequestRepo.GetReceivedRequests(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("获取好友请求失败: %w", err)
+	}
+
+	// 获取发送者信息
+	userIDs := make([]string, 0, len(requests))
+	for _, req := range requests {
+		userIDs = append(userIDs, req.FromUserID)
+	}
+
+	users, err := s.userRepo.GetByIDs(ctx, userIDs)
+	if err != nil {
+		return nil, fmt.Errorf("获取用户信息失败: %w", err)
+	}
+
+	userMap := make(map[string]*model.User)
+	for _, u := range users {
+		userMap[u.ID] = u
+	}
+
+	result := make([]*model.FriendRequestInfo, 0, len(requests))
+	for _, req := range requests {
+		if user, ok := userMap[req.FromUserID]; ok {
+			result = append(result, &model.FriendRequestInfo{
+				ID:        req.ID,
+				User:      user.ToProfile(),
+				Message:   req.Message,
+				Status:    string(req.Status),
+				CreatedAt: req.CreatedAt,
+			})
+		}
+	}
+
+	return result, nil
+}
+
+// GetSentRequests 获取发出的好友请求
+func (s *FriendshipService) GetSentRequests(ctx context.Context, userID string) ([]*model.FriendRequestInfo, error) {
+	requests, err := s.friendRequestRepo.GetSentRequests(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("获取好友请求失败: %w", err)
+	}
+
+	// 获取接收者信息
+	userIDs := make([]string, 0, len(requests))
+	for _, req := range requests {
+		userIDs = append(userIDs, req.ToUserID)
+	}
+
+	users, err := s.userRepo.GetByIDs(ctx, userIDs)
+	if err != nil {
+		return nil, fmt.Errorf("获取用户信息失败: %w", err)
+	}
+
+	userMap := make(map[string]*model.User)
+	for _, u := range users {
+		userMap[u.ID] = u
+	}
+
+	result := make([]*model.FriendRequestInfo, 0, len(requests))
+	for _, req := range requests {
+		if user, ok := userMap[req.ToUserID]; ok {
+			result = append(result, &model.FriendRequestInfo{
+				ID:        req.ID,
+				User:      user.ToProfile(),
+				Message:   req.Message,
+				Status:    string(req.Status),
+				CreatedAt: req.CreatedAt,
+			})
+		}
+	}
+
+	return result, nil
+}
+
+// HandleFriendRequest 处理好友请求（同意/拒绝）
+func (s *FriendshipService) HandleFriendRequest(ctx context.Context, userID, requestID string, accept bool) error {
+	// 1. 获取请求
+	request, err := s.friendRequestRepo.GetByID(ctx, requestID)
+	if err != nil {
+		return fmt.Errorf("获取请求失败: %w", err)
+	}
+	if request == nil {
+		return fmt.Errorf("请求不存在")
+	}
+
+	// 2. 验证是否是接收者
+	if request.ToUserID != userID {
+		return fmt.Errorf("无权操作此请求")
+	}
+
+	// 3. 验证状态
+	if request.Status != model.FriendRequestStatusPending {
+		return fmt.Errorf("请求已处理")
+	}
+
+	if accept {
+		return s.acceptFriendRequest(ctx, request)
+	} else {
+		return s.friendRequestRepo.UpdateStatus(ctx, requestID, model.FriendRequestStatusRejected)
+	}
+}
+
+// acceptFriendRequest 接受好友请求并创建好友关系
+func (s *FriendshipService) acceptFriendRequest(ctx context.Context, request *model.FriendRequest) error {
+	// 1. 更新请求状态
+	if err := s.friendRequestRepo.UpdateStatus(ctx, request.ID, model.FriendRequestStatusAccepted); err != nil {
+		return fmt.Errorf("更新请求状态失败: %w", err)
+	}
+
+	// 2. 创建双向好友关系
+	now := time.Now()
+	friendship1 := &model.Friendship{
+		ID:        uuid.New().String(),
+		UserID:    request.FromUserID,
+		FriendID:  request.ToUserID,
+		Source:    model.FriendshipSourceRequest,
+		CreatedAt: now,
+	}
+	friendship2 := &model.Friendship{
+		ID:        uuid.New().String(),
+		UserID:    request.ToUserID,
+		FriendID:  request.FromUserID,
+		Source:    model.FriendshipSourceRequest,
+		CreatedAt: now,
+	}
+
+	if err := s.friendshipRepo.Create(ctx, friendship1); err != nil {
+		return fmt.Errorf("创建好友关系失败: %w", err)
+	}
+	if err := s.friendshipRepo.Create(ctx, friendship2); err != nil {
+		_ = s.friendshipRepo.Delete(ctx, request.FromUserID, request.ToUserID)
+		return fmt.Errorf("创建好友关系失败: %w", err)
+	}
+
+	return nil
+}
+
+// GetPendingRequestCount 获取待处理请求数量
+func (s *FriendshipService) GetPendingRequestCount(ctx context.Context, userID string) (int, error) {
+	return s.friendRequestRepo.GetPendingCount(ctx, userID)
 }
