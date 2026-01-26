@@ -11,6 +11,7 @@ const (
 	FriendshipSourceInvitation FriendshipSource = "INVITATION"
 	FriendshipSourceSearch     FriendshipSource = "SEARCH"
 	FriendshipSourceManual     FriendshipSource = "MANUAL"
+	FriendshipSourceContacts   FriendshipSource = "CONTACTS"
 )
 
 type Friendship struct {

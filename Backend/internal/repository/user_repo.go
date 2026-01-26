@@ -97,3 +97,18 @@ func (r *UserRepository) SearchByNickname(ctx context.Context, keyword string, l
 	err := r.db.SelectContext(ctx, &users, query, "%"+keyword+"%", limit)
 	return users, err
 }
+
+// GetByPhoneHashes 根据手机号Hash批量查询用户
+func (r *UserRepository) GetByPhoneHashes(ctx context.Context, phoneHashes []string) ([]*model.User, error) {
+	if len(phoneHashes) == 0 {
+		return []*model.User{}, nil
+	}
+	query, args, err := sqlx.In(`SELECT * FROM users WHERE phone_hash IN (?)`, phoneHashes)
+	if err != nil {
+		return nil, err
+	}
+	query = r.db.Rebind(query)
+	var users []*model.User
+	err = r.db.SelectContext(ctx, &users, query, args...)
+	return users, err
+}

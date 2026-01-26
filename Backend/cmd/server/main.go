@@ -101,6 +101,7 @@ func main() {
 	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
 	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo)
 	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo)
+	contactService := service.NewContactService(userRepo, friendshipRepo)
 
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
@@ -111,6 +112,7 @@ func main() {
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
 	friendshipHandler := handler.NewFriendshipHandler(friendshipService)
 	agentHandler := handler.NewAgentHandler(agentService)
+	contactHandler := handler.NewContactHandler(contactService)
 
 	// 设置Gin模式
 	gin.SetMode(cfg.Server.Mode)
@@ -212,6 +214,13 @@ func main() {
 			{
 				agent.POST("/status", agentHandler.ReportStatus)
 				agent.POST("/query", agentHandler.QueryAgentData)
+			}
+
+			// 通讯录模块
+			contacts := authorized.Group("/contacts")
+			{
+				contacts.POST("/match", contactHandler.MatchContacts)
+				contacts.POST("/add-friends", contactHandler.BatchAddFriends)
 			}
 		}
 	}
