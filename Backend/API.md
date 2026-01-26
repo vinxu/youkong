@@ -1054,7 +1054,136 @@ interface FriendRecommendation {
 
 ---
 
-## 九、WebSocket 连接（预留）
+## 九、好友模块 `/friends`
+
+> 以下接口需要认证
+
+### 9.1 获取好友列表
+
+**GET** `/friends`
+
+**响应数据**
+```typescript
+interface FriendInfo {
+  user: UserProfile
+  source: 'INVITATION' | 'SEARCH' | 'CONTACTS' | 'MANUAL'
+  createdAt: string
+}
+
+type GetFriendsResponse = FriendInfo[]
+```
+
+---
+
+### 9.2 通过手机号加好友
+
+**POST** `/friends/add-by-phone`
+
+> 直接通过手机号添加好友，无需对方确认
+
+**请求参数**
+```typescript
+interface AddFriendByPhoneRequest {
+  phone: string   // 手机号，11位数字
+}
+```
+
+**响应数据**
+```typescript
+interface AddFriendByPhoneResponse {
+  user: UserProfile   // 好友信息
+  added: boolean      // true=新添加, false=已是好友
+}
+```
+
+**示例**
+```json
+// 请求
+{ "phone": "13800000002" }
+
+// 响应（成功添加）
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "user": {
+      "id": "user-002",
+      "nickname": "小红",
+      "avatar": "https://..."
+    },
+    "added": true
+  }
+}
+
+// 响应（已是好友）
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "user": {
+      "id": "user-002",
+      "nickname": "小红",
+      "avatar": "https://..."
+    },
+    "added": false
+  }
+}
+```
+
+**错误情况**
+| 错误 | message |
+|------|---------|
+| 手机号未注册 | `该手机号未注册` |
+| 添加自己 | `不能添加自己为好友` |
+| 格式错误 | `手机号格式错误，需要11位数字` |
+
+---
+
+### 9.3 删除好友
+
+**DELETE** `/friends/:userId`
+
+**响应数据**
+```json
+{ "code": 0, "message": "成功", "data": { "message": "已删除好友" } }
+```
+
+---
+
+### 9.4 我邀请的好友
+
+**GET** `/friends/invited-by-me`
+
+> 获取通过我的邀请链接添加的好友
+
+**响应数据**
+```typescript
+interface FriendWithInvitation {
+  user: UserProfile
+  source: string
+  circleName?: string   // 通过哪个圈子邀请的
+  createdAt: string
+}
+
+type GetInvitedByMeResponse = FriendWithInvitation[]
+```
+
+---
+
+### 9.5 邀请我的好友
+
+**GET** `/friends/invited-me`
+
+> 获取邀请我的好友列表
+
+**响应数据**
+```typescript
+// 同上 FriendWithInvitation[]
+```
+
+---
+
+## 十、WebSocket 连接（预留）
 
 ```
 ws://api.youkong.app/ws?token=<jwt_token>
