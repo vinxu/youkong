@@ -1,0 +1,58 @@
+# Android
+Android/.gradle/
+Android/app/build/
+Android/build/
+Android/.idea/
+Android/local.properties
+*.apk
+*.aab
+
+# iOS
+iOS/build/
+iOS/Pods/
+iOS/*.xcworkspace
+iOS/DerivedData/
+
+# Binaries
+Backend/server
+Backend/youkong-server
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Environment
+Backend/.env
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Dependencies
+Backend/vendor/
+
+# Build
+dist/
+build/
+
+# Test
+coverage.out
+*.test
+
+# Temporary
+tmp/
+temp/
