@@ -28,8 +28,8 @@ jobs:
         run: |
           cd Backend
           go mod download
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o youkong-server ./cmd/server/...
-          tar -czvf youkong-backend.tar.gz youkong-server internal/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o server ./cmd/server/...
+          tar -czvf youkong-backend.tar.gz server migrations/
 
       - name: Upload Backend Artifact
         uses: actions/upload-artifact@v4

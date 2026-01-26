@@ -231,6 +231,76 @@ journalctl -u youkong -f    # 查看日志
 - 邀请页面: `http://49.232.13.41:8080/i/CODE`
 - API 健康检查: `http://49.232.13.41:8080/health`
 
+### 手动部署（自动部署失败时）
+
+自动部署可能因为网络问题失败，需要手动更新：
+
+```bash
+# 1. SSH 登录服务器
+ssh root@49.232.13.41
+# 密码: Xuxuheng-43
+
+# 2. 下载最新 release（注意：文件是 tar.gz 压缩包）
+cd /opt/youkong
+curl -L -o backend.tar.gz "https://github.com/vinxu/youkong/releases/latest/download/youkong-backend.tar.gz"
+
+# 3. 解压并重启
+tar -xzf backend.tar.gz
+chmod +x server
+systemctl restart youkong
+
+# 4. 检查服务状态
+systemctl status youkong
+```
+
+### 部署常见问题
+
+| 问题 | 原因 | 解决方案 |
+|------|------|----------|
+| 服务启动失败 (status=203/EXEC) | 下载的文件不是可执行文件 | 用 `file server` 检查，重新下载 |
+| 下载的是 HTML/ASCII 文件 | 代理失败或重定向问题 | 直接从 GitHub 下载，加 `-L` 参数 |
+| 代理 (ghproxy.net) 连接失败 | 代理不稳定 | 直接用 GitHub 源地址 |
+| 数据库表不存在 | 迁移未执行 | 手动执行 SQL（见下方） |
+| 接口返回数据缺少字段 | 代码未更新或配置缺失 | 检查 release 版本和 .env 配置 |
+
+### 数据库迁移（手动）
+
+**migrations 文件不会自动部署到服务器**，新增表需要手动执行：
+
+```bash
+# 登录 MySQL（Ubuntu 上可免密）
+sudo mysql youkong
+
+# 然后粘贴 SQL 语句执行
+# 完成后输入 exit 退出
+```
+
+### 服务器环境变量
+
+`/opt/youkong/.env` 需要包含以下配置：
+
+```bash
+# 必需
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=
+DB_NAME=youkong
+
+REDIS_HOST=localhost
+REDIS_PORT=6379
+
+JWT_SECRET=<你的密钥>
+
+# LLM（智能分析需要）
+LLM_API_KEY=sk-or-v1-xxx  # OpenRouter API Key
+
+# 部署相关
+DEPLOY_TOKEN=<webhook token>
+DEPLOY_WORK_DIR=/opt/youkong
+DEPLOY_WEB_DIR=/opt/youkong/web
+```
+
 ## API 接口
 
 > 详细接口文档见 `Backend/API.md`
