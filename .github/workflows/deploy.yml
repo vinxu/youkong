@@ -1,14 +1,14 @@
-name: Deploy to Tencent Cloud
+name: Build and Release
 
 on:
   push:
     branches: [main]
     paths:
       - 'Backend/**'
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -20,51 +20,27 @@ jobs:
         with:
           go-version: '1.21'
 
-      - name: Build
+      - name: Build Linux Binary
         run: |
           cd Backend
           go mod download
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o server ./cmd/server/...
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o youkong-server ./cmd/server/...
+          tar -czvf youkong-backend.tar.gz youkong-server internal/
 
-      - name: Deploy to Server
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          password: ${{ secrets.SERVER_PASSWORD }}
-          script: |
-            cd /opt/youkong
-            pkill -f "./server" || true
+          name: youkong-backend
+          path: Backend/youkong-backend.tar.gz
 
-      - name: Upload Binary
-        uses: appleboy/scp-action@v0.1.7
+      - name: Create Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v1
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          password: ${{ secrets.SERVER_PASSWORD }}
-          source: "Backend/server"
-          target: "/opt/youkong/"
-          strip_components: 1
-
-      - name: Upload Source Files
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          password: ${{ secrets.SERVER_PASSWORD }}
-          source: "Backend/internal/"
-          target: "/opt/youkong/"
-          strip_components: 1
-
-      - name: Start Server
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          password: ${{ secrets.SERVER_PASSWORD }}
-          script: |
-            cd /opt/youkong
-            chmod +x server
-            nohup ./server > server.log 2>&1 &
-            sleep 3
-            curl -s http://localhost:8080/health && echo "Deploy success!" || echo "Deploy failed!"
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          files: Backend/youkong-backend.tar.gz
+          body: |
+            Auto build from commit ${{ github.sha }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
