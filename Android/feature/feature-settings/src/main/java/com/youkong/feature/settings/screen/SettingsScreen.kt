@@ -55,6 +55,7 @@ import com.youkong.feature.settings.viewmodel.SettingsViewModel
 fun SettingsScreen(
     onBackClick: () -> Unit,
     onPermissionSetupClick: () -> Unit,
+    onAgentDataClick: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -116,6 +117,11 @@ fun SettingsScreen(
                         subtitle = "允许收集屏幕使用和位置数据以预测有空状态",
                         checked = uiState.isDataCollectionEnabled,
                         onCheckedChange = { viewModel.setDataCollectionEnabled(it) },
+                    )
+                    SettingsClickItem(
+                        title = "我的 Agent 数据",
+                        subtitle = "查看当前收集到的数据",
+                        onClick = onAgentDataClick,
                     )
                 }
             }

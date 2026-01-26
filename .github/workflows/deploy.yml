@@ -97,10 +97,13 @@ jobs:
       - name: Trigger Deploy Webhook
         run: |
           echo "Waiting for release to be available..."
-          sleep 10
+          sleep 15
 
           echo "Triggering deploy webhook..."
-          response=$(curl -s -w "\n%{http_code}" -X POST "http://49.232.13.41:8080/deploy?token=${{ secrets.DEPLOY_TOKEN }}")
+          echo "Token length: ${#DEPLOY_TOKEN}"
+
+          # 增加超时时间到 5 分钟（部署需要下载文件）
+          response=$(curl -s -w "\n%{http_code}" --max-time 300 -X POST "http://49.232.13.41:8080/deploy?token=${DEPLOY_TOKEN}")
           http_code=$(echo "$response" | tail -n1)
           body=$(echo "$response" | head -n -1)
 
@@ -113,3 +116,5 @@ jobs:
           fi
 
           echo "Deploy triggered successfully!"
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
