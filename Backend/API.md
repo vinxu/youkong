@@ -1397,6 +1397,174 @@ type GetInvitedByMeResponse = FriendWithInvitation[]
 
 ---
 
+### 10.6 发送好友请求
+
+**POST** `/friends/request`
+
+> 通过手机号发送好友请求，需要对方确认
+
+**请求参数**
+```typescript
+interface SendFriendRequestRequest {
+  phone: string     // 手机号，11位数字
+  message?: string  // 附言（可选，最多200字）
+}
+```
+
+**响应数据**
+```typescript
+interface SendFriendRequestResponse {
+  requestId: string       // 请求ID
+  user: UserProfile       // 目标用户信息
+  status: 'PENDING' | 'ALREADY_FRIENDS' | 'ALREADY_REQUESTED'
+}
+```
+
+**示例**
+```json
+// 请求
+{ "phone": "13800000002", "message": "我是小明，认识一下" }
+
+// 响应（发送成功）
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "requestId": "req-001",
+    "user": {
+      "id": "user-002",
+      "nickname": "小红",
+      "avatar": "https://..."
+    },
+    "status": "PENDING"
+  }
+}
+
+// 响应（已是好友）
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "requestId": "",
+    "user": { ... },
+    "status": "ALREADY_FRIENDS"
+  }
+}
+```
+
+**错误情况**
+| 错误 | message |
+|------|---------|
+| 手机号未注册 | `该手机号未注册` |
+| 添加自己 | `不能添加自己为好友` |
+| 格式错误 | `手机号格式错误，需要11位数字` |
+
+---
+
+### 10.7 获取收到的好友请求
+
+**GET** `/friends/requests/received`
+
+> 获取他人发给我的好友请求（待处理）
+
+**响应数据**
+```typescript
+interface FriendRequestInfo {
+  id: string              // 请求ID
+  user: UserProfile       // 对方用户信息
+  message?: string        // 附言
+  status: 'PENDING' | 'ACCEPTED' | 'REJECTED' | 'CANCELLED'
+  createdAt: string       // ISO 8601
+}
+
+type GetReceivedRequestsResponse = FriendRequestInfo[]
+```
+
+**示例响应**
+```json
+{
+  "code": 0,
+  "message": "成功",
+  "data": [
+    {
+      "id": "req-001",
+      "user": {
+        "id": "user-003",
+        "nickname": "小李",
+        "avatar": "https://..."
+      },
+      "message": "我是小李，加个好友",
+      "status": "PENDING",
+      "createdAt": "2026-01-27T10:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+### 10.8 获取发出的好友请求
+
+**GET** `/friends/requests/sent`
+
+> 获取我发出的好友请求
+
+**响应数据**
+```typescript
+// 同上 FriendRequestInfo[]
+```
+
+---
+
+### 10.9 处理好友请求
+
+**POST** `/friends/requests/:id/handle`
+
+> 同意或拒绝好友请求
+
+**路径参数**
+| 参数 | 说明 |
+|------|------|
+| id | 请求ID |
+
+**请求参数**
+```typescript
+interface HandleFriendRequestRequest {
+  accept: boolean   // true=同意, false=拒绝
+}
+```
+
+**响应数据**
+```json
+// 同意
+{ "code": 0, "message": "成功", "data": { "message": "已同意，你们已成为好友" } }
+
+// 拒绝
+{ "code": 0, "message": "成功", "data": { "message": "已拒绝" } }
+```
+
+**错误情况**
+| 错误 | message |
+|------|---------|
+| 请求不存在 | `好友请求不存在` |
+| 不是发给自己的 | `无权处理此请求` |
+| 已处理 | `该请求已处理` |
+
+---
+
+### 10.10 获取待处理请求数量
+
+**GET** `/friends/requests/count`
+
+> 获取收到的待处理好友请求数量（用于显示红点）
+
+**响应数据**
+```json
+{ "code": 0, "message": "成功", "data": { "count": 3 } }
+```
+
+---
+
 ## 十一、WebSocket 连接（预留）
 
 ```
