@@ -7,5 +7,6 @@ android {
 }
 
 dependencies {
-    // Additional dependencies if needed
+    implementation(project(":core:core-agent"))
+    implementation(project(":core:core-network"))
 }

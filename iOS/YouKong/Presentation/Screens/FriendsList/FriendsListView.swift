@@ -151,38 +151,94 @@ struct MyAgentDataSheet: View {
     @State private var selectedAppCount = 0
     @State private var selectedCategoryCount = 0
 
+    // LLM 预测结果
+    @State private var analysisResult: AnalysisData?
+    @State private var isUploading = false
+    @State private var uploadError: String?
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
 
-                    // 应用选择（关键！）
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("需要选择要监控的应用才能获取屏幕时间数据")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                    // LLM 预测结果（顶部突出显示）
+                    if let analysis = analysisResult {
+                        GroupBox {
+                            VStack(spacing: 16) {
+                                // 生活状态 emoji
+                                Text(analysis.lifeStatus.emoji)
+                                    .font(.system(size: 60))
 
-                            row("已选应用", value: "\(selectedAppCount) 个")
-                            row("已选分类", value: "\(selectedCategoryCount) 个")
+                                // 生活状态标签
+                                Text(analysis.lifeStatus.label)
+                                    .font(.title3)
+                                    .fontWeight(.medium)
 
-                            Button {
-                                showAppPicker = true
-                            } label: {
-                                HStack {
-                                    Image(systemName: "plus.app")
-                                    Text("选择要监控的应用")
+                                // 有空概率
+                                HStack(spacing: 8) {
+                                    Text("\(analysis.availability.probability)%")
+                                        .font(.system(size: 32, weight: .bold))
+                                        .foregroundColor(probabilityColor(analysis.availability.probability))
+
+                                    Text(analysis.availability.status)
+                                        .font(.headline)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 4)
+                                        .background(probabilityColor(analysis.availability.probability).opacity(0.2))
+                                        .cornerRadius(12)
                                 }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 10)
-                                .background(Color.blue)
-                                .foregroundColor(.white)
-                                .cornerRadius(8)
+
+                                // 理由
+                                Text(analysis.availability.reason)
+                                    .font(.body)
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+
+                                // 置信度
+                                HStack {
+                                    Text("置信度:")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    Text(analysis.availability.confidence)
+                                        .font(.caption)
+                                        .fontWeight(.medium)
+                                }
                             }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                        } label: {
+                            Label("LLM 预测结果", systemImage: "brain.head.profile")
+                                .font(.headline)
+                        }
+                    }
+
+                    // 上报按钮
+                    Button {
+                        Task {
+                            await uploadAndPredict()
                         }
                     } label: {
-                        Label("应用选择", systemImage: "apps.iphone")
-                            .font(.headline)
+                        HStack {
+                            if isUploading {
+                                ProgressView()
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: "arrow.up.circle.fill")
+                            }
+                            Text(isUploading ? "上报中..." : "上报数据并获取预测")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(isUploading ? Color.gray : Color.primaryGreen)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                    }
+                    .disabled(isUploading)
+
+                    if let error = uploadError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundColor(.red)
                     }
 
                     // 屏幕使用数据
@@ -192,6 +248,10 @@ struct MyAgentDataSheet: View {
                             row("活动类型", value: activityTypeText(screenStatus.activityType))
                             row("本次使用时长", value: "\(screenStatus.sessionDurationMinutes) 分钟")
                             row("上次活跃", value: screenStatus.lastActiveMinutesAgo == 0 ? "刚刚" : "\(screenStatus.lastActiveMinutesAgo) 分钟前")
+                            if let category = screenStatus.lastActiveCategory, !category.isEmpty {
+                                row("最近使用分类", value: category)
+                                    .foregroundColor(.blue)
+                            }
                         }
                     } label: {
                         Label("屏幕使用", systemImage: "iphone")
@@ -249,33 +309,27 @@ struct MyAgentDataSheet: View {
                             row("屏幕时间", value: "\(extensionMinutes) 分钟")
                             row("更新时间", value: extensionLastUpdate?.formatted(.dateTime.hour().minute().second()) ?? "无")
 
-                            Divider()
-
-                            // 测试按钮：手动写入数据测试 App Group
-                            Button("测试写入 (模拟 Extension)") {
-                                testWriteToAppGroup()
+                            Button("清除测试数据") {
+                                clearTestData()
                             }
                             .font(.caption)
-                            .foregroundColor(.orange)
+                            .foregroundColor(.red)
                         }
                     } label: {
                         Label("Extension 数据", systemImage: "app.badge")
                             .font(.headline)
                     }
 
-                    // 刷新按钮
+                    // 刷新本地数据按钮
                     Button {
                         loadData()
                     } label: {
                         HStack {
                             Image(systemName: "arrow.clockwise")
-                            Text("刷新数据")
+                            Text("刷新本地数据")
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.primaryGreen)
-                        .foregroundColor(.white)
-                        .cornerRadius(12)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     }
                 }
                 .padding()
@@ -289,36 +343,10 @@ struct MyAgentDataSheet: View {
                     }
                 }
             }
-            .onAppear {
-                loadData()
-            }
-            .familyActivityPicker(isPresented: $showAppPicker, selection: pickerSelection)
-            .onChange(of: showAppPicker) { newValue in
-                if !newValue {
-                    // Picker 关闭后保存选择并刷新
-                    saveSelectionAndReload()
-                }
+            .task {
+                await uploadAndPredict()
             }
         }
-    }
-
-    #if canImport(FamilyControls)
-    @available(iOS 16.0, *)
-    private var pickerSelection: Binding<FamilyActivitySelection> {
-        Binding(
-            get: { ScreenDataCollector.shared.activitySelection },
-            set: { ScreenDataCollector.shared.activitySelection = $0 }
-        )
-    }
-    #endif
-
-    private func saveSelectionAndReload() {
-        #if canImport(FamilyControls)
-        if #available(iOS 16.0, *) {
-            ScreenDataCollector.shared.saveSelection()
-            loadData()
-        }
-        #endif
     }
 
     private func loadData() {
@@ -359,17 +387,85 @@ struct MyAgentDataSheet: View {
         }
     }
 
-    private func testWriteToAppGroup() {
-        // 模拟 Extension 写入数据，测试 App Group 是否正常
-        if let defaults = UserDefaults(suiteName: "group.com.youkong.app") {
-            defaults.set(99, forKey: "screenTimeMinutes")
-            defaults.set(Date(), forKey: "screenTimeLastUpdate")
-            defaults.synchronize()
-            print("Test write to App Group completed")
-            // 重新加载
-            loadData()
-        } else {
-            print("Failed to access App Group")
+    private func uploadAndPredict() async {
+        loadData()  // 先刷新本地数据
+
+        isUploading = true
+        uploadError = nil
+
+        print("📤 [Agent] 开始上报数据...")
+
+        // 构建请求数据（按 API 规范分组）
+        let screenData = ScreenRequestData(
+            isActive: screenStatus.isActive,
+            activityType: screenStatus.activityType.rawValue,
+            sessionDurationMinutes: screenStatus.sessionDurationMinutes,
+            lastActiveMinutesAgo: screenStatus.lastActiveMinutesAgo,
+            lastActiveCategory: screenStatus.lastActiveCategory
+        )
+
+        let locationData = LocationRequestData(
+            placeType: locationStatus.placeType.rawValue,
+            atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes
+        )
+
+        let batteryData = BatteryRequestData(
+            batteryLevel: Int(deviceStatus.batteryLevel * 100),
+            batteryState: deviceStatus.batteryState.rawValue,
+            isCharging: deviceStatus.isCharging
+        )
+
+        let modeData = ModeRequestData(
+            isLowPowerMode: deviceStatus.isLowPowerMode,
+            isFocusModeOn: deviceStatus.isFocusModeOn
+        )
+
+        let connectionData = ConnectionRequestData(
+            isHeadphonesConnected: deviceStatus.isHeadphonesConnected,
+            networkType: deviceStatus.networkType.rawValue
+        )
+
+        let displayData = DisplayRequestData(
+            screenBrightness: deviceStatus.screenBrightness
+        )
+
+        let request = StatusReportRequest(
+            screen: screenData,
+            location: locationData,
+            battery: batteryData,
+            mode: modeData,
+            connection: connectionData,
+            display: displayData
+        )
+
+        do {
+            let repo = AgentRepositoryImpl()
+            print("📤 [Agent] 发送请求到服务器...")
+            let response = try await repo.reportStatus(request: request)
+            print("✅ [Agent] 收到响应: success=\(response.success)")
+            if let analysis = response.analysis {
+                print("✅ [Agent] 预测结果: \(analysis.lifeStatus.emoji) \(analysis.lifeStatus.label)")
+                print("✅ [Agent] 有空概率: \(analysis.availability.probability)% - \(analysis.availability.reason)")
+            } else {
+                print("⚠️ [Agent] 响应中没有 analysis 数据")
+            }
+            analysisResult = response.analysis
+        } catch {
+            uploadError = "上报失败: \(error.localizedDescription)"
+            print("❌ [Agent] 上报失败: \(error)")
+        }
+
+        isUploading = false
+    }
+
+    private func probabilityColor(_ probability: Int) -> Color {
+        switch probability {
+        case 80...100: return Color(hex: "#22C55E") ?? .green
+        case 60..<80: return Color(hex: "#86EFAC") ?? .green.opacity(0.7)
+        case 40..<60: return Color(hex: "#FACC15") ?? .yellow
+        case 20..<40: return Color(hex: "#FB923C") ?? .orange
+        case 0..<20: return Color(hex: "#EF4444") ?? .red
+        default: return .gray
         }
     }
 
@@ -417,6 +513,16 @@ struct MyAgentDataSheet: View {
         case .cellular: return "蜂窝网络"
         case .none: return "无网络"
         case .unknown: return "未知"
+        }
+    }
+
+    private func clearTestData() {
+        if let defaults = UserDefaults(suiteName: "group.com.youkong.app") {
+            defaults.removeObject(forKey: "screenTimeMinutes")
+            defaults.removeObject(forKey: "screenTimeLastUpdate")
+            defaults.synchronize()
+            print("🗑️ [Agent] 测试数据已清除")
+            loadData()
         }
     }
 }

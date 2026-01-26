@@ -18,8 +18,11 @@ import com.youkong.core.agent.model.LocalLocationData
 import com.youkong.core.agent.model.PlaceType
 import com.youkong.core.network.api.AgentApi
 import com.youkong.core.network.model.AgentStatusRequest
-import com.youkong.core.network.model.DeviceStateRequest
+import com.youkong.core.network.model.BatteryDataRequest
+import com.youkong.core.network.model.ConnectionDataRequest
+import com.youkong.core.network.model.DisplayDataRequest
 import com.youkong.core.network.model.LocationDataRequest
+import com.youkong.core.network.model.ModeDataRequest
 import com.youkong.core.network.model.ScreenDataRequest
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -47,15 +50,20 @@ class DataCollectWorker @AssistedInject constructor(
             val locationData = locationCollector.collect()
             val deviceStateData = deviceStateCollector.collect()
 
-            // 转换并上报
+            // 转换并上报（使用新的扩展格式）
             val request = AgentStatusRequest(
                 screen = screenData?.let { convertScreenData(it) },
                 location = locationData?.let { convertLocationData(it) },
-                device = convertDeviceState(deviceStateData),
+                battery = convertBatteryData(deviceStateData),
+                mode = convertModeData(deviceStateData),
+                connection = convertConnectionData(deviceStateData),
+                display = convertDisplayData(deviceStateData),
             )
 
             // 只有当有数据时才上报
-            if (request.screen != null || request.location != null || request.device != null) {
+            if (request.screen != null || request.location != null ||
+                request.battery != null || request.mode != null ||
+                request.connection != null || request.display != null) {
                 agentApi.reportStatus(request)
             }
 
@@ -109,15 +117,36 @@ class DataCollectWorker @AssistedInject constructor(
         )
     }
 
-    private fun convertDeviceState(data: DeviceStateData): DeviceStateRequest {
-        return DeviceStateRequest(
-            isDndEnabled = data.isDoNotDisturbEnabled,
-            isCharging = data.isCharging,
+    private fun convertBatteryData(data: DeviceStateData): BatteryDataRequest {
+        val batteryState = when {
+            data.isCharging && data.batteryLevel >= 100 -> "full"
+            data.isCharging -> "charging"
+            else -> "unplugged"
+        }
+        return BatteryDataRequest(
             batteryLevel = data.batteryLevel,
-            isPowerSaveMode = data.isPowerSaveMode,
+            batteryState = batteryState,
+            isCharging = data.isCharging,
+        )
+    }
+
+    private fun convertModeData(data: DeviceStateData): ModeDataRequest {
+        return ModeDataRequest(
+            isLowPowerMode = data.isPowerSaveMode,
+            isFocusModeOn = data.isDoNotDisturbEnabled,
+        )
+    }
+
+    private fun convertConnectionData(data: DeviceStateData): ConnectionDataRequest {
+        return ConnectionDataRequest(
             isHeadphonesConnected = data.isHeadphonesConnected,
             networkType = data.networkType.name.lowercase(),
-            ringerMode = data.ringerMode,
+        )
+    }
+
+    private fun convertDisplayData(data: DeviceStateData): DisplayDataRequest {
+        return DisplayDataRequest(
+            screenBrightness = data.screenBrightness,
         )
     }
 

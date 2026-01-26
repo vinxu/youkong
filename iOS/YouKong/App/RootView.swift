@@ -4,6 +4,7 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var authManager: AuthManager
+    @EnvironmentObject private var deepLinkManager: DeepLinkManager
     @StateObject private var permissionManager = PermissionManager.shared
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
 
@@ -25,6 +26,13 @@ struct RootView: View {
         }
         .animation(.easeInOut, value: authManager.isAuthenticated)
         .animation(.easeInOut, value: hasCompletedOnboarding)
+        .sheet(isPresented: $deepLinkManager.showInvitationSheet) {
+            if let code = deepLinkManager.pendingInvitationCode {
+                AcceptInvitationView(code: code) {
+                    deepLinkManager.clearPendingInvitation()
+                }
+            }
+        }
         #if DEBUG
         .withNetworkOverlay()
         .withDebugButton()
@@ -59,10 +67,53 @@ struct RootView: View {
     private func reportStatus() async {
         let screenStatus = ScreenDataCollector.shared.getCurrentStatus()
         let locationStatus = LocationDataCollector.shared.getCurrentStatus()
+        let deviceStatus = DeviceStatusCollector.shared.getCurrentStatus()
+
+        let screenData = ScreenRequestData(
+            isActive: screenStatus.isActive,
+            activityType: screenStatus.activityType.rawValue,
+            sessionDurationMinutes: screenStatus.sessionDurationMinutes,
+            lastActiveMinutesAgo: screenStatus.lastActiveMinutesAgo,
+            lastActiveCategory: screenStatus.lastActiveCategory
+        )
+
+        let locationData = LocationRequestData(
+            placeType: locationStatus.placeType.rawValue,
+            atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes
+        )
+
+        let batteryData = BatteryRequestData(
+            batteryLevel: Int(deviceStatus.batteryLevel * 100),
+            batteryState: deviceStatus.batteryState.rawValue,
+            isCharging: deviceStatus.isCharging
+        )
+
+        let modeData = ModeRequestData(
+            isLowPowerMode: deviceStatus.isLowPowerMode,
+            isFocusModeOn: deviceStatus.isFocusModeOn
+        )
+
+        let connectionData = ConnectionRequestData(
+            isHeadphonesConnected: deviceStatus.isHeadphonesConnected,
+            networkType: deviceStatus.networkType.rawValue
+        )
+
+        let displayData = DisplayRequestData(
+            screenBrightness: deviceStatus.screenBrightness
+        )
+
+        let request = StatusReportRequest(
+            screen: screenData,
+            location: locationData,
+            battery: batteryData,
+            mode: modeData,
+            connection: connectionData,
+            display: displayData
+        )
 
         do {
             let repository = AgentRepositoryImpl()
-            try await repository.reportStatus(screen: screenStatus, location: locationStatus)
+            _ = try await repository.reportStatus(request: request)
         } catch {
             print("Failed to report status: \(error)")
         }

@@ -17,6 +17,24 @@ struct ProfileView: View {
 
                 VStack(spacing: 0) {
                     ProfileMenuItem(
+                        icon: "person.badge.plus",
+                        title: "邀请好友",
+                        destination: AnyView(InvitationListView())
+                    )
+
+                    Divider()
+                        .padding(.leading, 56)
+
+                    ProfileMenuItem(
+                        icon: "person.2",
+                        title: "好友管理",
+                        destination: AnyView(FriendsManagementView())
+                    )
+
+                    Divider()
+                        .padding(.leading, 56)
+
+                    ProfileMenuItem(
                         icon: "gearshape",
                         title: "设置",
                         destination: AnyView(SettingsView())

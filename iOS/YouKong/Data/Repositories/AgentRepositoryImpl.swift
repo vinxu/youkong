@@ -9,9 +9,9 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
 
     // MARK: - Report Status
 
-    func reportStatus(screen: ScreenStatus, location: LocationStatus) async throws {
-        let endpoint = APIEndpoint.reportAgentStatus(screen: screen, location: location)
-        let _: EmptyResponse = try await apiClient.request(endpoint)
+    func reportStatus(request: StatusReportRequest) async throws -> StatusReportResponse {
+        let endpoint = APIEndpoint.reportAgentStatus(request: request)
+        return try await apiClient.request(endpoint)
     }
 
     // MARK: - Get Friends Free Probability

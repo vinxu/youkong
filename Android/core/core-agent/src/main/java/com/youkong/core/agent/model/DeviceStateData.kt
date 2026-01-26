@@ -13,6 +13,7 @@ data class DeviceStateData(
     val isHeadphonesConnected: Boolean,   // 耳机连接
     val networkType: NetworkType,         // 网络类型
     val ringerMode: String,               // 响铃模式: silent, vibrate, normal
+    val screenBrightness: Float,          // 屏幕亮度 (0.0-1.0)
     val timestamp: Instant,               // 数据获取时间
 )
 

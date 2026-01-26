@@ -130,15 +130,16 @@ type StatusReportResponse struct {
 
 // EnhancedFriendRecommendation 增强的好友推荐（带生活状态）
 type EnhancedFriendRecommendation struct {
-	FriendID    string      `json:"friend_id"`
-	Name        string      `json:"name"`
-	Avatar      string      `json:"avatar,omitempty"`
-	Probability int         `json:"probability"`
-	Confidence  string      `json:"confidence"`
-	Reason      string      `json:"reason"`
-	Color       string      `json:"color"`
-	LifeStatus  *LifeStatus `json:"life_status,omitempty"`
-	UpdatedAt   int64       `json:"updated_at"`
+	FriendID    string `json:"friend_id"`
+	Name        string `json:"name"`
+	Avatar      string `json:"avatar,omitempty"`
+	Probability int    `json:"probability"`
+	Confidence  string `json:"confidence"`
+	Reason      string `json:"reason"`
+	Color       string `json:"color"`
+	Emoji       string `json:"emoji,omitempty"`    // 生活状态 emoji
+	Activity    string `json:"activity,omitempty"` // 正在做什么
+	UpdatedAt   int64  `json:"updated_at"`
 }
 
 // EnhancedFreeProbabilityResponse 增强的有空概率响应

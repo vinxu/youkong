@@ -21,7 +21,7 @@ interface InvitationApi {
     @GET("invitations")
     suspend fun getMyInvitations(): ApiResponse<List<InvitationResponse>>
 
-    @GET("invitations/{code}")
+    @GET("invite/{code}")
     suspend fun getPublicInvitation(@Path("code") code: String): ApiResponse<PublicInvitationResponse>
 
     @GET("invitations/{id}")

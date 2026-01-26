@@ -28,6 +28,8 @@ import com.youkong.feature.profile.navigation.navigateToProfile
 import com.youkong.feature.profile.navigation.profileScreen
 import com.youkong.feature.settings.navigation.ONBOARDING_PERMISSION_ROUTE
 import com.youkong.feature.settings.navigation.navigateToOnboardingPermission
+import com.youkong.feature.settings.navigation.navigateToAgentData
+import com.youkong.feature.settings.navigation.navigateToInvitation
 import com.youkong.feature.settings.navigation.navigateToSettings
 import com.youkong.feature.settings.navigation.settingsGraph
 
@@ -106,6 +108,12 @@ fun YouKongNavHost(
             },
             onNavigateToSettings = {
                 navController.navigateToSettings()
+            },
+            onNavigateToAgentData = {
+                navController.navigateToAgentData()
+            },
+            onNavigateToInvitation = {
+                navController.navigateToInvitation()
             },
         )
 

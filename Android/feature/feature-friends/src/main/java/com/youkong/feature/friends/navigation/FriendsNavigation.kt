@@ -15,11 +15,15 @@ fun NavController.navigateToFriends(navOptions: NavOptions? = null) {
 fun NavGraphBuilder.friendsScreen(
     onNavigateToChat: (userId: String) -> Unit,
     onNavigateToSettings: () -> Unit,
+    onNavigateToAgentData: () -> Unit,
+    onNavigateToInvitation: () -> Unit,
 ) {
     composable(route = FRIENDS_ROUTE) {
         FriendsListScreen(
             onNavigateToChat = onNavigateToChat,
             onNavigateToSettings = onNavigateToSettings,
+            onNavigateToAgentData = onNavigateToAgentData,
+            onNavigateToInvitation = onNavigateToInvitation,
         )
     }
 }

@@ -34,6 +34,12 @@ class ScreenDataCollector: ObservableObject {
     private let screenTimeKey = "screenTimeMinutes"
     private let lastUpdateKey = "screenTimeLastUpdate"
     private let selectionKey = "familyActivitySelection"
+    private let lastCategoryKey = "lastActiveCategory"
+    private let lastCategoryTimeKey = "lastActiveCategoryTime"
+
+    // 最近活跃的应用分类
+    @Published private(set) var lastActiveCategory: String = ""
+    @Published private(set) var lastActiveCategoryTime: Date?
 
     private init() {
         setupNotifications()
@@ -187,12 +193,11 @@ class ScreenDataCollector: ObservableObject {
             repeats: true
         )
 
-        // 设置多个阈值事件（1分钟开始，便于测试）
         var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [:]
 
-        // 如果用户选择了应用/分类，使用选择的内容
+        // 方案1: 如果用户选择了应用/分类，同时监控用户选择 + 预定义分类
         if hasSelection {
-            // 从 1 分钟开始，每分钟一个阈值（便于测试）
+            // 监控用户选择的应用和分类（用于总屏幕时间）
             for minutes in [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120] {
                 let eventName = DeviceActivityEvent.Name("screenTime_\(minutes)min")
                 events[eventName] = DeviceActivityEvent(
@@ -201,16 +206,13 @@ class ScreenDataCollector: ObservableObject {
                     threshold: DateComponents(minute: minutes)
                 )
             }
-            print("Monitoring with selection: \(activitySelection.applicationTokens.count) apps, \(activitySelection.categoryTokens.count) categories")
-        } else {
-            // 没有选择，使用简单的时间阈值（可能不会触发）
-            for minutes in [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120] {
-                let eventName = DeviceActivityEvent.Name("screenTime_\(minutes)min")
-                events[eventName] = DeviceActivityEvent(
-                    threshold: DateComponents(minute: minutes)
-                )
-            }
-            print("Monitoring without selection (may not trigger)")
+            print("Monitoring user selection: \(activitySelection.applicationTokens.count) apps, \(activitySelection.categoryTokens.count) categories")
+        }
+
+        // 注意：预定义分类监控需要用户通过 FamilyActivityPicker 选择
+        // 选择后，分类信息会包含在 activitySelection.categoryTokens 中
+        if !activitySelection.categoryTokens.isEmpty {
+            print("Monitoring \(activitySelection.categoryTokens.count) selected categories")
         }
 
         do {
@@ -247,6 +249,10 @@ class ScreenDataCollector: ObservableObject {
         } else {
             screenOnMinutes = 0
         }
+
+        // 加载最近活跃的应用分类
+        lastActiveCategory = defaults.string(forKey: lastCategoryKey) ?? ""
+        lastActiveCategoryTime = defaults.object(forKey: lastCategoryTimeKey) as? Date
     }
 
     /// 供 Extension 调用：记录屏幕使用时间达到了某个阈值
@@ -256,6 +262,15 @@ class ScreenDataCollector: ObservableObject {
 
         defaults.set(minutes, forKey: "screenTimeMinutes")
         defaults.set(Date(), forKey: "screenTimeLastUpdate")
+        defaults.synchronize()
+    }
+
+    /// 供 Extension 调用：记录触发阈值的应用分类
+    static func recordCategoryActivity(category: String) {
+        guard let defaults = UserDefaults(suiteName: "group.com.youkong.app") else { return }
+
+        defaults.set(category, forKey: "lastActiveCategory")
+        defaults.set(Date(), forKey: "lastActiveCategoryTime")
         defaults.synchronize()
     }
 
@@ -322,10 +337,13 @@ class ScreenDataCollector: ObservableObject {
             lastActiveMinutesAgo = 0
         }
 
-        // 根据屏幕使用时间推断活动类型
+        // 根据应用分类推断活动类型
         let activityType: ActivityType
         if !isActive && lastActiveMinutesAgo > 5 {
             activityType = .idle
+        } else if !lastActiveCategory.isEmpty {
+            // 基于应用分类判断活动类型
+            activityType = inferActivityType(from: lastActiveCategory)
         } else if sessionDuration > 30 {
             activityType = .entertainment  // 长时间使用，可能在刷手机
         } else if sessionDuration > 10 {
@@ -334,12 +352,36 @@ class ScreenDataCollector: ObservableObject {
             activityType = .idle
         }
 
+        // 获取最近的分类信息（如果5分钟内有效）
+        let validCategory: String?
+        if let categoryTime = lastActiveCategoryTime,
+           Date().timeIntervalSince(categoryTime) < 300 {  // 5分钟内有效
+            validCategory = lastActiveCategory.isEmpty ? nil : lastActiveCategory
+        } else {
+            validCategory = nil
+        }
+
         currentStatus = ScreenStatus(
             isActive: isActive || screenOnMinutes > 0,
             activityType: activityType,
             sessionDurationMinutes: sessionDuration,
-            lastActiveMinutesAgo: isActive ? 0 : lastActiveMinutesAgo
+            lastActiveMinutesAgo: isActive ? 0 : lastActiveMinutesAgo,
+            lastActiveCategory: validCategory
         )
+    }
+
+    /// 根据应用分类推断活动类型
+    private func inferActivityType(from category: String) -> ActivityType {
+        switch category {
+        case "游戏", "娱乐", "照片和视频", "音乐":
+            return .entertainment
+        case "社交", "通讯":
+            return .communication
+        case "效率", "教育", "工具", "财务":
+            return .productivity
+        default:
+            return .idle
+        }
     }
 }
 

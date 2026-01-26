@@ -36,4 +36,14 @@ extension Container {
         Factory(self) { ContactRepositoryImpl() }
             .singleton
     }
+
+    var invitationRepository: Factory<InvitationRepositoryProtocol> {
+        Factory(self) { InvitationRepositoryImpl() }
+            .singleton
+    }
+
+    var friendshipRepository: Factory<FriendshipRepositoryProtocol> {
+        Factory(self) { FriendshipRepositoryImpl() }
+            .singleton
+    }
 }

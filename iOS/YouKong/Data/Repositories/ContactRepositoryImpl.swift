@@ -12,21 +12,60 @@ class ContactRepositoryImpl: ContactRepositoryProtocol {
     // MARK: - Get Contact Friends
 
     func getContactFriends() async throws -> [UserProfile] {
-        // 暂时返回空数组，因为后端 /contacts/sync 接口尚未实现
-        // TODO: 后端实现后取消注释以下代码
-        // let phoneNumbers = try await contactsManager.fetchAllPhoneNumbers()
-        // return try await syncContacts(phones: phoneNumbers)
-        return []
+        // 获取通讯录并匹配已注册用户
+        let phoneNumbers = try await contactsManager.fetchAllPhoneNumbers()
+        let hashes = phoneNumbers.map { $0.sha256Hash }
+        let response = try await matchContacts(phoneHashes: hashes)
+        return response.matches.map { $0.user }
     }
 
     // MARK: - Sync Contacts
 
     func syncContacts(phones: [String]) async throws -> [UserProfile] {
-        // 后端接口尚未实现，暂时返回空数组
-        // TODO: 后端实现后取消注释以下代码
-        // let endpoint = APIEndpoint.syncContacts(phones: phones)
-        // let response: SyncContactsResponse = try await apiClient.request(endpoint)
-        // return response.friends
-        return []
+        let endpoint = APIEndpoint.syncContacts(phones: phones)
+        let response: SyncContactsResponse = try await apiClient.request(endpoint)
+        return response.friends
+    }
+
+    // MARK: - Match Contacts (隐私保护方式)
+
+    func matchContacts(phoneHashes: [String]) async throws -> ContactMatchResponse {
+        let endpoint = APIEndpoint.matchContacts(phoneHashes: phoneHashes)
+        return try await apiClient.request(endpoint)
+    }
+
+    // MARK: - Add Friends (批量)
+
+    func addFriends(userIds: [String]) async throws -> AddFriendsResponse {
+        let endpoint = APIEndpoint.addFriends(userIds: userIds)
+        return try await apiClient.request(endpoint)
+    }
+
+    // MARK: - Friend Requests (好友请求流程)
+
+    func sendFriendRequest(phone: String, message: String?) async throws -> SendFriendRequestResponse {
+        let endpoint = APIEndpoint.sendFriendRequest(phone: phone, message: message)
+        return try await apiClient.request(endpoint)
+    }
+
+    func getReceivedRequests() async throws -> [FriendRequest] {
+        let endpoint = APIEndpoint.getReceivedFriendRequests
+        return try await apiClient.request(endpoint)
+    }
+
+    func getSentRequests() async throws -> [FriendRequest] {
+        let endpoint = APIEndpoint.getSentFriendRequests
+        return try await apiClient.request(endpoint)
+    }
+
+    func handleFriendRequest(requestId: String, accept: Bool) async throws -> HandleFriendRequestResponse {
+        let endpoint = APIEndpoint.handleFriendRequest(requestId: requestId, accept: accept)
+        return try await apiClient.request(endpoint)
+    }
+
+    func getPendingRequestCount() async throws -> Int {
+        let endpoint = APIEndpoint.getPendingRequestCount
+        let response: FriendRequestCountResponse = try await apiClient.request(endpoint)
+        return response.count
     }
 }

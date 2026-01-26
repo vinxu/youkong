@@ -6,6 +6,7 @@ import androidx.navigation.NavOptions
 import androidx.navigation.compose.composable
 import androidx.navigation.navigation
 import com.youkong.feature.settings.screen.AgentDataScreen
+import com.youkong.feature.settings.screen.InvitationScreen
 import com.youkong.feature.settings.screen.PermissionSetupScreen
 import com.youkong.feature.settings.screen.SettingsScreen
 
@@ -14,6 +15,7 @@ const val SETTINGS_ROUTE = "settings"
 const val PERMISSION_SETUP_ROUTE = "permission_setup"
 const val ONBOARDING_PERMISSION_ROUTE = "onboarding_permission"
 const val AGENT_DATA_ROUTE = "agent_data"
+const val INVITATION_ROUTE = "invitation"
 
 fun NavController.navigateToSettings(navOptions: NavOptions? = null) {
     navigate(SETTINGS_GRAPH_ROUTE, navOptions)
@@ -31,6 +33,10 @@ fun NavController.navigateToAgentData(navOptions: NavOptions? = null) {
     navigate(AGENT_DATA_ROUTE, navOptions)
 }
 
+fun NavController.navigateToInvitation(navOptions: NavOptions? = null) {
+    navigate(INVITATION_ROUTE, navOptions)
+}
+
 fun NavGraphBuilder.settingsGraph(
     navController: NavController,
 ) {
@@ -43,6 +49,7 @@ fun NavGraphBuilder.settingsGraph(
                 onBackClick = { navController.popBackStack() },
                 onPermissionSetupClick = { navController.navigateToPermissionSetup() },
                 onAgentDataClick = { navController.navigateToAgentData() },
+                onInvitationClick = { navController.navigateToInvitation() },
             )
         }
 
@@ -55,6 +62,12 @@ fun NavGraphBuilder.settingsGraph(
 
         composable(route = AGENT_DATA_ROUTE) {
             AgentDataScreen(
+                onBackClick = { navController.popBackStack() },
+            )
+        }
+
+        composable(route = INVITATION_ROUTE) {
+            InvitationScreen(
                 onBackClick = { navController.popBackStack() },
             )
         }

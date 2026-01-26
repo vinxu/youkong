@@ -103,8 +103,7 @@ extension APIEndpoint {
 
     // MARK: - Agent
 
-    static func reportAgentStatus(screen: ScreenStatus, location: LocationStatus) -> APIEndpoint {
-        let request = StatusReportRequest(screen: screen, location: location)
+    static func reportAgentStatus(request: StatusReportRequest) -> APIEndpoint {
         return APIEndpoint(
             path: "/api/v1/agent/status",
             method: .post,
@@ -134,6 +133,52 @@ extension APIEndpoint {
         )
     }
 
+    static func matchContacts(phoneHashes: [String]) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/contacts/match",
+            method: .post,
+            body: ContactMatchRequest(phoneHashes: phoneHashes)
+        )
+    }
+
+    static func addFriends(userIds: [String]) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/contacts/add-friends",
+            method: .post,
+            body: AddFriendsRequest(userIds: userIds)
+        )
+    }
+
+    // MARK: - Friend Requests (好友请求流程)
+
+    static func sendFriendRequest(phone: String, message: String?) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/friends/request",
+            method: .post,
+            body: SendFriendRequestRequest(phone: phone, message: message)
+        )
+    }
+
+    static var getReceivedFriendRequests: APIEndpoint {
+        APIEndpoint(path: "/api/v1/friends/requests/received")
+    }
+
+    static var getSentFriendRequests: APIEndpoint {
+        APIEndpoint(path: "/api/v1/friends/requests/sent")
+    }
+
+    static func handleFriendRequest(requestId: String, accept: Bool) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/friends/requests/\(requestId)/handle",
+            method: .post,
+            body: HandleFriendRequestRequest(accept: accept)
+        )
+    }
+
+    static var getPendingRequestCount: APIEndpoint {
+        APIEndpoint(path: "/api/v1/friends/requests/count")
+    }
+
     // MARK: - Friends
 
     static var getFriends: APIEndpoint {
@@ -142,6 +187,57 @@ extension APIEndpoint {
 
     static func deleteFriend(userId: String) -> APIEndpoint {
         APIEndpoint(path: "/api/v1/friends/\(userId)", method: .delete)
+    }
+
+    static var getFriendsInvitedByMe: APIEndpoint {
+        APIEndpoint(path: "/api/v1/friends/invited-by-me")
+    }
+
+    static var getFriendsInvitedMe: APIEndpoint {
+        APIEndpoint(path: "/api/v1/friends/invited-me")
+    }
+
+    // MARK: - Invitations
+
+    static func createInvitation(request: CreateInvitationRequest) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/invitations",
+            method: .post,
+            body: request
+        )
+    }
+
+    static var getMyInvitations: APIEndpoint {
+        APIEndpoint(path: "/api/v1/invitations")
+    }
+
+    static func getInvitationByCode(code: String) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/invite/\(code)",
+            requiresAuth: false
+        )
+    }
+
+    static func acceptInvitation(code: String) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/invite/\(code)/accept",
+            method: .post
+        )
+    }
+
+    static func disableInvitation(id: String) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/invitations/\(id)",
+            method: .delete
+        )
+    }
+
+    static func getInvitationPoster(id: String) -> APIEndpoint {
+        APIEndpoint(path: "/api/v1/invitations/\(id)/poster")
+    }
+
+    static func getInvitationQRCode(id: String) -> APIEndpoint {
+        APIEndpoint(path: "/api/v1/invitations/\(id)/qrcode")
     }
 }
 

@@ -58,3 +58,25 @@ enum class ProbabilityLevel {
         }
     }
 }
+
+/**
+ * 有空程度状态信息
+ */
+data class FreeStatus(
+    val emoji: String,
+    val label: String,
+)
+
+/**
+ * 根据概率获取有空程度状态
+ */
+fun getFreeStatus(probability: Int?): FreeStatus {
+    return when {
+        probability == null || probability < 0 -> FreeStatus("❓", "状态未知")
+        probability >= 80 -> FreeStatus("✨", "很可能有空")
+        probability >= 60 -> FreeStatus("😊", "可能有空")
+        probability >= 40 -> FreeStatus("🤔", "不太确定")
+        probability >= 20 -> FreeStatus("😅", "可能没空")
+        else -> FreeStatus("🔥", "正在忙碌")
+    }
+}

@@ -23,19 +23,22 @@ struct ScreenStatus: Codable, Equatable {
     let activityType: ActivityType
     let sessionDurationMinutes: Int
     let lastActiveMinutesAgo: Int
+    let lastActiveCategory: String?  // 最近活跃的应用分类（如"游戏"、"社交"）
 
     enum CodingKeys: String, CodingKey {
         case isActive = "is_active"
         case activityType = "activity_type"
         case sessionDurationMinutes = "session_duration_minutes"
         case lastActiveMinutesAgo = "last_active_minutes_ago"
+        case lastActiveCategory = "last_active_category"
     }
 
     static let idle = ScreenStatus(
         isActive: false,
         activityType: .idle,
         sessionDurationMinutes: 0,
-        lastActiveMinutesAgo: 0
+        lastActiveMinutesAgo: 0,
+        lastActiveCategory: nil
     )
 }
 

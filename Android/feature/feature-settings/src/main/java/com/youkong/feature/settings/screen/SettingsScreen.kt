@@ -56,6 +56,7 @@ fun SettingsScreen(
     onBackClick: () -> Unit,
     onPermissionSetupClick: () -> Unit,
     onAgentDataClick: () -> Unit = {},
+    onInvitationClick: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -107,6 +108,17 @@ fun SettingsScreen(
                     onClick = onPermissionSetupClick,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
+            }
+
+            // 邀请好友
+            item {
+                SettingsSection(title = "好友") {
+                    SettingsClickItem(
+                        title = "邀请好友",
+                        subtitle = "创建邀请链接，分享给朋友",
+                        onClick = onInvitationClick,
+                    )
+                }
             }
 
             // 数据收集开关

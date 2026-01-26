@@ -13,6 +13,7 @@ import android.net.NetworkCapabilities
 import android.os.BatteryManager
 import android.os.Build
 import android.os.PowerManager
+import android.provider.Settings
 import com.youkong.core.agent.model.DeviceStateData
 import com.youkong.core.agent.model.NetworkType
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -57,6 +58,7 @@ class DeviceStateCollector @Inject constructor(
             isHeadphonesConnected = isHeadphonesConnected(),
             networkType = getNetworkType(),
             ringerMode = getRingerMode(),
+            screenBrightness = getScreenBrightness(),
             timestamp = Clock.System.now(),
         )
     }
@@ -187,6 +189,23 @@ class DeviceStateCollector @Inject constructor(
             }
         } catch (e: Exception) {
             "unknown"
+        }
+    }
+
+    /**
+     * 获取屏幕亮度 (0.0-1.0)
+     */
+    private fun getScreenBrightness(): Float {
+        return try {
+            val brightness = Settings.System.getInt(
+                context.contentResolver,
+                Settings.System.SCREEN_BRIGHTNESS,
+                128
+            )
+            // Android 亮度范围是 0-255，转换为 0.0-1.0
+            (brightness / 255f).coerceIn(0f, 1f)
+        } catch (e: Exception) {
+            0.5f // 默认返回中等亮度
         }
     }
 }

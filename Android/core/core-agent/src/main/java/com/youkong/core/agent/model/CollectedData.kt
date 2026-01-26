@@ -20,6 +20,26 @@ data class LocalScreenData(
     val currentApp: String?,
     val sessionStartTime: Instant?,
     val totalScreenTimeToday: Long, // 毫秒
+    val appUsageList: List<AppUsageInfo> = emptyList(), // 今日 App 使用列表
+)
+
+/**
+ * 单次使用时段
+ */
+data class AppUsageSession(
+    val startTime: Long,      // 开始时间戳（毫秒）
+    val endTime: Long,        // 结束时间戳（毫秒）
+    val durationMillis: Long, // 时长（毫秒）
+)
+
+/**
+ * 单个 App 使用信息
+ */
+data class AppUsageInfo(
+    val packageName: String,
+    val appName: String,
+    val usageTimeMillis: Long, // 使用时长（毫秒）
+    val sessions: List<AppUsageSession> = emptyList(), // 使用时段列表
 )
 
 /**

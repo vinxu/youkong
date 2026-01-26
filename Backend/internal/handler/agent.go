@@ -121,7 +121,8 @@ func (h *AgentHandler) GetFreeProbability(c *gin.Context) {
 			enhanced[i].Confidence = analysis.Availability.Confidence
 			enhanced[i].Reason = analysis.Availability.Reason
 			enhanced[i].Color = model.GetProbabilityColor(analysis.Availability.Probability)
-			enhanced[i].LifeStatus = &analysis.LifeStatus
+			enhanced[i].Emoji = analysis.LifeStatus.Emoji
+			enhanced[i].Activity = analysis.LifeStatus.Label
 			enhanced[i].UpdatedAt = now.UnixMilli()
 		} else {
 			// 没有缓存时使用规则计算的结果
@@ -129,6 +130,8 @@ func (h *AgentHandler) GetFreeProbability(c *gin.Context) {
 			enhanced[i].Confidence = f.Confidence
 			enhanced[i].Reason = f.Reason
 			enhanced[i].Color = f.Color
+			enhanced[i].Emoji = "🤔"
+			enhanced[i].Activity = "状态未知"
 		}
 	}
 
