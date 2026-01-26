@@ -82,6 +82,7 @@ func main() {
 	wechatRepo := repository.NewWechatRepository(db)
 	invitationRepo := repository.NewInvitationRepository(db)
 	friendshipRepo := repository.NewFriendshipRepository(db)
+	memoryRepo := repository.NewMemoryRepository(db)
 
 	// 初始化微信客户端
 	var wechatClient *wechat.Client
@@ -116,6 +117,7 @@ func main() {
 	}
 
 	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, llmClient)
+	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 
 	// 初始化Handler
@@ -126,7 +128,7 @@ func main() {
 	conversationHandler := handler.NewConversationHandler(conversationService)
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
 	friendshipHandler := handler.NewFriendshipHandler(friendshipService)
-	agentHandler := handler.NewAgentHandler(agentService)
+	agentHandler := handler.NewAgentHandler(agentService, memoryService)
 	contactHandler := handler.NewContactHandler(contactService)
 	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
 
@@ -234,6 +236,7 @@ func main() {
 			{
 				agent.POST("/status", agentHandler.ReportStatus)
 				agent.POST("/query", agentHandler.QueryAgentData)
+				agent.GET("/memory", agentHandler.GetMemory)
 			}
 
 			// 通讯录模块

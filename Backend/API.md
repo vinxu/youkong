@@ -768,7 +768,293 @@ const CIRCLES_KEY = 'youkong_circles'
 
 ---
 
-## 八、WebSocket 连接（预留）
+## 八、Agent 智能记忆模块 `/agent`
+
+> 以下接口需要认证
+
+### 8.1 状态上报（智能分析）
+
+**POST** `/agent/status`
+
+> 上报用户当前状态，返回 AI 分析的有空概率和生活状态 emoji
+
+**请求参数**
+```typescript
+interface StatusReportRequest {
+  screen?: {
+    is_active: boolean                    // 当前是否在用手机
+    activity_type: ActivityType           // 使用类型
+    session_duration_minutes: number      // 本次使用时长(分钟)
+    last_active_minutes_ago: number       // 上次活跃是多久前(分钟)
+  }
+  location?: {
+    place_type: PlaceType                 // 位置类型
+    at_place_since_minutes: number        // 在此位置待了多久(分钟)
+  }
+  battery?: {
+    battery_level: number                 // 电量 0-100
+    battery_state: string                 // charging/unplugged/full
+    is_charging: boolean                  // 是否充电中
+  }
+  mode?: {
+    is_low_power_mode: boolean            // 低电量模式
+    is_focus_mode_on: boolean             // 专注模式(勿扰)
+  }
+  connection?: {
+    is_headphones_connected: boolean      // 耳机已连接
+    network_type: NetworkType             // 网络类型
+  }
+  display?: {
+    screen_brightness: number             // 屏幕亮度 0.0-1.0
+  }
+}
+
+type ActivityType = 'entertainment' | 'productivity' | 'communication' | 'idle'
+type PlaceType = 'home' | 'work' | 'leisure' | 'transit' | 'unknown'
+type NetworkType = 'wifi' | 'cellular' | 'none'
+```
+
+**响应数据**
+```typescript
+interface StatusReportResponse {
+  success: boolean                        // 上报是否成功
+  next_report_in: number                  // 建议下次上报间隔(秒)
+  analysis?: {
+    availability: {
+      status: '有空' | '忙碌' | '可能有空'  // 有空状态
+      probability: number                 // 有空概率 0-100
+      reason: string                      // 理由(≤15字)
+      confidence: 'high' | 'medium' | 'low'  // 置信度
+    }
+    life_status: {
+      emoji: string                       // 生活状态 Emoji
+      label: string                       // 状态标签
+      description?: string                // 状态描述(可选)
+    }
+  }
+}
+```
+
+**示例请求**
+```json
+{
+  "screen": {
+    "is_active": true,
+    "activity_type": "entertainment",
+    "session_duration_minutes": 25,
+    "last_active_minutes_ago": 0
+  },
+  "location": {
+    "place_type": "home",
+    "at_place_since_minutes": 120
+  },
+  "battery": {
+    "battery_level": 75,
+    "battery_state": "unplugged",
+    "is_charging": false
+  },
+  "mode": {
+    "is_low_power_mode": false,
+    "is_focus_mode_on": false
+  },
+  "connection": {
+    "is_headphones_connected": true,
+    "network_type": "wifi"
+  },
+  "display": {
+    "screen_brightness": 0.6
+  }
+}
+```
+
+**示例响应**
+```json
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "success": true,
+    "next_report_in": 60,
+    "analysis": {
+      "availability": {
+        "status": "可能有空",
+        "probability": 85,
+        "reason": "正在专心娱乐，不便打扰",
+        "confidence": "high"
+      },
+      "life_status": {
+        "emoji": "📺",
+        "label": "在家追剧看片",
+        "description": "戴着耳机，看起来很投入"
+      }
+    }
+  }
+}
+```
+
+---
+
+### 8.2 获取用户记忆
+
+**GET** `/agent/memory`
+
+> 获取当前用户的核心记忆（AI 学习到的行为规律）
+
+**响应数据**
+```typescript
+interface CoreMemoryResponse {
+  behavior_insights: string      // 行为模式洞察
+  time_patterns: string          // 时间规律
+  location_preferences: string   // 地点偏好
+  social_tendency: string        // 社交倾向
+  confidence_score: number       // 置信度 0-100
+  sample_count: number           // 样本数量
+  updated_at: string             // 最后更新时间 ISO 8601
+}
+```
+
+**示例响应**
+```json
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "behavior_insights": "周一晚上在家长时间进行娱乐活动",
+    "time_patterns": "22点后是个人娱乐时间",
+    "location_preferences": "晚上主要在家",
+    "social_tendency": "晚间娱乐时倾向于独处",
+    "confidence_score": 14,
+    "sample_count": 7,
+    "updated_at": "2026-01-26T22:19:50+08:00"
+  }
+}
+```
+
+---
+
+### 8.3 好友有空概率列表（带生活状态）
+
+**GET** `/friends/free-probability`
+
+> 获取好友的有空概率列表，包含生活状态 emoji
+
+**响应数据**
+```typescript
+interface FreeProbabilityResponse {
+  friends: FriendRecommendation[]
+  generated_at: number           // 毫秒时间戳
+}
+
+interface FriendRecommendation {
+  friend_id: string
+  name: string
+  avatar?: string
+  probability: number            // 有空概率 0-100，-1表示无数据
+  confidence: 'high' | 'medium' | 'low'
+  reason: string                 // 理由(≤15字)
+  color: string                  // 概率颜色代码
+  life_status?: {                // 生活状态(可选)
+    emoji: string
+    label: string
+  }
+  updated_at: number             // 毫秒时间戳
+}
+```
+
+**概率颜色映射**
+```typescript
+// 80-100%: #22C55E (绿色-很可能有空)
+// 60-79%:  #86EFAC (浅绿-可能有空)
+// 40-59%:  #FACC15 (黄色-可能)
+// 20-39%:  #FB923C (橙色-可能没空)
+// 0-19%:   #EF4444 (红色-忙碌)
+// 无数据:   #9CA3AF (灰色)
+```
+
+**示例响应**
+```json
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "friends": [
+      {
+        "friend_id": "user456",
+        "name": "小王",
+        "avatar": "https://...",
+        "probability": 85,
+        "confidence": "high",
+        "reason": "周末晚上通常有空",
+        "color": "#22C55E",
+        "life_status": {
+          "emoji": "🛋️",
+          "label": "在家躺着"
+        },
+        "updated_at": 1706266200000
+      }
+    ],
+    "generated_at": 1706266200000
+  }
+}
+```
+
+---
+
+### 8.4 生活状态 Emoji 参考表
+
+| Emoji | Label | 触发条件 |
+|-------|-------|----------|
+| 🎮 | 在玩游戏 | 娱乐类 + 长时间会话 |
+| 📺 | 在追剧 | 娱乐类 + 在家 |
+| 💼 | 在工作 | 工作类 + 公司 |
+| ☕ | 在摸鱼 | 娱乐类 + 公司 |
+| 🍜 | 在吃饭 | 餐点时间 + 休闲场所 |
+| 🛋️ | 在家躺着 | 闲置/娱乐 + 在家 |
+| 🚶 | 在外面逛 | 移动中/休闲场所 |
+| 😴 | 可能在睡觉 | 不活跃 + 深夜 |
+| 📱 | 在刷手机 | 娱乐类 + 短会话 |
+| 💬 | 在聊天 | 通讯类活跃 |
+| 🎧 | 在听音乐 | 耳机连接 + 娱乐 |
+| 🏃 | 在运动 | 移动中 + 不活跃 |
+| 🍻 | 可能在聚会 | 周末晚 + 外出 |
+| 🔕 | 不想被打扰 | 专注模式开启 |
+| 🪫 | 电量告急 | 低电量模式 |
+| 🤔 | 状态未知 | 数据不足 |
+
+---
+
+### 8.5 数据采集说明
+
+**屏幕数据采集建议**
+
+| 字段 | iOS 获取方式 | Android 获取方式 |
+|------|-------------|-----------------|
+| `is_active` | `UIApplication.shared.applicationState` | `PowerManager.isInteractive()` |
+| `activity_type` | 使用 Screen Time API 或自行分类 | `UsageStatsManager` |
+| `session_duration_minutes` | 计算 App 前台时间 | `UsageStatsManager` |
+
+**位置数据采集建议**
+
+| 字段 | 获取方式 |
+|------|----------|
+| `place_type` | 地理围栏判断（家/公司坐标） |
+| `at_place_since_minutes` | 记录进入围栏时间 |
+
+**设备数据采集**
+
+| 字段 | iOS | Android |
+|------|-----|---------|
+| `battery_level` | `UIDevice.current.batteryLevel` | `BatteryManager` |
+| `is_charging` | `UIDevice.current.batteryState` | `BatteryManager` |
+| `is_low_power_mode` | `ProcessInfo.processInfo.isLowPowerModeEnabled` | `PowerManager` |
+| `is_focus_mode_on` | 需要授权 Focus Status | `NotificationManager` |
+| `is_headphones_connected` | `AVAudioSession` | `AudioManager` |
+| `network_type` | `NWPathMonitor` | `ConnectivityManager` |
+| `screen_brightness` | `UIScreen.main.brightness` | `Settings.System` |
+
+---
+
+## 九、WebSocket 连接（预留）
 
 ```
 ws://api.youkong.app/ws?token=<jwt_token>
