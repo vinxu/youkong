@@ -122,13 +122,10 @@ func (h *DeployHandler) doDeploy() {
 		}
 	}
 
-	h.logger.Info("部署完成，重启服务", zap.String("tag", release.TagName))
+	h.logger.Info("部署完成，启动服务", zap.String("tag", release.TagName))
 
-	// 延迟 1 秒确保日志写入
-	time.Sleep(1 * time.Second)
-
-	if err := h.restartService(); err != nil {
-		h.logger.Error("重启服务失败", zap.Error(err))
+	if err := h.startService(); err != nil {
+		h.logger.Error("启动服务失败", zap.Error(err))
 	}
 }
 
@@ -167,17 +164,56 @@ func (h *DeployHandler) deployBackend(url string) error {
 	}
 	defer os.Remove(tmpFile)
 
-	// 解压到工作目录
-	if err := h.extractTarGz(tmpFile, h.cfg.WorkDir); err != nil {
+	// 解压到临时目录（避免 text file busy 错误）
+	tmpDir := filepath.Join(os.TempDir(), "youkong-backend-extract")
+	os.RemoveAll(tmpDir)
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return fmt.Errorf("创建临时目录失败: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := h.extractTarGz(tmpFile, tmpDir); err != nil {
 		return fmt.Errorf("解压失败: %w", err)
 	}
 
+	// 检查解压后的文件
+	newServerPath := filepath.Join(tmpDir, "server")
+	if _, err := os.Stat(newServerPath); err != nil {
+		return fmt.Errorf("解压后未找到 server 文件: %w", err)
+	}
+
 	// 设置执行权限
-	serverPath := filepath.Join(h.cfg.WorkDir, "server")
-	if err := os.Chmod(serverPath, 0755); err != nil {
+	if err := os.Chmod(newServerPath, 0755); err != nil {
 		return fmt.Errorf("设置权限失败: %w", err)
 	}
 
+	// 停止服务（释放文件锁）
+	h.logger.Info("停止服务以更新二进制文件")
+	stopCmd := exec.Command("systemctl", "stop", "youkong")
+	if output, err := stopCmd.CombinedOutput(); err != nil {
+		h.logger.Warn("停止服务失败，继续尝试", zap.Error(err), zap.String("output", string(output)))
+	}
+
+	// 等待服务完全停止
+	time.Sleep(2 * time.Second)
+
+	// 移动新文件到目标位置
+	destServerPath := filepath.Join(h.cfg.WorkDir, "server")
+
+	// 先删除旧文件
+	os.Remove(destServerPath)
+
+	// 复制新文件（跨文件系统时 rename 可能失败）
+	if err := h.copyFile(newServerPath, destServerPath); err != nil {
+		return fmt.Errorf("复制文件失败: %w", err)
+	}
+
+	// 再次设置权限
+	if err := os.Chmod(destServerPath, 0755); err != nil {
+		return fmt.Errorf("设置权限失败: %w", err)
+	}
+
+	h.logger.Info("backend 文件更新完成")
 	return nil
 }
 
@@ -366,6 +402,21 @@ func (h *DeployHandler) copyDir(src, dst string) error {
 		if err := h.copyPath(srcPath, dstPath); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+// startService 启动服务
+func (h *DeployHandler) startService() error {
+	h.logger.Info("启动服务")
+
+	// 使用 systemctl 启动
+	cmd := exec.Command("systemctl", "start", "youkong")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		h.logger.Error("systemctl start 失败", zap.Error(err), zap.String("output", string(output)))
+		return fmt.Errorf("systemctl start 失败: %s", string(output))
 	}
 
 	return nil
