@@ -108,6 +108,34 @@ fun AgentDataScreen(
                 ),
             )
 
+            // 设备状态数据
+            DataCard(
+                title = "设备状态",
+                items = listOf(
+                    "勿扰模式" to (uiState.deviceStateData?.let { if (it.isDoNotDisturbEnabled) "开启 (忙碌)" else "关闭" } ?: "无数据"),
+                    "充电状态" to (uiState.deviceStateData?.let { if (it.isCharging) "充电中" else "未充电" } ?: "无数据"),
+                    "电池电量" to (uiState.deviceStateData?.let { "${it.batteryLevel}%" } ?: "无数据"),
+                    "省电模式" to (uiState.deviceStateData?.let { if (it.isPowerSaveMode) "开启 (可能在外)" else "关闭" } ?: "无数据"),
+                    "耳机连接" to (uiState.deviceStateData?.let { if (it.isHeadphonesConnected) "已连接" else "未连接" } ?: "无数据"),
+                    "网络类型" to (uiState.deviceStateData?.networkType?.let {
+                        when (it.name) {
+                            "WIFI" -> "WiFi (可能在室内)"
+                            "CELLULAR" -> "蜂窝 (可能移动中)"
+                            "NONE" -> "无网络"
+                            else -> it.name
+                        }
+                    } ?: "无数据"),
+                    "响铃模式" to (uiState.deviceStateData?.ringerMode?.let {
+                        when (it) {
+                            "silent" -> "静音"
+                            "vibrate" -> "振动"
+                            "normal" -> "正常"
+                            else -> it
+                        }
+                    } ?: "无数据"),
+                ),
+            )
+
             // 上报状态
             DataCard(
                 title = "上报状态",

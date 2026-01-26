@@ -8,14 +8,17 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.youkong.core.agent.collector.DeviceStateCollector
 import com.youkong.core.agent.collector.LocationCollector
 import com.youkong.core.agent.collector.UsageStatsCollector
 import com.youkong.core.agent.model.ActivityType
+import com.youkong.core.agent.model.DeviceStateData
 import com.youkong.core.agent.model.LocalScreenData
 import com.youkong.core.agent.model.LocalLocationData
 import com.youkong.core.agent.model.PlaceType
 import com.youkong.core.network.api.AgentApi
 import com.youkong.core.network.model.AgentStatusRequest
+import com.youkong.core.network.model.DeviceStateRequest
 import com.youkong.core.network.model.LocationDataRequest
 import com.youkong.core.network.model.ScreenDataRequest
 import dagger.assisted.Assisted
@@ -33,6 +36,7 @@ class DataCollectWorker @AssistedInject constructor(
     @Assisted workerParams: WorkerParameters,
     private val usageStatsCollector: UsageStatsCollector,
     private val locationCollector: LocationCollector,
+    private val deviceStateCollector: DeviceStateCollector,
     private val agentApi: AgentApi,
 ) : CoroutineWorker(appContext, workerParams) {
 
@@ -41,15 +45,17 @@ class DataCollectWorker @AssistedInject constructor(
             // 收集数据
             val screenData = usageStatsCollector.collect()
             val locationData = locationCollector.collect()
+            val deviceStateData = deviceStateCollector.collect()
 
             // 转换并上报
             val request = AgentStatusRequest(
                 screen = screenData?.let { convertScreenData(it) },
                 location = locationData?.let { convertLocationData(it) },
+                device = convertDeviceState(deviceStateData),
             )
 
             // 只有当有数据时才上报
-            if (request.screen != null || request.location != null) {
+            if (request.screen != null || request.location != null || request.device != null) {
                 agentApi.reportStatus(request)
             }
 
@@ -100,6 +106,18 @@ class DataCollectWorker @AssistedInject constructor(
         return LocationDataRequest(
             placeType = PlaceType.UNKNOWN.name.lowercase(),
             atPlaceSinceMinutes = 0,
+        )
+    }
+
+    private fun convertDeviceState(data: DeviceStateData): DeviceStateRequest {
+        return DeviceStateRequest(
+            isDndEnabled = data.isDoNotDisturbEnabled,
+            isCharging = data.isCharging,
+            batteryLevel = data.batteryLevel,
+            isPowerSaveMode = data.isPowerSaveMode,
+            isHeadphonesConnected = data.isHeadphonesConnected,
+            networkType = data.networkType.name.lowercase(),
+            ringerMode = data.ringerMode,
         )
     }
 

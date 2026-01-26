@@ -30,12 +30,34 @@ data class LocationDataRequest(
 )
 
 /**
+ * 设备状态数据
+ */
+@Serializable
+data class DeviceStateRequest(
+    @SerialName("is_dnd_enabled")
+    val isDndEnabled: Boolean,           // 勿扰模式
+    @SerialName("is_charging")
+    val isCharging: Boolean,             // 充电中
+    @SerialName("battery_level")
+    val batteryLevel: Int,               // 电池电量 (0-100)
+    @SerialName("is_power_save_mode")
+    val isPowerSaveMode: Boolean,        // 省电模式
+    @SerialName("is_headphones_connected")
+    val isHeadphonesConnected: Boolean,  // 耳机连接
+    @SerialName("network_type")
+    val networkType: String,             // wifi, cellular, none
+    @SerialName("ringer_mode")
+    val ringerMode: String,              // silent, vibrate, normal
+)
+
+/**
  * Agent 状态上报请求
  */
 @Serializable
 data class AgentStatusRequest(
     val screen: ScreenDataRequest? = null,
     val location: LocationDataRequest? = null,
+    val device: DeviceStateRequest? = null,
 )
 
 /**

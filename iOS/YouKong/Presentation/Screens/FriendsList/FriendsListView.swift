@@ -141,6 +141,7 @@ struct MyAgentDataSheet: View {
 
     @State private var screenStatus: ScreenStatus = .idle
     @State private var locationStatus: LocationStatus = .unknown
+    @State private var deviceStatus: DeviceStatus = .unknown
     @State private var currentCoordinate: (lat: Double, lng: Double)?
     @State private var homeCoordinate: (lat: Double, lng: Double)?
     @State private var workCoordinate: (lat: Double, lng: Double)?
@@ -223,6 +224,22 @@ struct MyAgentDataSheet: View {
                         }
                     } label: {
                         Label("地理位置", systemImage: "location")
+                            .font(.headline)
+                    }
+
+                    // 设备状态
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 12) {
+                            row("电池电量", value: "\(Int(deviceStatus.batteryLevel * 100))%")
+                            row("充电状态", value: batteryStateText(deviceStatus.batteryState))
+                            row("低电量模式", value: deviceStatus.isLowPowerMode ? "开启" : "关闭")
+                            row("专注模式", value: deviceStatus.isFocusModeOn ? "开启" : "关闭")
+                            row("耳机连接", value: deviceStatus.isHeadphonesConnected ? "已连接" : "未连接")
+                            row("网络类型", value: networkTypeText(deviceStatus.networkType))
+                            row("屏幕亮度", value: "\(Int(deviceStatus.screenBrightness * 100))%")
+                        }
+                    } label: {
+                        Label("设备状态", systemImage: "battery.100.bolt")
                             .font(.headline)
                     }
 
@@ -331,6 +348,10 @@ struct MyAgentDataSheet: View {
             workCoordinate = (work.coordinate.latitude, work.coordinate.longitude)
         }
 
+        // 设备状态数据
+        let device = DeviceStatusCollector.shared
+        deviceStatus = device.getCurrentStatus()
+
         // Extension 数据
         if let defaults = UserDefaults(suiteName: "group.com.youkong.app") {
             extensionMinutes = defaults.integer(forKey: "screenTimeMinutes")
@@ -377,6 +398,24 @@ struct MyAgentDataSheet: View {
         case .work: return "在公司"
         case .leisure: return "休闲场所"
         case .transit: return "在路上"
+        case .unknown: return "未知"
+        }
+    }
+
+    private func batteryStateText(_ state: BatteryState) -> String {
+        switch state {
+        case .unknown: return "未知"
+        case .unplugged: return "未充电"
+        case .charging: return "充电中"
+        case .full: return "已充满"
+        }
+    }
+
+    private func networkTypeText(_ type: NetworkType) -> String {
+        switch type {
+        case .wifi: return "WiFi"
+        case .cellular: return "蜂窝网络"
+        case .none: return "无网络"
         case .unknown: return "未知"
         }
     }

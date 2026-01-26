@@ -42,7 +42,7 @@ type GitHubRelease struct {
 	} `json:"assets"`
 }
 
-// Deploy 处理部署 webhook
+// Deploy 处理部署 webhook（异步执行，立即返回）
 func (h *DeployHandler) Deploy(c *gin.Context) {
 	// 验证 token
 	token := c.Query("token")
@@ -65,21 +65,34 @@ func (h *DeployHandler) Deploy(c *gin.Context) {
 		response.Error(c, response.CodeInternalError, "部署正在进行中")
 		return
 	}
+
+	h.logger.Info("部署任务已触发，后台执行中")
+
+	// 立即返回成功，后台异步执行部署
+	response.Success(c, gin.H{
+		"message": "部署任务已触发",
+	})
+
+	// 异步执行部署
+	go h.doDeploy()
+}
+
+// doDeploy 执行实际的部署任务
+func (h *DeployHandler) doDeploy() {
 	defer h.mu.Unlock()
 
-	h.logger.Info("开始部署")
+	h.logger.Info("开始执行部署")
 
 	// 获取最新 release
 	release, err := h.getLatestRelease()
 	if err != nil {
 		h.logger.Error("获取最新 release 失败", zap.Error(err))
-		response.Error(c, response.CodeInternalError, "获取最新 release 失败: "+err.Error())
 		return
 	}
 
 	h.logger.Info("获取到最新 release", zap.String("tag", release.TagName))
 
-	// 下载并解压 backend
+	// 查找下载链接
 	backendURL := ""
 	webURL := ""
 	for _, asset := range release.Assets {
@@ -92,14 +105,13 @@ func (h *DeployHandler) Deploy(c *gin.Context) {
 	}
 
 	if backendURL == "" {
-		response.Error(c, response.CodeInternalError, "未找到 backend 构建产物")
+		h.logger.Error("未找到 backend 构建产物")
 		return
 	}
 
 	// 下载并部署 backend
 	if err := h.deployBackend(backendURL); err != nil {
 		h.logger.Error("部署 backend 失败", zap.Error(err))
-		response.Error(c, response.CodeInternalError, "部署 backend 失败: "+err.Error())
 		return
 	}
 
@@ -107,25 +119,17 @@ func (h *DeployHandler) Deploy(c *gin.Context) {
 	if webURL != "" {
 		if err := h.deployWeb(webURL); err != nil {
 			h.logger.Warn("部署 web 失败", zap.Error(err))
-			// web 部署失败不影响整体
 		}
 	}
 
-	h.logger.Info("部署完成，准备重启", zap.String("tag", release.TagName))
+	h.logger.Info("部署完成，重启服务", zap.String("tag", release.TagName))
 
-	// 先返回响应，再异步重启（避免重启导致连接断开）
-	response.Success(c, gin.H{
-		"message": "部署成功，服务即将重启",
-		"version": release.TagName,
-	})
+	// 延迟 1 秒确保日志写入
+	time.Sleep(1 * time.Second)
 
-	// 异步重启服务（延迟 1 秒确保响应已发送）
-	go func() {
-		time.Sleep(1 * time.Second)
-		if err := h.restartService(); err != nil {
-			h.logger.Error("重启服务失败", zap.Error(err))
-		}
-	}()
+	if err := h.restartService(); err != nil {
+		h.logger.Error("重启服务失败", zap.Error(err))
+	}
 }
 
 // getLatestRelease 获取最新 release

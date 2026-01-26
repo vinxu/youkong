@@ -2,8 +2,10 @@ package com.youkong.feature.settings.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.youkong.core.agent.collector.DeviceStateCollector
 import com.youkong.core.agent.collector.LocationCollector
 import com.youkong.core.agent.collector.UsageStatsCollector
+import com.youkong.core.agent.model.DeviceStateData
 import com.youkong.core.agent.model.LocalLocationData
 import com.youkong.core.agent.model.LocalScreenData
 import com.youkong.core.permission.PermissionManager
@@ -24,6 +26,7 @@ data class AgentDataUiState(
     val hasContactsPermission: Boolean = false,
     val screenData: LocalScreenData? = null,
     val locationData: LocalLocationData? = null,
+    val deviceStateData: DeviceStateData? = null,
     val lastReportTime: String? = null,
     val lastReportResult: String? = null,
     val debugInfo: Map<String, String> = emptyMap(),
@@ -35,6 +38,7 @@ class AgentDataViewModel @Inject constructor(
     private val permissionManager: PermissionManager,
     private val usageStatsCollector: UsageStatsCollector,
     private val locationCollector: LocationCollector,
+    private val deviceStateCollector: DeviceStateCollector,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AgentDataUiState())
@@ -80,6 +84,18 @@ class AgentDataViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         debugInfo = it.debugInfo + ("位置数据错误" to (e.message ?: "未知错误"))
+                    )
+                }
+            }
+
+            // 收集设备状态数据
+            try {
+                val deviceStateData = deviceStateCollector.collect()
+                _uiState.update { it.copy(deviceStateData = deviceStateData) }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        debugInfo = it.debugInfo + ("设备状态错误" to (e.message ?: "未知错误"))
                     )
                 }
             }
