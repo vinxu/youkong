@@ -63,7 +63,6 @@ jobs:
   release:
     needs: [build-backend, build-web]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
     steps:
       - name: Download Backend Artifact
         uses: actions/download-artifact@v4
