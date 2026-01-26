@@ -115,7 +115,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("DEPLOY_GITHUB_REPO", "vinxu/youkong")
 	viper.SetDefault("DEPLOY_WORK_DIR", "/opt/youkong")
 	viper.SetDefault("DEPLOY_WEB_DIR", "/opt/youkong/web")
-	viper.SetDefault("DEPLOY_PROXY", "https://ghproxy.net/")
+	viper.SetDefault("DEPLOY_PROXY", "https://ghfast.top/")
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {

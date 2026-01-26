@@ -173,7 +173,7 @@ func (h *DeployHandler) deployBackend(url string) error {
 	}
 
 	// 设置执行权限
-	serverPath := filepath.Join(h.cfg.WorkDir, "youkong-server")
+	serverPath := filepath.Join(h.cfg.WorkDir, "server")
 	if err := os.Chmod(serverPath, 0755); err != nil {
 		return fmt.Errorf("设置权限失败: %w", err)
 	}
