@@ -661,7 +661,221 @@ interface SendMessageRequest {
 
 ---
 
-## 六、数据类型汇总
+## 六、邀请模块 `/invitations`
+
+### 6.1 创建邀请链接
+
+**POST** `/invitations`
+
+> 需要认证。创建一个邀请链接，可关联到圈子。
+
+**请求参数**
+```typescript
+interface CreateInvitationRequest {
+  circleId?: string    // 关联圈子ID（可选）
+  maxUses?: number     // 最大使用次数，默认100
+  expiresDays?: number // 有效天数，默认7，最长30
+}
+```
+
+**响应数据**
+```typescript
+interface InvitationDetail {
+  id: string
+  code: string                    // 邀请码
+  inviteUrl: string               // 完整邀请链接
+  qrcodeUrl?: string              // 二维码链接
+  inviter?: UserProfile           // 邀请人信息
+  circle?: CircleInfo             // 关联圈子信息
+  maxUses: number                 // 最大使用次数
+  useCount: number                // 已使用次数
+  expiresAt?: string              // 过期时间 ISO 8601
+  status: 'ACTIVE' | 'DISABLED' | 'EXPIRED'
+  isValid: boolean                // 是否有效
+  createdAt: string
+}
+
+interface CircleInfo {
+  id: string
+  name: string
+  emoji: string
+  color?: string
+  memberCount?: number
+}
+```
+
+**示例**
+```json
+// 请求
+{ "circleId": "circle-001", "expiresDays": 7 }
+
+// 响应
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "id": "inv-001",
+    "code": "ABC123",
+    "inviteUrl": "http://49.232.13.41:8080/i/ABC123",
+    "inviter": {
+      "id": "user-001",
+      "nickname": "小明",
+      "avatar": "https://..."
+    },
+    "circle": {
+      "id": "circle-001",
+      "name": "闺蜜",
+      "emoji": "💕",
+      "color": "#EC4899",
+      "memberCount": 5
+    },
+    "maxUses": 100,
+    "useCount": 0,
+    "expiresAt": "2026-02-03T00:00:00Z",
+    "status": "ACTIVE",
+    "isValid": true,
+    "createdAt": "2026-01-27T00:00:00Z"
+  }
+}
+```
+
+---
+
+### 6.2 获取邀请信息（公开）
+
+**GET** `/invite/:code`
+
+> ❌ 无需认证。用于邀请落地页展示邀请人和圈子信息。
+
+**响应数据**
+```typescript
+interface InvitationPublicInfo {
+  inviter: UserProfile    // 邀请人信息
+  circle?: CircleInfo     // 圈子信息（可选）
+  isValid: boolean        // 是否有效
+}
+```
+
+**示例**
+```json
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "inviter": {
+      "id": "user-001",
+      "nickname": "小明",
+      "avatar": "https://..."
+    },
+    "circle": {
+      "id": "circle-001",
+      "name": "闺蜜",
+      "emoji": "💕",
+      "memberCount": 5
+    },
+    "isValid": true
+  }
+}
+```
+
+---
+
+### 6.3 接受邀请
+
+**POST** `/invite/:code/accept`
+
+> 需要认证。接受邀请后自动与邀请人成为好友，并加入关联圈子（如果有）。
+
+**响应数据**
+```json
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "message": "已接受邀请",
+    "joinedCircle": {
+      "id": "circle-001",
+      "name": "闺蜜",
+      "emoji": "💕"
+    }
+  }
+}
+```
+
+**错误情况**
+| 错误 | message |
+|------|---------|
+| 邀请不存在 | `邀请不存在或已失效` |
+| 邀请已过期 | `邀请已过期` |
+| 使用次数已满 | `邀请使用次数已达上限` |
+| 不能接受自己的邀请 | `不能接受自己的邀请` |
+
+---
+
+### 6.4 获取我的邀请列表
+
+**GET** `/invitations`
+
+> 需要认证。获取当前用户创建的所有邀请链接。
+
+**响应数据**
+```typescript
+type GetMyInvitationsResponse = InvitationDetail[]
+```
+
+---
+
+### 6.5 获取邀请详情
+
+**GET** `/invitations/:id`
+
+> 需要认证。获取指定邀请的完整信息。
+
+**响应数据**
+```typescript
+// InvitationDetail（同 6.1）
+```
+
+---
+
+### 6.6 禁用邀请链接
+
+**DELETE** `/invitations/:id`
+
+> 需要认证。仅邀请创建者可操作。
+
+**响应数据**
+```json
+{ "code": 0, "message": "成功", "data": { "message": "邀请已禁用" } }
+```
+
+---
+
+### 6.7 获取邀请海报
+
+**GET** `/invitations/:id/poster`
+
+> 需要认证。返回 PNG 图片，包含邀请信息和二维码。
+
+**响应**
+- Content-Type: `image/png`
+- 图片尺寸: 750x1334
+
+---
+
+### 6.8 获取邀请二维码
+
+**GET** `/invitations/:id/qrcode`
+
+> 需要认证。返回单独的二维码 PNG 图片。
+
+**响应**
+- Content-Type: `image/png`
+- 图片尺寸: 300x300
+
+---
+
+## 七、数据类型汇总
 
 ### 用户相关
 
@@ -753,7 +967,7 @@ interface ConversationResponse {
 
 ---
 
-## 七、前端本地存储建议
+## 八、前端本地存储建议
 
 ```typescript
 // Token 存储
@@ -768,11 +982,11 @@ const CIRCLES_KEY = 'youkong_circles'
 
 ---
 
-## 八、Agent 智能记忆模块 `/agent`
+## 九、Agent 智能记忆模块 `/agent`
 
 > 以下接口需要认证
 
-### 8.1 状态上报（智能分析）
+### 9.1 状态上报（智能分析）
 
 **POST** `/agent/status`
 
@@ -894,7 +1108,7 @@ interface StatusReportResponse {
 
 ---
 
-### 8.2 获取用户记忆
+### 9.2 获取用户记忆
 
 **GET** `/agent/memory`
 
@@ -932,7 +1146,7 @@ interface CoreMemoryResponse {
 
 ---
 
-### 8.3 好友有空概率列表（带生活状态）
+### 9.3 好友有空概率列表（带生活状态）
 
 **GET** `/friends/free-probability`
 
@@ -1000,7 +1214,7 @@ interface FriendRecommendation {
 
 ---
 
-### 8.4 生活状态 Emoji 参考表
+### 9.4 生活状态 Emoji 参考表
 
 | Emoji | Label | 触发条件 |
 |-------|-------|----------|
@@ -1023,7 +1237,7 @@ interface FriendRecommendation {
 
 ---
 
-### 8.5 数据采集说明
+### 9.5 数据采集说明
 
 **屏幕数据采集建议**
 
@@ -1054,11 +1268,11 @@ interface FriendRecommendation {
 
 ---
 
-## 九、好友模块 `/friends`
+## 十、好友模块 `/friends`
 
 > 以下接口需要认证
 
-### 9.1 获取好友列表
+### 10.1 获取好友列表
 
 **GET** `/friends`
 
@@ -1075,7 +1289,7 @@ type GetFriendsResponse = FriendInfo[]
 
 ---
 
-### 9.2 通过手机号加好友
+### 10.2 通过手机号加好友
 
 **POST** `/friends/add-by-phone`
 
@@ -1139,7 +1353,7 @@ interface AddFriendByPhoneResponse {
 
 ---
 
-### 9.3 删除好友
+### 10.3 删除好友
 
 **DELETE** `/friends/:userId`
 
@@ -1150,7 +1364,7 @@ interface AddFriendByPhoneResponse {
 
 ---
 
-### 9.4 我邀请的好友
+### 10.4 我邀请的好友
 
 **GET** `/friends/invited-by-me`
 
@@ -1170,7 +1384,7 @@ type GetInvitedByMeResponse = FriendWithInvitation[]
 
 ---
 
-### 9.5 邀请我的好友
+### 10.5 邀请我的好友
 
 **GET** `/friends/invited-me`
 
@@ -1183,7 +1397,7 @@ type GetInvitedByMeResponse = FriendWithInvitation[]
 
 ---
 
-## 十、WebSocket 连接（预留）
+## 十一、WebSocket 连接（预留）
 
 ```
 ws://api.youkong.app/ws?token=<jwt_token>
