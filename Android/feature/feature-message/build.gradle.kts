@@ -7,6 +7,5 @@ android {
 }
 
 dependencies {
-    implementation(project(":core:core-websocket"))
     implementation(project(":core:core-datastore"))
 }

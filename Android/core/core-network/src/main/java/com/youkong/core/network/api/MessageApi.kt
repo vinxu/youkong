@@ -2,6 +2,7 @@ package com.youkong.core.network.api
 
 import com.youkong.core.network.model.ApiResponse
 import com.youkong.core.network.model.ConversationResponse
+import com.youkong.core.network.model.CreateConversationRequest
 import com.youkong.core.network.model.MessageResponse
 import com.youkong.core.network.model.SendMessageRequest
 import retrofit2.http.Body
@@ -22,4 +23,9 @@ interface MessageApi {
         @Path("id") conversationId: String,
         @Body request: SendMessageRequest
     ): ApiResponse<MessageResponse>
+
+    @POST("conversations")
+    suspend fun createConversation(
+        @Body request: CreateConversationRequest
+    ): ApiResponse<ConversationResponse>
 }

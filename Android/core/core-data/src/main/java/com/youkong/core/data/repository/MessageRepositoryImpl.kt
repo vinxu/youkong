@@ -10,6 +10,7 @@ import com.youkong.core.domain.model.Message
 import com.youkong.core.domain.model.MessageType
 import com.youkong.core.domain.repository.MessageRepository
 import com.youkong.core.network.api.MessageApi
+import com.youkong.core.network.model.CreateConversationRequest
 import com.youkong.core.network.model.SendMessageRequest
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
@@ -130,5 +131,29 @@ class MessageRepositoryImpl @Inject constructor(
     override fun observeMessages(conversationId: String): Flow<Message> {
         // WebSocket 实时消息会通过 WebSocketManager 处理
         return emptyFlow()
+    }
+
+    override suspend fun getOrCreateConversation(userId: String): Result<Conversation> {
+        return try {
+            // 先查找现有会话
+            val existing = conversationDao.getByPartnerId(userId)
+            if (existing != null) {
+                val lastMessage = messageDao.getLastMessage(existing.id)?.toDomain()
+                return Result.success(existing.toDomain().copy(lastMessage = lastMessage))
+            }
+
+            // 创建新会话
+            val response = messageApi.createConversation(CreateConversationRequest(userId))
+            val data = response.data
+            if (response.isSuccess && data != null) {
+                val conversation = data.toDomain()
+                conversationDao.insert(conversation.toEntity())
+                Result.success(conversation)
+            } else {
+                Result.failure(Exception(response.message))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 }

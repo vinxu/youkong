@@ -89,3 +89,27 @@ jobs:
             **Web**: youkong-web.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Deploy Webhook
+        run: |
+          echo "Waiting for release to be available..."
+          sleep 10
+
+          echo "Triggering deploy webhook..."
+          response=$(curl -s -w "\n%{http_code}" -X POST "http://49.232.13.41:8080/deploy?token=${{ secrets.DEPLOY_TOKEN }}")
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | head -n -1)
+
+          echo "Response: $body"
+          echo "HTTP Code: $http_code"
+
+          if [ "$http_code" != "200" ]; then
+            echo "Deploy failed with HTTP $http_code"
+            exit 1
+          fi
+
+          echo "Deploy triggered successfully!"

@@ -15,6 +15,17 @@ struct ChatView: View {
         ))
     }
 
+    /// 从朋友推荐卡片进入聊天的初始化方法
+    init(partnerId: String, partnerName: String, partnerAvatar: String?) {
+        let profile = UserProfile(id: partnerId, nickname: partnerName, avatar: partnerAvatar)
+        self.partner = profile
+        self.conversationId = nil
+        _viewModel = StateObject(wrappedValue: ChatViewModel(
+            partner: profile,
+            conversationId: nil
+        ))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
@@ -94,7 +105,8 @@ struct MessageBubble: View {
             Text(message.content ?? "")
 
         case .availabilityCard:
-            AvailabilityCardBubble()
+            Text("📅 分享了状态")
+                .fontWeight(.medium)
 
         case .confirmRequest:
             Text("🤝 想和你确认见面")
@@ -108,19 +120,6 @@ struct MessageBubble: View {
                 Text("❌ 已拒绝")
                     .fontWeight(.medium)
             }
-        }
-    }
-}
-
-struct AvailabilityCardBubble: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: UIConstants.Spacing.sm) {
-            Text("📅 分享了有空状态")
-                .fontWeight(.medium)
-
-            Text("点击查看详情")
-                .font(.caption)
-                .opacity(0.8)
         }
     }
 }

@@ -3,6 +3,10 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/go-sql-driver/mysql"
@@ -124,6 +128,7 @@ func main() {
 	friendshipHandler := handler.NewFriendshipHandler(friendshipService)
 	agentHandler := handler.NewAgentHandler(agentService)
 	contactHandler := handler.NewContactHandler(contactService)
+	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
 
 	// 设置Gin模式
 	gin.SetMode(cfg.Server.Mode)
@@ -138,6 +143,9 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
+
+	// 部署 webhook
+	r.POST("/deploy", deployHandler.Deploy)
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
@@ -192,6 +200,7 @@ func main() {
 			conversations := authorized.Group("/conversations")
 			{
 				conversations.GET("", conversationHandler.GetConversations)
+				conversations.POST("", conversationHandler.CreateConversation)
 				conversations.GET("/:id/messages", conversationHandler.GetMessages)
 				conversations.POST("/:id/messages", conversationHandler.SendMessage)
 			}
@@ -233,6 +242,45 @@ func main() {
 				contacts.POST("/match", contactHandler.MatchContacts)
 				contacts.POST("/add-friends", contactHandler.BatchAddFriends)
 			}
+		}
+	}
+
+	// 静态文件服务（SPA 支持）
+	webDir := cfg.Deploy.WebDir
+	if webDir != "" {
+		// 检查目录是否存在
+		if _, err := os.Stat(webDir); err == nil {
+			logger.Info("启用静态文件服务", zap.String("dir", webDir))
+
+			// 处理所有未匹配的路由
+			r.NoRoute(func(c *gin.Context) {
+				path := c.Request.URL.Path
+
+				// API 路由返回 404
+				if strings.HasPrefix(path, "/api/") {
+					c.JSON(http.StatusNotFound, gin.H{"code": 1004, "message": "接口不存在"})
+					return
+				}
+
+				// 尝试提供静态文件
+				filePath := filepath.Join(webDir, path)
+				if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+					c.File(filePath)
+					return
+				}
+
+				// 对于 SPA 路由，返回 index.html
+				indexPath := filepath.Join(webDir, "index.html")
+				if _, err := os.Stat(indexPath); err == nil {
+					c.File(indexPath)
+					return
+				}
+
+				// 如果连 index.html 都没有
+				c.JSON(http.StatusNotFound, gin.H{"code": 1004, "message": "页面不存在"})
+			})
+		} else {
+			logger.Warn("静态文件目录不存在", zap.String("dir", webDir))
 		}
 	}
 

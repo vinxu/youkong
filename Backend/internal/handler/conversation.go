@@ -28,6 +28,27 @@ func (h *ConversationHandler) GetConversations(c *gin.Context) {
 	response.Success(c, conversations)
 }
 
+type CreateConversationRequest struct {
+	PartnerID string `json:"partnerId" binding:"required"`
+}
+
+func (h *ConversationHandler) CreateConversation(c *gin.Context) {
+	var req CreateConversationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "参数错误：需要 partnerId")
+		return
+	}
+
+	userID := middleware.GetUserID(c)
+	convResp, err := h.conversationService.GetOrCreateConversationWithResponse(c.Request.Context(), userID, req.PartnerID)
+	if err != nil {
+		response.InternalError(c, err.Error())
+		return
+	}
+
+	response.Success(c, convResp)
+}
+
 func (h *ConversationHandler) GetMessages(c *gin.Context) {
 	conversationID := c.Param("id")
 	if conversationID == "" {

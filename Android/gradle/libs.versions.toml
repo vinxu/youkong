@@ -40,6 +40,13 @@ coil = "2.5.0"
 # Security
 securityCrypto = "1.1.0-alpha06"
 
+# WorkManager
+workManager = "2.9.0"
+hiltWork = "1.1.0"
+
+# Location
+playServicesLocation = "21.1.0"
+
 # Testing
 junit = "4.13.2"
 junitExt = "1.1.5"
@@ -100,6 +107,14 @@ security-crypto = { module = "androidx.security:security-crypto", version.ref = 
 
 # Image
 coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coil" }
+
+# WorkManager
+work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref = "workManager" }
+hilt-work = { module = "androidx.hilt:hilt-work", version.ref = "hiltWork" }
+hilt-work-compiler = { module = "androidx.hilt:hilt-compiler", version.ref = "hiltWork" }
+
+# Location
+play-services-location = { module = "com.google.android.gms:play-services-location", version.ref = "playServicesLocation" }
 
 # Testing
 junit = { module = "junit:junit", version.ref = "junit" }

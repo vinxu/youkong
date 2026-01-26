@@ -31,6 +31,7 @@ struct APIEndpoint {
 
 extension APIEndpoint {
     // MARK: - Auth
+
     static func sendSMSCode(phone: String) -> APIEndpoint {
         APIEndpoint(
             path: "/api/v1/auth/sms/send",
@@ -59,6 +60,7 @@ extension APIEndpoint {
     }
 
     // MARK: - User
+
     static var getMe: APIEndpoint {
         APIEndpoint(path: "/api/v1/users/me")
     }
@@ -81,72 +83,8 @@ extension APIEndpoint {
         APIEndpoint(path: "/api/v1/users/\(id)")
     }
 
-    // MARK: - Circles
-    static var getCircles: APIEndpoint {
-        APIEndpoint(path: "/api/v1/circles")
-    }
-
-    static func createCircle(name: String, emoji: String, color: String) -> APIEndpoint {
-        APIEndpoint(
-            path: "/api/v1/circles",
-            method: .post,
-            body: ["name": name, "emoji": emoji, "color": color]
-        )
-    }
-
-    static func getCircle(id: String) -> APIEndpoint {
-        APIEndpoint(path: "/api/v1/circles/\(id)")
-    }
-
-    static func updateCircle(id: String, name: String, emoji: String, color: String) -> APIEndpoint {
-        APIEndpoint(
-            path: "/api/v1/circles/\(id)",
-            method: .put,
-            body: ["name": name, "emoji": emoji, "color": color]
-        )
-    }
-
-    static func deleteCircle(id: String) -> APIEndpoint {
-        APIEndpoint(path: "/api/v1/circles/\(id)", method: .delete)
-    }
-
-    static func addCircleMember(circleId: String, userId: String) -> APIEndpoint {
-        APIEndpoint(
-            path: "/api/v1/circles/\(circleId)/members",
-            method: .post,
-            body: ["userId": userId]
-        )
-    }
-
-    static func removeCircleMember(circleId: String, userId: String) -> APIEndpoint {
-        APIEndpoint(
-            path: "/api/v1/circles/\(circleId)/members/\(userId)",
-            method: .delete
-        )
-    }
-
-    // MARK: - Availabilities
-    static var getFriendsAvailabilities: APIEndpoint {
-        APIEndpoint(path: "/api/v1/availabilities/friends")
-    }
-
-    static var getMyAvailabilities: APIEndpoint {
-        APIEndpoint(path: "/api/v1/availabilities/mine")
-    }
-
-    static func createAvailability(request: CreateAvailabilityRequest) -> APIEndpoint {
-        APIEndpoint(
-            path: "/api/v1/availabilities",
-            method: .post,
-            body: request
-        )
-    }
-
-    static func cancelAvailability(id: String) -> APIEndpoint {
-        APIEndpoint(path: "/api/v1/availabilities/\(id)", method: .delete)
-    }
-
     // MARK: - Conversations & Messages
+
     static var getConversations: APIEndpoint {
         APIEndpoint(path: "/api/v1/conversations")
     }
@@ -163,39 +101,36 @@ extension APIEndpoint {
         )
     }
 
-    // MARK: - Invitations
+    // MARK: - Agent
 
-    static func createInvitation(request: CreateInvitationRequest) -> APIEndpoint {
-        APIEndpoint(
-            path: "/api/v1/invitations",
+    static func reportAgentStatus(screen: ScreenStatus, location: LocationStatus) -> APIEndpoint {
+        let request = StatusReportRequest(screen: screen, location: location)
+        return APIEndpoint(
+            path: "/api/v1/agent/status",
             method: .post,
             body: request
         )
     }
 
-    static var getMyInvitations: APIEndpoint {
-        APIEndpoint(path: "/api/v1/invitations")
+    static var getFriendsFreeProbability: APIEndpoint {
+        APIEndpoint(path: "/api/v1/friends/free-probability")
     }
 
-    static func getPublicInvitationInfo(code: String) -> APIEndpoint {
+    static func queryAgentData(agentId: String) -> APIEndpoint {
         APIEndpoint(
-            path: "/api/v1/invitations/\(code)",
-            requiresAuth: false
+            path: "/api/v1/agent/query",
+            method: .post,
+            body: ["to_agent": agentId]
         )
     }
 
-    static func getInvitationDetail(id: String) -> APIEndpoint {
-        APIEndpoint(path: "/api/v1/invitations/\(id)/detail")
-    }
+    // MARK: - Contacts
 
-    static func disableInvitation(id: String) -> APIEndpoint {
-        APIEndpoint(path: "/api/v1/invitations/\(id)", method: .delete)
-    }
-
-    static func acceptInvitation(code: String) -> APIEndpoint {
+    static func syncContacts(phones: [String]) -> APIEndpoint {
         APIEndpoint(
-            path: "/api/v1/invitations/\(code)/accept",
-            method: .post
+            path: "/api/v1/contacts/sync",
+            method: .post,
+            body: SyncContactsRequest(phones: phones)
         )
     }
 
@@ -207,14 +142,6 @@ extension APIEndpoint {
 
     static func deleteFriend(userId: String) -> APIEndpoint {
         APIEndpoint(path: "/api/v1/friends/\(userId)", method: .delete)
-    }
-
-    static var getFriendsInvitedByMe: APIEndpoint {
-        APIEndpoint(path: "/api/v1/friends/invited-by-me")
-    }
-
-    static var getFriendsWhoInvitedMe: APIEndpoint {
-        APIEndpoint(path: "/api/v1/friends/invited-me")
     }
 }
 

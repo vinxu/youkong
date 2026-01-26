@@ -187,6 +187,50 @@ await fetch('http://49.232.13.41:8080/api/v1/users/me', {
 });
 ```
 
+### 自动部署
+
+项目使用 GitHub Actions + Webhook 实现全自动部署，push 代码后自动完成构建和部署。
+
+**架构流程**:
+```
+开发者 push → GitHub Actions 构建 → 创建 Release → 调用 Webhook → 服务器下载并重启
+```
+
+**首次设置**（一次性）:
+```bash
+# 在服务器 VNC 终端执行
+curl -fsSL https://raw.githubusercontent.com/vinxu/youkong/main/scripts/setup.sh | bash
+```
+
+脚本会：
+1. 创建工作目录 `/opt/youkong`
+2. 下载最新 release
+3. 配置 systemd 服务
+4. 生成 DEPLOY_TOKEN（需添加到 GitHub Secrets）
+
+**环境变量配置**:
+```bash
+# /opt/youkong/.env 中添加以下配置
+DEPLOY_TOKEN=<安装脚本生成的 token>
+DEPLOY_GITHUB_REPO=vinxu/youkong
+DEPLOY_WORK_DIR=/opt/youkong
+DEPLOY_WEB_DIR=/opt/youkong/web
+```
+
+**日常使用**: 直接 `git push`，等待自动部署完成即可
+
+**服务管理**:
+```bash
+systemctl status youkong    # 查看状态
+systemctl restart youkong   # 重启服务
+journalctl -u youkong -f    # 查看日志
+```
+
+**验证地址**:
+- H5 首页: `http://49.232.13.41:8080/`
+- 邀请页面: `http://49.232.13.41:8080/i/CODE`
+- API 健康检查: `http://49.232.13.41:8080/health`
+
 ## API 接口
 
 > 详细接口文档见 `Backend/API.md`

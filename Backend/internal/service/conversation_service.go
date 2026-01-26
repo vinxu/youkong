@@ -98,6 +98,26 @@ func (s *ConversationService) GetOrCreateConversation(ctx context.Context, userI
 	return conv, nil
 }
 
+func (s *ConversationService) GetOrCreateConversationWithResponse(ctx context.Context, userID, partnerID string) (*model.ConversationResponse, error) {
+	conv, err := s.GetOrCreateConversation(ctx, userID, partnerID)
+	if err != nil {
+		return nil, err
+	}
+
+	partner, err := s.userRepo.GetByID(ctx, partnerID)
+	if err != nil || partner == nil {
+		return nil, fmt.Errorf("获取对方用户信息失败")
+	}
+
+	return &model.ConversationResponse{
+		ID:          conv.ID,
+		Partner:     *partner.ToProfile(),
+		LastMessage: nil,
+		UnreadCount: 0,
+		CreatedAt:   conv.CreatedAt,
+	}, nil
+}
+
 func (s *ConversationService) GetMessages(ctx context.Context, conversationID, userID string, limit, offset int) ([]*model.MessageResponse, error) {
 	// 验证用户是会话参与者
 	conv, err := s.messageRepo.GetConversationByID(ctx, conversationID)

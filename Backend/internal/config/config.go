@@ -16,12 +16,20 @@ type Config struct {
 	Wechat     WechatConfig
 	Invitation InvitationConfig
 	LLM        LLMConfig
+	Deploy     DeployConfig
 }
 
 type LLMConfig struct {
 	Provider string // openrouter
 	APIKey   string
 	Model    string
+}
+
+type DeployConfig struct {
+	Token      string // Webhook 验证 token
+	GitHubRepo string // GitHub 仓库 (owner/repo)
+	WorkDir    string // 工作目录
+	WebDir     string // 前端静态文件目录
 }
 
 type ServerConfig struct {
@@ -103,6 +111,9 @@ func Load() (*Config, error) {
 	viper.SetDefault("INVITATION_RATE_LIMIT_PER_DAY", 10)
 	viper.SetDefault("LLM_PROVIDER", "openrouter")
 	viper.SetDefault("LLM_MODEL", "google/gemini-2.5-pro-preview-06-05")
+	viper.SetDefault("DEPLOY_GITHUB_REPO", "vinxu/youkong")
+	viper.SetDefault("DEPLOY_WORK_DIR", "/opt/youkong")
+	viper.SetDefault("DEPLOY_WEB_DIR", "/opt/youkong/web")
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -155,6 +166,12 @@ func Load() (*Config, error) {
 			Provider: viper.GetString("LLM_PROVIDER"),
 			APIKey:   viper.GetString("LLM_API_KEY"),
 			Model:    viper.GetString("LLM_MODEL"),
+		},
+		Deploy: DeployConfig{
+			Token:      viper.GetString("DEPLOY_TOKEN"),
+			GitHubRepo: viper.GetString("DEPLOY_GITHUB_REPO"),
+			WorkDir:    viper.GetString("DEPLOY_WORK_DIR"),
+			WebDir:     viper.GetString("DEPLOY_WEB_DIR"),
 		},
 	}
 

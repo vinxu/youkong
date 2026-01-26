@@ -20,4 +20,7 @@ interface MessageRepository {
 
     // 实时消息流
     fun observeMessages(conversationId: String): Flow<Message>
+
+    // 获取或创建与指定用户的会话
+    suspend fun getOrCreateConversation(userId: String): Result<Conversation>
 }

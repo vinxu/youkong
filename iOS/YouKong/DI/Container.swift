@@ -3,6 +3,13 @@ import Combine
 import Factory
 
 extension Container {
+    // MARK: - API Client
+
+    var apiClient: Factory<APIClient> {
+        Factory(self) { APIClient.shared }
+            .singleton
+    }
+
     // MARK: - Repositories
 
     var authRepository: Factory<AuthRepositoryProtocol> {
@@ -15,28 +22,18 @@ extension Container {
             .singleton
     }
 
-    var circleRepository: Factory<CircleRepositoryProtocol> {
-        Factory(self) { CircleRepositoryImpl() }
-            .singleton
-    }
-
-    var availabilityRepository: Factory<AvailabilityRepositoryProtocol> {
-        Factory(self) { AvailabilityRepositoryImpl() }
-            .singleton
-    }
-
     var messageRepository: Factory<MessageRepositoryProtocol> {
         Factory(self) { MessageRepositoryImpl() }
             .singleton
     }
 
-    var invitationRepository: Factory<InvitationRepositoryProtocol> {
-        Factory(self) { InvitationRepositoryImpl() }
+    var agentRepository: Factory<AgentRepositoryProtocol> {
+        Factory(self) { AgentRepositoryImpl() }
             .singleton
     }
 
-    var friendRepository: Factory<FriendRepositoryProtocol> {
-        Factory(self) { FriendRepositoryImpl() }
+    var contactRepository: Factory<ContactRepositoryProtocol> {
+        Factory(self) { ContactRepositoryImpl() }
             .singleton
     }
 }

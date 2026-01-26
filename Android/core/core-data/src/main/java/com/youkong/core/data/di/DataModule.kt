@@ -1,5 +1,6 @@
 package com.youkong.core.data.di
 
+import com.youkong.core.data.repository.AgentRepositoryImpl
 import com.youkong.core.data.repository.AuthRepositoryImpl
 import com.youkong.core.data.repository.AvailabilityRepositoryImpl
 import com.youkong.core.data.repository.CircleRepositoryImpl
@@ -7,6 +8,7 @@ import com.youkong.core.data.repository.FriendRepositoryImpl
 import com.youkong.core.data.repository.InvitationRepositoryImpl
 import com.youkong.core.data.repository.MessageRepositoryImpl
 import com.youkong.core.data.repository.UserRepositoryImpl
+import com.youkong.core.domain.repository.AgentRepository
 import com.youkong.core.domain.repository.AuthRepository
 import com.youkong.core.domain.repository.AvailabilityRepository
 import com.youkong.core.domain.repository.CircleRepository
@@ -51,4 +53,8 @@ abstract class DataModule {
     @Binds
     @Singleton
     abstract fun bindFriendRepository(impl: FriendRepositoryImpl): FriendRepository
+
+    @Binds
+    @Singleton
+    abstract fun bindAgentRepository(impl: AgentRepositoryImpl): AgentRepository
 }

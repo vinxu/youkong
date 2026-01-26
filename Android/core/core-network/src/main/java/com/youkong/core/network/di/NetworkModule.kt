@@ -2,6 +2,7 @@ package com.youkong.core.network.di
 
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import com.youkong.core.network.BuildConfig
+import com.youkong.core.network.api.AgentApi
 import com.youkong.core.network.api.AuthApi
 import com.youkong.core.network.api.AvailabilityApi
 import com.youkong.core.network.api.CircleApi
@@ -109,4 +110,9 @@ object NetworkModule {
     @Singleton
     fun provideFriendApi(retrofit: Retrofit): FriendApi =
         retrofit.create(FriendApi::class.java)
+
+    @Provides
+    @Singleton
+    fun provideAgentApi(retrofit: Retrofit): AgentApi =
+        retrofit.create(AgentApi::class.java)
 }

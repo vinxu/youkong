@@ -8,11 +8,16 @@ struct ConversationsView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if viewModel.conversations.isEmpty && !viewModel.isLoading {
-                        EmptyStateView(
-                            icon: "message",
-                            title: "暂无消息",
-                            subtitle: "发起一个对话吧"
-                        )
+                        VStack(spacing: UIConstants.Spacing.lg) {
+                            Image(systemName: "message")
+                                .font(.system(size: 50))
+                                .foregroundColor(.secondary)
+                            Text("暂无消息")
+                                .font(.headline)
+                            Text("发起一个对话吧")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
                         .padding(.top, 100)
                     } else {
                         ForEach(viewModel.conversations) { conversation in

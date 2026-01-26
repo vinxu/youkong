@@ -48,21 +48,26 @@ dependencies {
     // Core modules
     implementation(project(":core:core-ui"))
     implementation(project(":core:core-network"))
-    implementation(project(":core:core-websocket"))
     implementation(project(":core:core-data"))
     implementation(project(":core:core-domain"))
     implementation(project(":core:core-database"))
     implementation(project(":core:core-datastore"))
+    implementation(project(":core:core-agent"))
+    implementation(project(":core:core-permission"))
 
     // Feature modules
     implementation(project(":feature:feature-auth"))
     implementation(project(":feature:feature-home"))
-    implementation(project(":feature:feature-availability"))
-    implementation(project(":feature:feature-circle"))
     implementation(project(":feature:feature-message"))
     implementation(project(":feature:feature-profile"))
-    implementation(project(":feature:feature-invitation"))
-    implementation(project(":feature:feature-friend"))
+    implementation(project(":feature:feature-friends"))
+    implementation(project(":feature:feature-chat"))
+    implementation(project(":feature:feature-settings"))
+
+    // WorkManager
+    implementation(libs.work.runtime)
+    implementation(libs.hilt.work)
+    ksp(libs.hilt.work.compiler)
 
     // Android
     implementation(libs.androidx.core.ktx)

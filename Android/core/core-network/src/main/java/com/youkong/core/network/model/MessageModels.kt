@@ -35,3 +35,9 @@ data class SendMessageRequest(
     val content: String? = null,
     val metadata: JsonObject? = null,
 )
+
+@Serializable
+data class CreateConversationRequest(
+    @SerialName("userId")
+    val userId: String,
+)
