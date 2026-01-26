@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -79,50 +80,71 @@ func (h *AgentHandler) GetFreeProbability(c *gin.Context) {
 		return
 	}
 
-	// 获取基础有空概率
+	// 获取基础好友信息
 	result, err := h.agentService.GetFriendsFreeProbability(c.Request.Context(), userID)
 	if err != nil {
 		response.InternalError(c, "获取失败")
 		return
 	}
 
-	// 增强：添加生活状态
-	if h.memoryService != nil && result != nil && len(result.Friends) > 0 {
-		friendIDs := make([]string, len(result.Friends))
-		for i, f := range result.Friends {
-			friendIDs[i] = f.FriendID
+	if result == nil || len(result.Friends) == 0 {
+		response.Success(c, result)
+		return
+	}
+
+	// 获取所有好友 ID
+	friendIDs := make([]string, len(result.Friends))
+	for i, f := range result.Friends {
+		friendIDs[i] = f.FriendID
+	}
+
+	// 从缓存获取 LLM 分析结果（优先使用）
+	var analysisMap map[string]*model.AnalysisResult
+	if h.memoryService != nil {
+		analysisMap, _ = h.memoryService.GetCachedAnalysisByUserIDs(c.Request.Context(), friendIDs)
+	}
+
+	// 构建响应，优先使用缓存的 LLM 分析结果
+	now := time.Now()
+	enhanced := make([]model.EnhancedFriendRecommendation, len(result.Friends))
+	for i, f := range result.Friends {
+		enhanced[i] = model.EnhancedFriendRecommendation{
+			FriendID:  f.FriendID,
+			Name:      f.Name,
+			Avatar:    f.Avatar,
+			UpdatedAt: f.UpdatedAt,
 		}
 
-		// 批量获取缓存的分析结果
-		analysisMap, err := h.memoryService.GetCachedAnalysisByUserIDs(c.Request.Context(), friendIDs)
-		if err == nil && len(analysisMap) > 0 {
-			// 构建增强响应
-			enhanced := make([]model.EnhancedFriendRecommendation, len(result.Friends))
-			for i, f := range result.Friends {
-				enhanced[i] = model.EnhancedFriendRecommendation{
-					FriendID:    f.FriendID,
-					Name:        f.Name,
-					Avatar:      f.Avatar,
-					Probability: f.Probability,
-					Confidence:  f.Confidence,
-					Reason:      f.Reason,
-					Color:       f.Color,
-					UpdatedAt:   f.UpdatedAt,
-				}
-				if analysis, ok := analysisMap[f.FriendID]; ok {
-					enhanced[i].LifeStatus = &analysis.LifeStatus
-				}
-			}
-
-			response.Success(c, model.EnhancedFreeProbabilityResponse{
-				Friends:     enhanced,
-				GeneratedAt: result.GeneratedAt,
-			})
-			return
+		// 优先使用缓存的 LLM 分析结果
+		if analysis, ok := analysisMap[f.FriendID]; ok && analysis != nil {
+			enhanced[i].Probability = analysis.Availability.Probability
+			enhanced[i].Confidence = analysis.Availability.Confidence
+			enhanced[i].Reason = analysis.Availability.Reason
+			enhanced[i].Color = model.GetProbabilityColor(analysis.Availability.Probability)
+			enhanced[i].LifeStatus = &analysis.LifeStatus
+			enhanced[i].UpdatedAt = now.UnixMilli()
+		} else {
+			// 没有缓存时使用规则计算的结果
+			enhanced[i].Probability = f.Probability
+			enhanced[i].Confidence = f.Confidence
+			enhanced[i].Reason = f.Reason
+			enhanced[i].Color = f.Color
 		}
 	}
 
-	response.Success(c, result)
+	// 按概率排序（降序）
+	for i := 0; i < len(enhanced)-1; i++ {
+		for j := i + 1; j < len(enhanced); j++ {
+			if enhanced[j].Probability > enhanced[i].Probability {
+				enhanced[i], enhanced[j] = enhanced[j], enhanced[i]
+			}
+		}
+	}
+
+	response.Success(c, model.EnhancedFreeProbabilityResponse{
+		Friends:     enhanced,
+		GeneratedAt: now.UnixMilli(),
+	})
 }
 
 // QueryAgentData Agent 间数据请求
