@@ -123,7 +123,7 @@ func main() {
 
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
-	userHandler := handler.NewUserHandler(userService)
+	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL)
 	circleHandler := handler.NewCircleHandler(circleService)
 	availabilityHandler := handler.NewAvailabilityHandler(availabilityService)
 	conversationHandler := handler.NewConversationHandler(conversationService)
@@ -174,6 +174,8 @@ func main() {
 			{
 				users.GET("/me", userHandler.GetMe)
 				users.PUT("/me", userHandler.UpdateMe)
+				users.GET("/me/poster", userHandler.GetMyPoster)
+				users.GET("/me/invite", userHandler.GetMyInviteInfo)
 				users.GET("/search", userHandler.SearchUsers)
 				users.GET("/:id", userHandler.GetUser)
 			}

@@ -1,18 +1,28 @@
 package handler
 
 import (
+	"net/http"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 	"youkong/internal/middleware"
+	"youkong/internal/pkg/poster"
 	"youkong/internal/pkg/response"
 	"youkong/internal/service"
 )
 
 type UserHandler struct {
-	userService *service.UserService
+	userService     *service.UserService
+	posterGenerator *poster.Generator
+	inviteBaseURL   string
 }
 
-func NewUserHandler(userService *service.UserService) *UserHandler {
-	return &UserHandler{userService: userService}
+func NewUserHandler(userService *service.UserService, posterGenerator *poster.Generator, inviteBaseURL string) *UserHandler {
+	return &UserHandler{
+		userService:     userService,
+		posterGenerator: posterGenerator,
+		inviteBaseURL:   inviteBaseURL,
+	}
 }
 
 func (h *UserHandler) GetMe(c *gin.Context) {
@@ -91,4 +101,75 @@ func (h *UserHandler) SearchUsers(c *gin.Context) {
 	}
 
 	response.Success(c, profiles)
+}
+
+// GetMyPoster 获取我的邀请海报
+// GET /api/v1/users/me/poster
+func (h *UserHandler) GetMyPoster(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	user, err := h.userService.GetByID(c.Request.Context(), userID)
+	if err != nil {
+		response.InternalError(c, err.Error())
+		return
+	}
+	if user == nil {
+		response.NotFound(c, "用户不存在")
+		return
+	}
+
+	// 生成固定的邀请码（用户ID前8位，去掉横杠）
+	inviteCode := strings.ReplaceAll(userID, "-", "")[:8]
+	inviteURL := h.inviteBaseURL + inviteCode
+
+	// 生成海报
+	data := &poster.PosterData{
+		InviterNickname: user.Nickname,
+		InviterAvatar:   user.Avatar,
+		InviteCode:      inviteCode,
+		InviteURL:       inviteURL,
+	}
+
+	posterBytes, err := h.posterGenerator.GeneratePoster(data)
+	if err != nil {
+		response.Error(c, response.CodeInternalError, "生成海报失败: "+err.Error())
+		return
+	}
+
+	c.Header("Content-Type", "image/png")
+	c.Header("Content-Disposition", "inline; filename=\"my_invite_poster.png\"")
+	c.Data(http.StatusOK, "image/png", posterBytes)
+}
+
+// GetMyInviteInfo 获取我的邀请信息
+// GET /api/v1/users/me/invite
+func (h *UserHandler) GetMyInviteInfo(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	user, err := h.userService.GetByID(c.Request.Context(), userID)
+	if err != nil {
+		response.InternalError(c, err.Error())
+		return
+	}
+	if user == nil {
+		response.NotFound(c, "用户不存在")
+		return
+	}
+
+	// 生成固定的邀请码
+	inviteCode := strings.ReplaceAll(userID, "-", "")[:8]
+	inviteURL := h.inviteBaseURL + inviteCode
+
+	response.Success(c, gin.H{
+		"code":      inviteCode,
+		"inviteUrl": inviteURL,
+	})
 }
