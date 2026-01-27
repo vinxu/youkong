@@ -11,18 +11,19 @@ import (
 )
 
 const (
-	openRouterAPIURL = "https://openrouter.ai/api/v1/chat/completions"
-	defaultModel     = "google/gemini-2.0-flash-exp"
+	// 阿里云通义千问 API
+	qwenAPIURL   = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+	defaultModel = "qwen-max"
 )
 
-// OpenRouterClient OpenRouter API 客户端
+// OpenRouterClient LLM API 客户端（保持名称兼容，实际使用阿里云通义千问）
 type OpenRouterClient struct {
 	apiKey     string
 	model      string
 	httpClient *http.Client
 }
 
-// NewOpenRouterClient 创建 OpenRouter 客户端
+// NewOpenRouterClient 创建 LLM 客户端
 func NewOpenRouterClient(apiKey string, model string) *OpenRouterClient {
 	if model == "" {
 		model = defaultModel
@@ -31,7 +32,7 @@ func NewOpenRouterClient(apiKey string, model string) *OpenRouterClient {
 		apiKey: apiKey,
 		model:  model,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 60 * time.Second, // 增加超时时间
 		},
 	}
 }
@@ -57,6 +58,7 @@ type ChatResponse struct {
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
+		Code    string `json:"code"`
 	} `json:"error,omitempty"`
 }
 
@@ -74,15 +76,13 @@ func (c *OpenRouterClient) Chat(ctx context.Context, prompt string) (string, err
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", openRouterAPIURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", qwenAPIURL, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	httpReq.Header.Set("HTTP-Referer", "https://youkong.app")
-	httpReq.Header.Set("X-Title", "YouKong")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -101,7 +101,7 @@ func (c *OpenRouterClient) Chat(ctx context.Context, prompt string) (string, err
 	}
 
 	if chatResp.Error != nil {
-		return "", fmt.Errorf("api error: %s", chatResp.Error.Message)
+		return "", fmt.Errorf("api error: %s (code: %s)", chatResp.Error.Message, chatResp.Error.Code)
 	}
 
 	if len(chatResp.Choices) == 0 {
@@ -125,10 +125,10 @@ const (
 type ActivityCategory string
 
 const (
-	ActivityCategoryLeisure      ActivityCategory = "休闲"
-	ActivityCategoryWork         ActivityCategory = "工作"
-	ActivityCategorySocial       ActivityCategory = "社交"
-	ActivityCategoryIdle         ActivityCategory = "闲置"
+	ActivityCategoryLeisure ActivityCategory = "休闲"
+	ActivityCategoryWork    ActivityCategory = "工作"
+	ActivityCategorySocial  ActivityCategory = "社交"
+	ActivityCategoryIdle    ActivityCategory = "闲置"
 )
 
 // LocationCategory 位置类别（脱敏后的数据）
@@ -145,11 +145,11 @@ const (
 type TimePeriod string
 
 const (
-	TimePeriodWorkHours   TimePeriod = "工作时间"
-	TimePeriodAfterWork   TimePeriod = "下班后"
-	TimePeriodLateNight   TimePeriod = "深夜"
-	TimePeriodWeekend     TimePeriod = "周末"
-	TimePeriodLunchBreak  TimePeriod = "午休"
+	TimePeriodWorkHours    TimePeriod = "工作时间"
+	TimePeriodAfterWork    TimePeriod = "下班后"
+	TimePeriodLateNight    TimePeriod = "深夜"
+	TimePeriodWeekend      TimePeriod = "周末"
+	TimePeriodLunchBreak   TimePeriod = "午休"
 	TimePeriodEarlyMorning TimePeriod = "清晨"
 )
 
@@ -174,15 +174,13 @@ func (c *OpenRouterClient) ChatWithMessages(ctx context.Context, messages []Chat
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", openRouterAPIURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", qwenAPIURL, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	httpReq.Header.Set("HTTP-Referer", "https://youkong.app")
-	httpReq.Header.Set("X-Title", "YouKong")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -201,7 +199,7 @@ func (c *OpenRouterClient) ChatWithMessages(ctx context.Context, messages []Chat
 	}
 
 	if chatResp.Error != nil {
-		return "", fmt.Errorf("api error: %s", chatResp.Error.Message)
+		return "", fmt.Errorf("api error: %s (code: %s)", chatResp.Error.Message, chatResp.Error.Code)
 	}
 
 	if len(chatResp.Choices) == 0 {
