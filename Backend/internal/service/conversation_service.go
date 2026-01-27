@@ -13,14 +13,16 @@ import (
 )
 
 type ConversationService struct {
-	messageRepo *repository.MessageRepository
-	userRepo    *repository.UserRepository
+	messageRepo         *repository.MessageRepository
+	userRepo            *repository.UserRepository
+	notificationService *NotificationService
 }
 
-func NewConversationService(messageRepo *repository.MessageRepository, userRepo *repository.UserRepository) *ConversationService {
+func NewConversationService(messageRepo *repository.MessageRepository, userRepo *repository.UserRepository, notificationService *NotificationService) *ConversationService {
 	return &ConversationService{
-		messageRepo: messageRepo,
-		userRepo:    userRepo,
+		messageRepo:         messageRepo,
+		userRepo:            userRepo,
+		notificationService: notificationService,
 	}
 }
 
@@ -194,7 +196,7 @@ func (s *ConversationService) SendMessage(ctx context.Context, conversationID, s
 		ConversationID: conversationID,
 		SenderID:       senderID,
 		Type:           req.Type,
-		Metadata:       req.Metadata,
+		Metadata:       model.NullRawMessage(req.Metadata),
 		CreatedAt:      time.Now(),
 	}
 
@@ -210,5 +212,20 @@ func (s *ConversationService) SendMessage(ctx context.Context, conversationID, s
 	_ = s.messageRepo.UpdateConversationLastMessage(ctx, conversationID)
 
 	sender, _ := s.userRepo.GetByID(ctx, senderID)
+
+	// 发送推送通知给对方
+	if s.notificationService != nil {
+		recipientID := conv.User1ID
+		if recipientID == senderID {
+			recipientID = conv.User2ID
+		}
+		// 异步发送推送，不阻塞主流程
+		go func() {
+			if sender != nil {
+				s.notificationService.NotifyNewMessage(context.Background(), recipientID, msg, sender)
+			}
+		}()
+	}
+
 	return msg.ToResponse(sender), nil
 }

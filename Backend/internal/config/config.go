@@ -17,6 +17,22 @@ type Config struct {
 	Invitation InvitationConfig
 	LLM        LLMConfig
 	Deploy     DeployConfig
+	APNs       APNsConfig
+	TPNS       TPNSConfig
+}
+
+type APNsConfig struct {
+	KeyPath    string // AuthKey 文件路径
+	KeyID      string // 密钥 ID
+	TeamID     string // 开发者团队 ID
+	BundleID   string // App 包名
+	Production bool   // 是否生产环境
+}
+
+type TPNSConfig struct {
+	AccessID  string // 腾讯云 TPNS Access ID
+	AccessKey string // 腾讯云 TPNS Access Key（用于客户端）
+	SecretKey string // 腾讯云 TPNS Secret Key（用于服务端签名）
 }
 
 type LLMConfig struct {
@@ -117,6 +133,11 @@ func Load() (*Config, error) {
 	viper.SetDefault("DEPLOY_WEB_DIR", "/opt/youkong/web")
 	viper.SetDefault("DEPLOY_PROXY", "https://ghfast.top/")
 
+	// APNs 默认值
+	viper.SetDefault("APNS_PRODUCTION", false)
+
+	// TPNS 无默认值
+
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			return nil, fmt.Errorf("读取配置文件失败: %w", err)
@@ -175,6 +196,18 @@ func Load() (*Config, error) {
 			WorkDir:    viper.GetString("DEPLOY_WORK_DIR"),
 			WebDir:     viper.GetString("DEPLOY_WEB_DIR"),
 			Proxy:      viper.GetString("DEPLOY_PROXY"),
+		},
+		APNs: APNsConfig{
+			KeyPath:    viper.GetString("APNS_KEY_PATH"),
+			KeyID:      viper.GetString("APNS_KEY_ID"),
+			TeamID:     viper.GetString("APNS_TEAM_ID"),
+			BundleID:   viper.GetString("APNS_BUNDLE_ID"),
+			Production: viper.GetBool("APNS_PRODUCTION"),
+		},
+		TPNS: TPNSConfig{
+			AccessID:  viper.GetString("TPNS_ACCESS_ID"),
+			AccessKey: viper.GetString("TPNS_ACCESS_KEY"),
+			SecretKey: viper.GetString("TPNS_SECRET_KEY"),
 		},
 	}
 

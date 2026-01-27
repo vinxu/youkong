@@ -27,6 +27,14 @@ Backend/.env
 .env
 .env.local
 
+# Keys & Secrets
+Backend/config/keys/
+*.p8
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+
 # IDE
 .idea/
 .vscode/

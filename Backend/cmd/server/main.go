@@ -19,8 +19,10 @@ import (
 	"youkong/internal/pkg/jwt"
 	"youkong/internal/pkg/llm"
 	"youkong/internal/pkg/poster"
+	"youkong/internal/pkg/push"
 	"youkong/internal/pkg/tencent"
 	"youkong/internal/pkg/wechat"
+	"youkong/internal/pkg/ws"
 	"youkong/internal/repository"
 	"youkong/internal/service"
 )
@@ -84,6 +86,10 @@ func main() {
 	friendshipRepo := repository.NewFriendshipRepository(db)
 	friendRequestRepo := repository.NewFriendRequestRepository(db)
 	memoryRepo := repository.NewMemoryRepository(db)
+	personaRepo := repository.NewPersonaRepository(db)
+	relationshipRepo := repository.NewRelationshipRepository(db)
+	contextRepo := repository.NewContextRepository(db)
+	deviceTokenRepo := repository.NewDeviceTokenRepository(db)
 
 	// 初始化微信客户端
 	var wechatClient *wechat.Client
@@ -97,16 +103,31 @@ func main() {
 	// 初始化海报生成器
 	posterGenerator := poster.NewGenerator(cfg.Invitation.BaseURL)
 
-	// 初始化Service
-	smsService := service.NewSMSService(smsClient, redisClient)
-	authService := service.NewAuthService(userRepo, smsService, jwtManager)
-	userService := service.NewUserService(userRepo)
-	circleService := service.NewCircleService(circleRepo, userRepo)
-	availabilityService := service.NewAvailabilityService(availabilityRepo, circleRepo, userRepo)
-	conversationService := service.NewConversationService(messageRepo, userRepo)
-	wechatService := service.NewWechatService(wechatRepo, userRepo, invitationRepo, friendshipRepo, circleRepo, wechatClient, jwtManager)
-	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
-	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo, friendRequestRepo)
+	// 初始化 WebSocket 管理器
+	wsManager := ws.NewManager()
+
+	// 初始化推送客户端
+	var pushManager *push.Manager
+	{
+		// APNs 客户端 (iOS)
+		apnsClient, err := push.NewAPNsClient(cfg.APNs)
+		if err != nil {
+			logger.Warn("初始化 APNs 客户端失败", zap.Error(err))
+		}
+
+		// TPNS 客户端 (Android)
+		tpnsClient := push.NewTPNSClient(cfg.TPNS)
+
+		pushManager = push.NewManager(apnsClient, tpnsClient)
+		if pushManager.IsEnabled() {
+			logger.Info("推送服务初始化成功")
+		} else {
+			logger.Warn("推送服务未启用（缺少配置）")
+		}
+	}
+
+	// 初始化 NotificationService（需要在 conversationService 之前）
+	notificationService := service.NewNotificationService(deviceTokenRepo, pushManager, wsManager)
 
 	// 初始化 LLM 客户端
 	var llmClient *llm.OpenRouterClient
@@ -117,21 +138,50 @@ func main() {
 		logger.Warn("LLM_API_KEY 未配置，将使用默认理由生成")
 	}
 
+	// 初始化Service
+	smsService := service.NewSMSService(smsClient, redisClient)
+	authService := service.NewAuthService(userRepo, smsService, jwtManager)
+	userService := service.NewUserService(userRepo)
+	circleService := service.NewCircleService(circleRepo, userRepo)
+	availabilityService := service.NewAvailabilityService(availabilityRepo, circleRepo, userRepo)
+	conversationService := service.NewConversationService(messageRepo, userRepo, notificationService)
+	wechatService := service.NewWechatService(wechatRepo, userRepo, invitationRepo, friendshipRepo, circleRepo, wechatClient, jwtManager)
+	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
+	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo, friendRequestRepo)
 	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, llmClient)
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 
+	// 初始化 Agent 聊天相关服务
+	relationshipService := service.NewRelationshipService(relationshipRepo, messageRepo, llmClient)
+	agentChatService := service.NewAgentChatService(
+		contextRepo,
+		messageRepo,
+		personaRepo,
+		relationshipRepo,
+		userRepo,
+		memoryRepo,
+		llmClient,
+		wsManager,
+		relationshipService,
+		notificationService,
+	)
+	personaService := service.NewPersonaService(personaRepo, memoryRepo, llmClient)
+	_ = personaService // 备用，后续可在状态上报时调用
+
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
-	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL)
+	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL, messageRepo)
 	circleHandler := handler.NewCircleHandler(circleService)
 	availabilityHandler := handler.NewAvailabilityHandler(availabilityService)
-	conversationHandler := handler.NewConversationHandler(conversationService)
+	conversationHandler := handler.NewConversationHandler(conversationService, agentChatService)
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
 	friendshipHandler := handler.NewFriendshipHandler(friendshipService)
 	agentHandler := handler.NewAgentHandler(agentService, memoryService)
 	contactHandler := handler.NewContactHandler(contactService)
 	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
+	wsHandler := handler.NewWSHandler(wsManager, jwtManager)
+	deviceHandler := handler.NewDeviceHandler(notificationService)
 
 	// 设置Gin模式
 	gin.SetMode(cfg.Server.Mode)
@@ -149,6 +199,9 @@ func main() {
 
 	// 部署 webhook
 	r.POST("/deploy", deployHandler.Deploy)
+
+	// WebSocket 端点
+	r.GET("/ws", wsHandler.HandleWS)
 
 	// API v1 路由组
 	v1 := r.Group("/api/v1")
@@ -176,6 +229,7 @@ func main() {
 				users.PUT("/me", userHandler.UpdateMe)
 				users.GET("/me/poster", userHandler.GetMyPoster)
 				users.GET("/me/invite", userHandler.GetMyInviteInfo)
+				users.GET("/me/badge", userHandler.GetBadgeCount)
 				users.GET("/search", userHandler.SearchUsers)
 				users.GET("/:id", userHandler.GetUser)
 			}
@@ -208,6 +262,7 @@ func main() {
 				conversations.POST("", conversationHandler.CreateConversation)
 				conversations.GET("/:id/messages", conversationHandler.GetMessages)
 				conversations.POST("/:id/messages", conversationHandler.SendMessage)
+				conversations.POST("/:id/agent-reply", conversationHandler.AgentReply)
 			}
 
 			// 邀请模块
@@ -255,6 +310,13 @@ func main() {
 			{
 				contacts.POST("/match", contactHandler.MatchContacts)
 				contacts.POST("/add-friends", contactHandler.BatchAddFriends)
+			}
+
+			// 设备模块（推送 Token）
+			devices := authorized.Group("/devices")
+			{
+				devices.POST("/token", deviceHandler.RegisterToken)
+				devices.DELETE("/token", deviceHandler.UnregisterToken)
 			}
 		}
 	}
