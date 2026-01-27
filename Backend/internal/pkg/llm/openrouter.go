@@ -12,7 +12,7 @@ import (
 
 const (
 	openRouterAPIURL = "https://openrouter.ai/api/v1/chat/completions"
-	defaultModel     = "google/gemini-2.5-pro-preview-06-05"
+	defaultModel     = "google/gemini-3-flash-preview"
 )
 
 // OpenRouterClient OpenRouter API 客户端

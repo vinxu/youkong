@@ -105,9 +105,10 @@ func (s *AgentChatService) GenerateReply(ctx context.Context, conversationID, us
 		return nil, fmt.Errorf("获取上下文失败: %w", err)
 	}
 
-	// 同步对方的新消息到上下文
-	if err := s.syncPartnerMessages(ctx, convCtx, conversationID, userID); err != nil {
-		// 同步失败不影响主流程
+	// 同步所有新消息到上下文（正确分配角色）
+	if err := s.syncMessages(ctx, convCtx, conversationID, userID); err != nil {
+		// 同步失败不影响主流程，记录日志
+		log.Printf("[AgentChat] 同步消息失败: %v", err)
 	}
 
 	// 获取 LLM 消息
@@ -266,8 +267,11 @@ func (s *AgentChatService) buildSystemPrompt(ctx context.Context, user, partner 
 	return s.chatSession.BuildSystemPrompt(data)
 }
 
-// syncPartnerMessages 同步对方的新消息到上下文
-func (s *AgentChatService) syncPartnerMessages(ctx context.Context, convCtx *model.ConversationContext, conversationID, userID string) error {
+// syncMessages 同步所有未同步的消息到上下文，正确分配角色
+// 从 LLM 视角：
+//   - "assistant" = 我（当前用户）说的话（包括 Agent 代说的）
+//   - "user" = 对方说的话（包括对方的 Agent 代说的）
+func (s *AgentChatService) syncMessages(ctx context.Context, convCtx *model.ConversationContext, conversationID, userID string) error {
 	// 获取最后同步消息之后的新消息
 	newMessages, err := s.messageRepo.GetMessagesAfterID(ctx, conversationID, convCtx.LastSyncMsgID, 20)
 	if err != nil {
@@ -278,21 +282,23 @@ func (s *AgentChatService) syncPartnerMessages(ctx context.Context, convCtx *mod
 		return nil
 	}
 
-	// 将对方的消息添加到上下文
+	// 将所有新消息添加到上下文，根据发送者分配正确的角色
 	for _, msg := range newMessages {
-		if msg.SenderID == userID {
-			// 跳过自己发的消息（已经在上下文中）
-			continue
-		}
-
 		content := ""
 		if msg.Content.Valid {
 			content = msg.Content.String
 		}
 
-		// 以 user 角色添加对方的消息
-		if err := convCtx.AddMessage("user", fmt.Sprintf("[对方回复] %s", content)); err != nil {
-			return err
+		if msg.SenderID == userID {
+			// 这是"我"（包括我的 Agent）发送的消息 → "assistant"
+			if err := convCtx.AddMessage("assistant", content); err != nil {
+				return err
+			}
+		} else {
+			// 这是对方发送的消息 → "user"
+			if err := convCtx.AddMessage("user", content); err != nil {
+				return err
+			}
 		}
 
 		// 更新最后同步消息ID
