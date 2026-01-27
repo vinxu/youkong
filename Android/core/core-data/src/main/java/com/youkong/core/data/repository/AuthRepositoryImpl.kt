@@ -1,9 +1,10 @@
 package com.youkong.core.data.repository
 
-import com.youkong.core.data.mapper.toDomain
+import com.youkong.core.data.mapper.toModel
 import com.youkong.core.datastore.TokenManager
 import com.youkong.core.datastore.UserPreferences
 import com.youkong.core.domain.model.LoginResult
+import com.youkong.core.domain.push.PushManager
 import com.youkong.core.domain.repository.AuthRepository
 import com.youkong.core.network.api.AuthApi
 import com.youkong.core.network.model.SendSmsRequest
@@ -17,6 +18,7 @@ class AuthRepositoryImpl @Inject constructor(
     private val authApi: AuthApi,
     private val tokenManager: TokenManager,
     private val userPreferences: UserPreferences,
+    private val pushManager: PushManager,
 ) : AuthRepository {
 
     override val isLoggedIn: Flow<Boolean> = tokenManager.isLoggedIn
@@ -39,7 +41,7 @@ class AuthRepositoryImpl @Inject constructor(
             val response = authApi.verifySms(VerifySmsRequest(phone, code))
             val loginData = response.data
             if (response.isSuccess && loginData != null) {
-                val user = loginData.user.toDomain()
+                val user = loginData.user.toModel()
 
                 // 保存 token
                 tokenManager.saveAccessToken(loginData.token)
@@ -52,6 +54,9 @@ class AuthRepositoryImpl @Inject constructor(
                     avatar = user.avatar,
                     isNewUser = loginData.isNewUser,
                 )
+
+                // 绑定推送账号
+                pushManager.bindAccount(user.id)
 
                 Result.success(
                     LoginResult(
@@ -69,6 +74,8 @@ class AuthRepositoryImpl @Inject constructor(
     }
 
     override suspend fun logout() {
+        // 解绑推送账号
+        pushManager.unbindAccount()
         tokenManager.clearTokens()
         userPreferences.clear()
     }

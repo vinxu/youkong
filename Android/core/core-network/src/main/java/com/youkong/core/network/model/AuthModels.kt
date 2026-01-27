@@ -61,3 +61,9 @@ data class UpdateUserRequest(
 data class SearchUsersRequest(
     val keyword: String,
 )
+
+@Serializable
+data class MyInviteResponse(
+    val code: String,
+    val inviteUrl: String,
+)

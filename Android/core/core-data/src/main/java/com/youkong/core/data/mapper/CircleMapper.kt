@@ -6,7 +6,7 @@ import com.youkong.core.network.model.CircleDetailResponse
 import com.youkong.core.network.model.CircleResponse
 import kotlinx.datetime.Instant
 
-fun CircleResponse.toDomain(): Circle = Circle(
+fun CircleResponse.toModel(): Circle = Circle(
     id = id,
     name = name,
     emoji = emoji,
@@ -15,13 +15,13 @@ fun CircleResponse.toDomain(): Circle = Circle(
     createdAt = Instant.parse(createdAt),
 )
 
-fun CircleDetailResponse.toDomain(): CircleDetail = CircleDetail(
+fun CircleDetailResponse.toModel(): CircleDetail = CircleDetail(
     id = id,
     name = name,
     emoji = emoji,
     color = color,
     ownerId = ownerId,
     memberCount = memberCount,
-    members = members?.map { it.toDomain() },
+    members = members?.map { it.toModel() },
     createdAt = Instant.parse(createdAt),
 )

@@ -1,9 +1,14 @@
 package com.youkong.feature.friends.screen
 
-import android.content.ClipData
-import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -12,6 +17,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -29,10 +35,8 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -58,11 +62,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -70,19 +76,28 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.AsyncImage
-import com.youkong.core.domain.model.Circle
+import coil.compose.AsyncImagePainter
+import coil.compose.rememberAsyncImagePainter
+import coil.imageLoader
+import coil.request.ImageRequest
+import coil.request.SuccessResult
 import com.youkong.core.domain.model.Friend
 import com.youkong.core.domain.model.FriendRequest
 import com.youkong.core.domain.model.FriendRequestStatus
-import com.youkong.core.domain.model.Invitation
-import com.youkong.core.domain.model.InvitationStatus
 import com.youkong.core.domain.model.SendRequestStatus
 import com.youkong.core.ui.theme.Gray400
 import com.youkong.core.ui.theme.Primary
 import com.youkong.core.ui.theme.TextSecondary
 import com.youkong.feature.friends.viewmodel.AddFriendViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.io.OutputStream
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -91,32 +106,21 @@ fun AddFriendScreen(
     viewModel: AddFriendViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Dialog/Sheet 状态
     var showSendRequestSheet by remember { mutableStateOf(false) }
     var showSendRequestResultDialog by remember { mutableStateOf(false) }
-    var showCreateInvitationSheet by remember { mutableStateOf(false) }
-    var showShareInvitationSheet by remember { mutableStateOf<Invitation?>(null) }
+    var showPosterSheet by remember { mutableStateOf(false) }
     var showFriendRequestsSheet by remember { mutableStateOf(false) }
     var showFriendsManageSheet by remember { mutableStateOf(false) }
     var showDeleteFriendDialog by remember { mutableStateOf<Friend?>(null) }
-    var showDisableInvitationDialog by remember { mutableStateOf<Invitation?>(null) }
 
     // 显示错误
     LaunchedEffect(uiState.error) {
         uiState.error?.let { error ->
             snackbarHostState.showSnackbar(error)
             viewModel.clearError()
-        }
-    }
-
-    // 创建邀请成功后显示分享
-    LaunchedEffect(uiState.createInvitationSuccess) {
-        uiState.createInvitationSuccess?.let { invitation ->
-            showShareInvitationSheet = invitation
-            viewModel.clearCreateInvitationSuccess()
         }
     }
 
@@ -169,8 +173,8 @@ fun AddFriendScreen(
                 FeatureCard(
                     emoji = "🔗",
                     title = "邀请好友",
-                    subtitle = "生成邀请链接分享给朋友",
-                    onClick = { showCreateInvitationSheet = true },
+                    subtitle = "分享邀请海报给朋友",
+                    onClick = { showPosterSheet = true },
                 )
             }
 
@@ -196,29 +200,6 @@ fun AddFriendScreen(
                     subtitle = "共 ${uiState.friends.size} 位好友",
                     onClick = { showFriendsManageSheet = true },
                 )
-            }
-
-            // 我的邀请链接
-            if (uiState.invitations.isNotEmpty()) {
-                item {
-                    Text(
-                        text = "我的邀请链接",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
-
-                items(
-                    items = uiState.invitations.take(5),
-                    key = { it.id },
-                ) { invitation ->
-                    InvitationCard(
-                        invitation = invitation,
-                        onShareClick = { showShareInvitationSheet = invitation },
-                        onDeleteClick = { showDisableInvitationDialog = invitation },
-                    )
-                }
             }
         }
     }
@@ -286,33 +267,11 @@ fun AddFriendScreen(
         }
     }
 
-    // 创建邀请 BottomSheet
-    if (showCreateInvitationSheet) {
-        CreateInvitationSheet(
-            circles = uiState.circles,
-            isCreating = uiState.isCreatingInvitation,
-            onDismiss = { showCreateInvitationSheet = false },
-            onCreate = { circleId ->
-                viewModel.createInvitation(circleId)
-                showCreateInvitationSheet = false
-            },
-        )
-    }
-
-    // 分享邀请 BottomSheet
-    showShareInvitationSheet?.let { invitation ->
+    // 邀请海报 BottomSheet
+    if (showPosterSheet) {
         ShareInvitationSheet(
-            invitation = invitation,
-            qrCodeUrl = viewModel.getInvitationQrCodeUrl(invitation.id),
-            onDismiss = { showShareInvitationSheet = null },
-            onCopyLink = {
-                copyToClipboard(context, invitation.inviteUrl)
-                showShareInvitationSheet = null
-            },
-            onShare = {
-                shareInvitation(context, invitation)
-                showShareInvitationSheet = null
-            },
+            posterUrl = viewModel.getMyPosterUrl(),
+            onDismiss = { showPosterSheet = false },
         )
     }
 
@@ -357,30 +316,6 @@ fun AddFriendScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteFriendDialog = null }) {
-                    Text("取消")
-                }
-            },
-        )
-    }
-
-    // 禁用邀请确认对话框
-    showDisableInvitationDialog?.let { invitation ->
-        AlertDialog(
-            onDismissRequest = { showDisableInvitationDialog = null },
-            title = { Text("禁用邀请链接") },
-            text = { Text("禁用后此链接将无法使用，确定要禁用吗？") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        viewModel.disableInvitation(invitation.id)
-                        showDisableInvitationDialog = null
-                    }
-                ) {
-                    Text("禁用", color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDisableInvitationDialog = null }) {
                     Text("取消")
                 }
             },
@@ -451,108 +386,6 @@ private fun FeatureCard(
                 contentDescription = null,
                 tint = TextSecondary,
             )
-        }
-    }
-}
-
-@Composable
-private fun InvitationCard(
-    invitation: Invitation,
-    onShareClick: () -> Unit,
-    onDeleteClick: () -> Unit,
-) {
-    val isValid = invitation.status == InvitationStatus.ACTIVE && invitation.isValid
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface,
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            val circle = invitation.circle
-            if (circle != null) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(
-                            Color(android.graphics.Color.parseColor(circle.color ?: "#10B981"))
-                                .copy(alpha = 0.2f)
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = circle.emoji,
-                        fontSize = 18.sp,
-                    )
-                }
-            } else {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Primary.copy(alpha = 0.2f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "👋",
-                        fontSize = 18.sp,
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.width(12.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = circle?.name ?: "好友邀请",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                )
-                Text(
-                    text = "已使用 ${invitation.useCount}/${invitation.maxUses} 次",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
-                )
-            }
-
-            if (isValid) {
-                IconButton(
-                    onClick = onDeleteClick,
-                    modifier = Modifier.size(36.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Delete,
-                        contentDescription = "禁用",
-                        tint = TextSecondary,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-                IconButton(
-                    onClick = onShareClick,
-                    modifier = Modifier.size(36.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Share,
-                        contentDescription = "分享",
-                        tint = Primary,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-            } else {
-                Text(
-                    text = "已失效",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextSecondary,
-                )
-            }
         }
     }
 }
@@ -651,13 +484,27 @@ private fun SendFriendRequestSheet(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CreateInvitationSheet(
-    circles: List<Circle>,
-    isCreating: Boolean,
+private fun ShareInvitationSheet(
+    posterUrl: String,
     onDismiss: () -> Unit,
-    onCreate: (circleId: String?) -> Unit,
 ) {
-    val sheetState = rememberModalBottomSheetState()
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var isLoading by remember { mutableStateOf(false) }
+    var isSaving by remember { mutableStateOf(false) }
+
+    // 使用全局配置的 ImageLoader（带认证）
+    val imageLoader = context.imageLoader
+
+    // 使用 painter 来获取加载状态和 drawable
+    val painter = rememberAsyncImagePainter(
+        model = ImageRequest.Builder(context)
+            .data(posterUrl)
+            .crossfade(true)
+            .build(),
+        imageLoader = imageLoader,
+    )
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -666,171 +513,68 @@ private fun CreateInvitationSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(24.dp),
+                .padding(horizontal = 24.dp)
+                .padding(top = 8.dp, bottom = 32.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
-                text = "创建邀请链接",
+                text = "分享邀请海报",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
             )
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // 直接邀请好友
+            // 海报图片
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(enabled = !isCreating) { onCreate(null) },
+                    .aspectRatio(0.5625f), // 9:16 比例
+                shape = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    containerColor = Color.White,
                 ),
+                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        text = "👋",
-                        fontSize = 24.sp,
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "邀请成为好友",
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                        Text(
-                            text = "对方接受后成为好友",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary,
-                        )
-                    }
-                }
-            }
-
-            if (circles.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Text(
-                    text = "或邀请加入圈子",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = TextSecondary,
-                    modifier = Modifier.align(Alignment.Start),
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                circles.forEach { circle ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .clickable(enabled = !isCreating) { onCreate(circle.id) },
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        ),
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(
-                                        Color(android.graphics.Color.parseColor(circle.color))
-                                            .copy(alpha = 0.2f)
-                                    ),
-                                contentAlignment = Alignment.Center,
+                    when (painter.state) {
+                        is AsyncImagePainter.State.Loading -> {
+                            CircularProgressIndicator()
+                        }
+                        is AsyncImagePainter.State.Error -> {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
                             ) {
                                 Text(
-                                    text = circle.emoji,
-                                    fontSize = 18.sp,
+                                    text = "加载失败",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = TextSecondary,
                                 )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                TextButton(onClick = {
+                                    // 触发重新加载
+                                }) {
+                                    Text("重试")
+                                }
                             }
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(
-                                text = circle.name,
-                                style = MaterialTheme.typography.titleMedium,
+                        }
+                        else -> {
+                            AsyncImage(
+                                model = posterUrl,
+                                contentDescription = "邀请海报",
+                                imageLoader = imageLoader,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Fit,
                             )
                         }
                     }
                 }
             }
 
-            if (isCreating) {
-                Spacer(modifier = Modifier.height(16.dp))
-                CircularProgressIndicator()
-            }
-
-            Spacer(modifier = Modifier.height(32.dp))
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ShareInvitationSheet(
-    invitation: Invitation,
-    qrCodeUrl: String,
-    onDismiss: () -> Unit,
-    onCopyLink: () -> Unit,
-    onShare: () -> Unit,
-) {
-    val sheetState = rememberModalBottomSheetState()
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                text = "分享邀请",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // 二维码
-            Card(
-                modifier = Modifier.size(200.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = Color.White,
-                ),
-            ) {
-                AsyncImage(
-                    model = qrCodeUrl,
-                    contentDescription = "邀请二维码",
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(16.dp),
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // 邀请链接
-            Text(
-                text = invitation.inviteUrl,
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(20.dp))
 
             // 操作按钮
             Row(
@@ -838,20 +582,158 @@ private fun ShareInvitationSheet(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 OutlinedButton(
-                    onClick = onCopyLink,
+                    onClick = {
+                        scope.launch {
+                            isSaving = true
+                            val saved = savePosterToGallery(context, posterUrl)
+                            isSaving = false
+                            if (saved) {
+                                Toast.makeText(context, "已保存到相册", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "保存失败", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    enabled = !isSaving && painter.state is AsyncImagePainter.State.Success,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("复制链接")
+                    if (isSaving) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text(if (isSaving) "保存中..." else "保存图片")
                 }
                 Button(
-                    onClick = onShare,
+                    onClick = {
+                        scope.launch {
+                            isLoading = true
+                            sharePosterImage(context, posterUrl)
+                            isLoading = false
+                        }
+                    },
+                    enabled = !isLoading && painter.state is AsyncImagePainter.State.Success,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("分享")
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = Color.White,
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text(if (isLoading) "准备中..." else "分享好友")
                 }
             }
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.height(32.dp))
+/**
+ * 保存海报到相册
+ */
+private suspend fun savePosterToGallery(context: Context, posterUrl: String): Boolean {
+    return withContext(Dispatchers.IO) {
+        try {
+            // 使用全局配置的 ImageLoader（带认证）
+            val imageLoader = context.imageLoader
+            val request = ImageRequest.Builder(context)
+                .data(posterUrl)
+                .build()
+            val result = imageLoader.execute(request)
+
+            if (result is SuccessResult) {
+                val bitmap = (result.drawable as? BitmapDrawable)?.bitmap ?: return@withContext false
+
+                val filename = "youkong_invite_${System.currentTimeMillis()}.png"
+                val fos: OutputStream?
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    // Android 10+ 使用 MediaStore
+                    val contentValues = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+                        put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/有空")
+                    }
+                    val uri = context.contentResolver.insert(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        contentValues
+                    )
+                    fos = uri?.let { context.contentResolver.openOutputStream(it) }
+                } else {
+                    // Android 9 及以下
+                    val imagesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                    val youkongDir = File(imagesDir, "有空")
+                    if (!youkongDir.exists()) {
+                        youkongDir.mkdirs()
+                    }
+                    val image = File(youkongDir, filename)
+                    fos = FileOutputStream(image)
+                }
+
+                fos?.use {
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+                }
+
+                true
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+}
+
+/**
+ * 分享海报图片
+ */
+private suspend fun sharePosterImage(context: Context, posterUrl: String) {
+    withContext(Dispatchers.IO) {
+        try {
+            // 使用全局配置的 ImageLoader（带认证）
+            val imageLoader = context.imageLoader
+            val request = ImageRequest.Builder(context)
+                .data(posterUrl)
+                .build()
+            val result = imageLoader.execute(request)
+
+            if (result is SuccessResult) {
+                val bitmap = (result.drawable as? BitmapDrawable)?.bitmap ?: return@withContext
+
+                // 保存到缓存目录
+                val cachePath = File(context.cacheDir, "images")
+                cachePath.mkdirs()
+                val file = File(cachePath, "share_poster.png")
+                FileOutputStream(file).use { fos ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                }
+
+                // 使用 FileProvider 获取 URI
+                val uri = FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    file
+                )
+
+                withContext(Dispatchers.Main) {
+                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                        type = "image/png"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    context.startActivity(Intent.createChooser(shareIntent, "分享邀请海报"))
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "分享失败: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 }
@@ -1213,23 +1095,3 @@ private fun FriendManageCard(
     }
 }
 
-private fun copyToClipboard(context: Context, text: String) {
-    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    val clip = ClipData.newPlainText("邀请链接", text)
-    clipboard.setPrimaryClip(clip)
-}
-
-private fun shareInvitation(context: Context, invitation: Invitation) {
-    val circle = invitation.circle
-    val shareText = if (circle != null) {
-        "我在「有空」邀请你加入「${circle.name}」圈子，一起看看谁有空！\n${invitation.inviteUrl}"
-    } else {
-        "我在「有空」邀请你成为好友，一起看看谁有空！\n${invitation.inviteUrl}"
-    }
-
-    val intent = Intent(Intent.ACTION_SEND).apply {
-        type = "text/plain"
-        putExtra(Intent.EXTRA_TEXT, shareText)
-    }
-    context.startActivity(Intent.createChooser(intent, "分享邀请"))
-}

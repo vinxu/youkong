@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"youkong/internal/model"
+	"youkong/internal/pkg/ws"
 	"youkong/internal/repository"
 )
 
@@ -16,13 +17,15 @@ type ConversationService struct {
 	messageRepo         *repository.MessageRepository
 	userRepo            *repository.UserRepository
 	notificationService *NotificationService
+	wsManager           *ws.Manager
 }
 
-func NewConversationService(messageRepo *repository.MessageRepository, userRepo *repository.UserRepository, notificationService *NotificationService) *ConversationService {
+func NewConversationService(messageRepo *repository.MessageRepository, userRepo *repository.UserRepository, notificationService *NotificationService, wsManager *ws.Manager) *ConversationService {
 	return &ConversationService{
 		messageRepo:         messageRepo,
 		userRepo:            userRepo,
 		notificationService: notificationService,
+		wsManager:           wsManager,
 	}
 }
 
@@ -212,14 +215,22 @@ func (s *ConversationService) SendMessage(ctx context.Context, conversationID, s
 	_ = s.messageRepo.UpdateConversationLastMessage(ctx, conversationID)
 
 	sender, _ := s.userRepo.GetByID(ctx, senderID)
+	msgResp := msg.ToResponse(sender)
 
-	// 发送推送通知给对方
+	// 确定对方用户ID
+	recipientID := conv.User1ID
+	if recipientID == senderID {
+		recipientID = conv.User2ID
+	}
+
+	// 通过 WebSocket 推送给双方
+	if s.wsManager != nil {
+		s.wsManager.SendNewMessage(senderID, conversationID, msgResp)
+		s.wsManager.SendNewMessage(recipientID, conversationID, msgResp)
+	}
+
+	// 发送远程推送通知给对方（如果不在线）
 	if s.notificationService != nil {
-		recipientID := conv.User1ID
-		if recipientID == senderID {
-			recipientID = conv.User2ID
-		}
-		// 异步发送推送，不阻塞主流程
 		go func() {
 			if sender != nil {
 				s.notificationService.NotifyNewMessage(context.Background(), recipientID, msg, sender)
@@ -227,5 +238,5 @@ func (s *ConversationService) SendMessage(ctx context.Context, conversationID, s
 		}()
 	}
 
-	return msg.ToResponse(sender), nil
+	return msgResp, nil
 }

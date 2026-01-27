@@ -7,9 +7,9 @@ import com.youkong.core.domain.model.LocationType
 import com.youkong.core.network.model.AvailabilityResponse
 import kotlinx.datetime.Instant
 
-fun AvailabilityResponse.toDomain(): Availability = Availability(
+fun AvailabilityResponse.toModel(): Availability = Availability(
     id = id,
-    user = user.toDomain(),
+    user = user.toModel(),
     startTime = Instant.parse(startTime),
     endTime = Instant.parse(endTime),
     location = Location(

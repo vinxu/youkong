@@ -1,13 +1,15 @@
 package com.youkong.core.data.repository
 
-import com.youkong.core.data.mapper.toDomain
+import com.youkong.core.data.mapper.toModel
 import com.youkong.core.database.dao.UserDao
 import com.youkong.core.database.entity.toDomain
 import com.youkong.core.database.entity.toEntity
 import com.youkong.core.datastore.UserPreferences
+import com.youkong.core.domain.model.MyInvite
 import com.youkong.core.domain.model.User
 import com.youkong.core.domain.model.UserProfile
 import com.youkong.core.domain.repository.UserRepository
+import com.youkong.core.network.BuildConfig
 import com.youkong.core.network.api.UserApi
 import com.youkong.core.network.model.UpdateUserRequest
 import kotlinx.coroutines.flow.Flow
@@ -32,7 +34,7 @@ class UserRepositoryImpl @Inject constructor(
             val response = userApi.getCurrentUser()
             val data = response.data
             if (response.isSuccess && data != null) {
-                val user = data.toDomain()
+                val user = data.toModel()
                 userDao.insert(user.toEntity())
                 userPreferences.saveUser(
                     id = user.id,
@@ -63,7 +65,7 @@ class UserRepositoryImpl @Inject constructor(
             val response = userApi.updateCurrentUser(UpdateUserRequest(nickname, avatar))
             val data = response.data
             if (response.isSuccess && data != null) {
-                val user = data.toDomain()
+                val user = data.toModel()
                 userDao.insert(user.toEntity())
                 nickname?.let { userPreferences.updateNickname(it) }
                 avatar?.let { userPreferences.updateAvatar(it) }
@@ -81,7 +83,7 @@ class UserRepositoryImpl @Inject constructor(
             val response = userApi.searchUsers(keyword)
             val data = response.data
             if (response.isSuccess && data != null) {
-                Result.success(data.map { it.toDomain() })
+                Result.success(data.map { it.toModel() })
             } else {
                 Result.failure(Exception(response.message))
             }
@@ -95,12 +97,30 @@ class UserRepositoryImpl @Inject constructor(
             val response = userApi.getUser(userId)
             val data = response.data
             if (response.isSuccess && data != null) {
-                Result.success(data.toDomain())
+                Result.success(data.toModel())
             } else {
                 Result.failure(Exception(response.message))
             }
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    override suspend fun getMyInvite(): Result<MyInvite> {
+        return try {
+            val response = userApi.getMyInvite()
+            val data = response.data
+            if (response.isSuccess && data != null) {
+                Result.success(MyInvite(code = data.code, inviteUrl = data.inviteUrl))
+            } else {
+                Result.failure(Exception(response.message))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override fun getMyPosterUrl(): String {
+        return "${BuildConfig.BASE_URL}users/me/poster"
     }
 }

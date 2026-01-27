@@ -19,7 +19,7 @@ struct ProfileView: View {
                     ProfileMenuItem(
                         icon: "person.badge.plus",
                         title: "邀请好友",
-                        destination: AnyView(InvitationListView())
+                        destination: AnyView(MyInviteView())
                     )
 
                     Divider()

@@ -1,4 +1,5 @@
 import SwiftUI
+import Factory
 
 // MARK: - Friends Management View
 
@@ -281,6 +282,63 @@ struct FriendWithInvitationRow: View {
                 .foregroundColor(.secondary)
         }
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Friends Management ViewModel
+
+@MainActor
+class FriendsManagementViewModel: ObservableObject {
+    @Published var friends: [FriendInfo] = []
+    @Published var invitedByMe: [FriendWithInvitation] = []
+    @Published var invitedMe: [FriendWithInvitation] = []
+    @Published var isLoading = false
+    @Published var pendingRequestCount: Int = 0
+
+    @Injected(\.friendshipRepository) private var friendshipRepository
+    @Injected(\.contactRepository) private var contactRepository
+
+    func loadFriends() async {
+        isLoading = true
+        do {
+            friends = try await friendshipRepository.getFriends()
+        } catch {
+            print("Failed to load friends: \(error)")
+        }
+        isLoading = false
+    }
+
+    func loadInvitedByMe() async {
+        do {
+            invitedByMe = try await friendshipRepository.getFriendsInvitedByMe()
+        } catch {
+            print("Failed to load invited by me: \(error)")
+        }
+    }
+
+    func loadInvitedMe() async {
+        do {
+            invitedMe = try await friendshipRepository.getFriendsInvitedMe()
+        } catch {
+            print("Failed to load invited me: \(error)")
+        }
+    }
+
+    func loadPendingRequestCount() async {
+        do {
+            pendingRequestCount = try await contactRepository.getPendingRequestCount()
+        } catch {
+            print("Failed to load pending count: \(error)")
+        }
+    }
+
+    func deleteFriend(_ friend: FriendInfo) async {
+        do {
+            try await friendshipRepository.deleteFriend(userId: friend.user.id)
+            friends.removeAll { $0.id == friend.id }
+        } catch {
+            print("Failed to delete friend: \(error)")
+        }
     }
 }
 

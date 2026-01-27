@@ -79,3 +79,35 @@ export interface InvitePageState {
   circle?: CircleInfo
   isNewUser: boolean
 }
+
+// 消息
+export type MessageType = 'TEXT' | 'AVAILABILITY_CARD' | 'CONFIRM_REQUEST' | 'CONFIRM_RESPONSE'
+
+export interface Message {
+  id: string
+  sender: UserProfile
+  type: MessageType
+  content?: string
+  metadata?: Record<string, unknown>
+  createdAt: string
+  isRead: boolean
+}
+
+export interface Conversation {
+  id: string
+  partner: UserProfile
+  lastMessage?: Message
+  unreadCount: number
+  createdAt: string
+}
+
+// WebSocket 消息
+export type WSMessageType = 'NEW_MESSAGE' | 'PING' | 'PONG'
+
+export interface WSMessage {
+  type: WSMessageType
+  data?: {
+    conversation_id: string
+    message: Message
+  }
+}

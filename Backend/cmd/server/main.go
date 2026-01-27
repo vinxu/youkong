@@ -144,7 +144,7 @@ func main() {
 	userService := service.NewUserService(userRepo)
 	circleService := service.NewCircleService(circleRepo, userRepo)
 	availabilityService := service.NewAvailabilityService(availabilityRepo, circleRepo, userRepo)
-	conversationService := service.NewConversationService(messageRepo, userRepo, notificationService)
+	conversationService := service.NewConversationService(messageRepo, userRepo, notificationService, wsManager)
 	wechatService := service.NewWechatService(wechatRepo, userRepo, invitationRepo, friendshipRepo, circleRepo, wechatClient, jwtManager)
 	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
 	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo, friendRequestRepo)

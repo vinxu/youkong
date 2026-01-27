@@ -12,6 +12,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // 腾讯 TPNS 推送 SDK
+        maven { url = uri("https://mirrors.tencent.com/nexus/repository/maven-public/") }
     }
 }
 

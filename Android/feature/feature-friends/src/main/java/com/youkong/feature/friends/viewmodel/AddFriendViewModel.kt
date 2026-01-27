@@ -2,15 +2,12 @@ package com.youkong.feature.friends.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.youkong.core.domain.model.Circle
 import com.youkong.core.domain.model.Friend
 import com.youkong.core.domain.model.FriendRequest
-import com.youkong.core.domain.model.Invitation
 import com.youkong.core.domain.model.SendFriendRequestResult
 import com.youkong.core.domain.model.SendRequestStatus
-import com.youkong.core.domain.repository.CircleRepository
 import com.youkong.core.domain.repository.FriendRepository
-import com.youkong.core.domain.repository.InvitationRepository
+import com.youkong.core.domain.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,11 +22,6 @@ data class AddFriendUiState(
     // 好友请求
     val isSendingRequest: Boolean = false,
     val sendRequestResult: SendFriendRequestResult? = null,
-    // 邀请链接
-    val invitations: List<Invitation> = emptyList(),
-    val circles: List<Circle> = emptyList(),
-    val isCreatingInvitation: Boolean = false,
-    val createInvitationSuccess: Invitation? = null,
     // 好友管理
     val friends: List<Friend> = emptyList(),
     val invitedByMe: List<Friend> = emptyList(),
@@ -44,8 +36,7 @@ data class AddFriendUiState(
 @HiltViewModel
 class AddFriendViewModel @Inject constructor(
     private val friendRepository: FriendRepository,
-    private val invitationRepository: InvitationRepository,
-    private val circleRepository: CircleRepository,
+    private val userRepository: UserRepository,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AddFriendUiState())
@@ -78,20 +69,6 @@ class AddFriendViewModel @Inject constructor(
                 friendRepository.getInvitedMe()
                     .onSuccess { friends ->
                         _uiState.update { it.copy(invitedMe = friends) }
-                    }
-            }
-
-            launch {
-                invitationRepository.getMyInvitations()
-                    .onSuccess { invitations ->
-                        _uiState.update { it.copy(invitations = invitations) }
-                    }
-            }
-
-            launch {
-                circleRepository.getMyCircles()
-                    .onSuccess { circles ->
-                        _uiState.update { it.copy(circles = circles) }
                     }
             }
 
@@ -149,59 +126,10 @@ class AddFriendViewModel @Inject constructor(
         }
     }
 
-    // 邀请链接
+    // 邀请海报
 
-    fun createInvitation(circleId: String? = null) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isCreatingInvitation = true, error = null, createInvitationSuccess = null) }
-
-            invitationRepository.createInvitation(
-                circleId = circleId,
-                maxUses = 100,
-                expiresDays = 7,
-            )
-                .onSuccess { invitation ->
-                    _uiState.update {
-                        it.copy(
-                            isCreatingInvitation = false,
-                            createInvitationSuccess = invitation,
-                            invitations = listOf(invitation) + it.invitations,
-                        )
-                    }
-                }
-                .onFailure { e ->
-                    _uiState.update {
-                        it.copy(
-                            isCreatingInvitation = false,
-                            error = e.message ?: "创建失败",
-                        )
-                    }
-                }
-        }
-    }
-
-    fun clearCreateInvitationSuccess() {
-        _uiState.update { it.copy(createInvitationSuccess = null) }
-    }
-
-    fun disableInvitation(id: String) {
-        viewModelScope.launch {
-            invitationRepository.disableInvitation(id)
-                .onSuccess {
-                    _uiState.update { state ->
-                        state.copy(
-                            invitations = state.invitations.filter { it.id != id }
-                        )
-                    }
-                }
-                .onFailure { e ->
-                    _uiState.update { it.copy(error = e.message ?: "禁用失败") }
-                }
-        }
-    }
-
-    fun getInvitationQrCodeUrl(id: String): String {
-        return invitationRepository.getInvitationQrCodeUrl(id)
+    fun getMyPosterUrl(): String {
+        return userRepository.getMyPosterUrl()
     }
 
     // 好友管理

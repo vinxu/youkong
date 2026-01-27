@@ -1,4 +1,5 @@
 import SwiftUI
+import Factory
 
 // MARK: - Accept Invitation View
 
@@ -222,6 +223,55 @@ struct AcceptInvitationView: View {
             }
             .padding()
         }
+    }
+}
+
+// MARK: - Accept Invitation ViewModel
+
+@MainActor
+class AcceptInvitationViewModel: ObservableObject {
+    @Published var invitationInfo: InvitationPublicInfo?
+    @Published var acceptResult: AcceptInvitationResponse?
+    @Published var isLoading = false
+    @Published var isAccepting = false
+    @Published var errorMessage: String?
+
+    private let code: String
+    @Injected(\.inviteRepository) private var inviteRepository
+
+    init(code: String) {
+        self.code = code
+    }
+
+    func loadInvitationInfo() async {
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            invitationInfo = try await inviteRepository.getInvitationByCode(code: code)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        isLoading = false
+    }
+
+    func acceptInvitation() async {
+        isAccepting = true
+        errorMessage = nil
+
+        do {
+            try await inviteRepository.acceptInvitation(code: code)
+            acceptResult = AcceptInvitationResponse(
+                message: "已成为好友",
+                friendship: invitationInfo.map { FriendshipInfo(userId: "", nickname: $0.inviter.nickname) },
+                circle: invitationInfo?.circle
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        isAccepting = false
     }
 }
 

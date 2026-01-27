@@ -5,6 +5,7 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var authManager: AuthManager
     @EnvironmentObject private var deepLinkManager: DeepLinkManager
+    @EnvironmentObject private var notificationManager: NotificationManager
     @StateObject private var permissionManager = PermissionManager.shared
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
 
@@ -19,6 +20,8 @@ struct RootView: View {
                             await permissionManager.checkAllPermissions()
                             // 启动数据收集
                             startDataCollection()
+                            // 刷新未读消息 Badge
+                            await notificationManager.refreshBadgeFromServer()
                         }
                 } else if permissionManager.isChecking {
                     // 正在检查权限状态
@@ -46,6 +49,11 @@ struct RootView: View {
         }
         .animation(.easeInOut, value: authManager.isAuthenticated)
         .animation(.easeInOut, value: hasCompletedOnboarding)
+        .onChange(of: authManager.isAuthenticated) { isAuth in
+            if !isAuth {
+                WebSocketManager.shared.disconnect()
+            }
+        }
         .sheet(isPresented: $deepLinkManager.showInvitationSheet) {
             if let code = deepLinkManager.pendingInvitationCode {
                 AcceptInvitationView(code: code) {
@@ -70,6 +78,9 @@ struct RootView: View {
         if permissionManager.status.screenTime {
             ScreenDataCollector.shared.startMonitoring()
         }
+
+        // 启动 WebSocket 连接
+        WebSocketManager.shared.connect()
 
         // 定时上报状态
         startStatusReporting()

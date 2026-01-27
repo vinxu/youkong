@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ChatView: View {
-    let partner: UserProfile
+    let partner: UserProfile?
     let conversationId: String?
     @StateObject private var viewModel: ChatViewModel
     @Environment(\.dismiss) private var dismiss
@@ -15,7 +15,6 @@ struct ChatView: View {
         ))
     }
 
-    /// 从朋友推荐卡片进入聊天的初始化方法
     init(partnerId: String, partnerName: String, partnerAvatar: String?) {
         let profile = UserProfile(id: partnerId, nickname: partnerName, avatar: partnerAvatar)
         self.partner = profile
@@ -26,6 +25,13 @@ struct ChatView: View {
         ))
     }
 
+    /// 从通知跳转时使用，只有 conversationId
+    init(conversationId: String) {
+        self.partner = nil
+        self.conversationId = conversationId
+        _viewModel = StateObject(wrappedValue: ChatViewModel(conversationId: conversationId))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
@@ -34,7 +40,7 @@ struct ChatView: View {
                         ForEach(viewModel.messages) { message in
                             MessageBubble(
                                 message: message,
-                                isMe: message.sender.id != partner.id
+                                isMe: !viewModel.isFromPartner(message)
                             )
                             .id(message.id)
                         }
@@ -50,20 +56,51 @@ struct ChatView: View {
                 }
             }
 
-            ChatInputBar(
-                text: $viewModel.inputText,
-                isLoading: viewModel.isSending
-            ) {
-                Task {
-                    await viewModel.sendMessage()
-                }
-            }
+            agentReplyButton
         }
-        .navigationTitle(partner.nickname)
+        .navigationTitle(viewModel.partnerName)
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await viewModel.loadMessages()
         }
+    }
+
+    private var agentReplyButton: some View {
+        VStack(spacing: UIConstants.Spacing.sm) {
+            Button {
+                Task {
+                    await viewModel.agentReply()
+                }
+            } label: {
+                HStack(spacing: UIConstants.Spacing.sm) {
+                    if viewModel.isAgentThinking {
+                        ProgressView()
+                            .tint(.white)
+                        Text("元婴思考中...")
+                    } else {
+                        Image(systemName: "brain.head.profile")
+                        Text("让我的元婴说话")
+                    }
+                }
+                .font(.headline)
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, UIConstants.Spacing.lg)
+                .background(viewModel.isAgentThinking ? Color.gray : Color.primaryGreen)
+                .cornerRadius(UIConstants.CornerRadius.md)
+            }
+            .disabled(viewModel.isAgentThinking)
+            .padding(.horizontal)
+
+            if let error = viewModel.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .padding(.horizontal)
+            }
+        }
+        .padding(.vertical, UIConstants.Spacing.md)
+        .background(Color(.systemBackground))
     }
 }
 
@@ -83,9 +120,10 @@ struct MessageBubble: View {
                 messageContent
                     .padding(.horizontal, UIConstants.Spacing.md)
                     .padding(.vertical, UIConstants.Spacing.sm)
-                    .background(isMe ? Color.primaryGreen : Color(.systemGray5))
+                    .background(isMe ? Color.primaryGreen : Color(.systemBackground))
                     .foregroundColor(isMe ? .white : .primary)
                     .cornerRadius(UIConstants.CornerRadius.lg, corners: isMe ? [.topLeft, .topRight, .bottomLeft] : [.topLeft, .topRight, .bottomRight])
+                    .shadow(color: isMe ? .clear : .black.opacity(0.08), radius: 4, y: 2)
 
                 Text(message.createdAt.timeString)
                     .font(.caption2)
@@ -105,54 +143,22 @@ struct MessageBubble: View {
             Text(message.content ?? "")
 
         case .availabilityCard:
-            Text("📅 分享了状态")
+            Text("分享了状态")
                 .fontWeight(.medium)
 
         case .confirmRequest:
-            Text("🤝 想和你确认见面")
+            Text("想和你确认见面")
                 .fontWeight(.medium)
 
         case .confirmResponse:
             if let content = message.content, content == "accepted" {
-                Text("✅ 已确认见面")
+                Text("已确认见面")
                     .fontWeight(.medium)
             } else {
-                Text("❌ 已拒绝")
+                Text("已拒绝")
                     .fontWeight(.medium)
             }
         }
-    }
-}
-
-struct ChatInputBar: View {
-    @Binding var text: String
-    let isLoading: Bool
-    let onSend: () -> Void
-
-    var body: some View {
-        HStack(spacing: UIConstants.Spacing.md) {
-            TextField("输入消息...", text: $text)
-                .padding(.horizontal, UIConstants.Spacing.md)
-                .padding(.vertical, UIConstants.Spacing.sm)
-                .background(Color(.systemGray6))
-                .cornerRadius(UIConstants.CornerRadius.xl)
-
-            Button(action: onSend) {
-                if isLoading {
-                    ProgressView()
-                        .tint(.white)
-                } else {
-                    Image(systemName: "paperplane.fill")
-                }
-            }
-            .frame(width: 40, height: 40)
-            .background(text.isEmpty ? Color.gray : Color.primaryGreen)
-            .foregroundColor(.white)
-            .clipShape(SwiftUI.Circle())
-            .disabled(text.isEmpty || isLoading)
-        }
-        .padding()
-        .background(Color(.systemBackground))
     }
 }
 

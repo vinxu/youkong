@@ -74,26 +74,14 @@ struct FriendsHubView: View {
 
                 // 邀请好友
                 Section {
-                    // 创建邀请链接
                     NavigationLink {
-                        CreateInvitationView()
+                        MyInviteView()
+                            .navigationBarBackButtonHidden(true)
                     } label: {
                         Label {
-                            Text("创建邀请链接")
+                            Text("邀请好友")
                         } icon: {
-                            Image(systemName: "link.badge.plus")
-                                .foregroundColor(.purple)
-                        }
-                    }
-
-                    // 我的邀请
-                    NavigationLink {
-                        InvitationListView()
-                    } label: {
-                        Label {
-                            Text("我的邀请链接")
-                        } icon: {
-                            Image(systemName: "link")
+                            Image(systemName: "square.and.arrow.up")
                                 .foregroundColor(.purple)
                         }
                     }

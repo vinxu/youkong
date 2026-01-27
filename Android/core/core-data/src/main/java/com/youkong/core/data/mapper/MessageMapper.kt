@@ -7,17 +7,17 @@ import com.youkong.core.network.model.ConversationResponse
 import com.youkong.core.network.model.MessageResponse
 import kotlinx.datetime.Instant
 
-fun ConversationResponse.toDomain(): Conversation = Conversation(
+fun ConversationResponse.toModel(): Conversation = Conversation(
     id = id,
-    partner = partner.toDomain(),
-    lastMessage = lastMessage?.toDomain(),
+    partner = partner.toModel(),
+    lastMessage = lastMessage?.toModel(),
     unreadCount = unreadCount,
     createdAt = Instant.parse(createdAt),
 )
 
-fun MessageResponse.toDomain(): Message = Message(
+fun MessageResponse.toModel(): Message = Message(
     id = id,
-    sender = sender.toDomain(),
+    sender = sender.toModel(),
     type = MessageType.valueOf(type),
     content = content,
     metadata = metadata,

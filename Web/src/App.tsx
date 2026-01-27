@@ -7,6 +7,7 @@ import {
   AvailabilityPage,
   ExpiredPage,
   NotFoundPage,
+  ChatPage,
 } from './pages'
 import { useAuthStore } from './stores/authStore'
 
@@ -29,6 +30,9 @@ function App() {
         {/* 有空状态页 */}
         <Route path="/availability/:userId" element={<AvailabilityPage />} />
         <Route path="/availability" element={<AvailabilityPage />} />
+
+        {/* 聊天页面 */}
+        <Route path="/chat/:id" element={<ChatPage />} />
 
         {/* 邀请失效页 */}
         <Route path="/expired" element={<ExpiredPage />} />

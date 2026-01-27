@@ -28,4 +28,9 @@ interface MessageApi {
     suspend fun createConversation(
         @Body request: CreateConversationRequest
     ): ApiResponse<ConversationResponse>
+
+    @POST("conversations/{id}/agent-reply")
+    suspend fun agentReply(
+        @Path("id") conversationId: String
+    ): ApiResponse<MessageResponse>
 }

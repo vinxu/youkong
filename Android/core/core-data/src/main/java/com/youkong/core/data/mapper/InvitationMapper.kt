@@ -11,13 +11,13 @@ import com.youkong.core.network.model.InviterResponse
 import com.youkong.core.network.model.PublicInvitationResponse
 import kotlinx.datetime.Instant
 
-fun InviterResponse.toDomain(): UserProfile = UserProfile(
+fun InviterResponse.toModel(): UserProfile = UserProfile(
     id = id,
     nickname = nickname,
     avatar = avatar,
 )
 
-fun InviteCircleResponse.toDomain(): InviteCircle = InviteCircle(
+fun InviteCircleResponse.toModel(): InviteCircle = InviteCircle(
     id = id,
     name = name,
     emoji = emoji,
@@ -25,12 +25,12 @@ fun InviteCircleResponse.toDomain(): InviteCircle = InviteCircle(
     memberCount = memberCount,
 )
 
-fun InvitationResponse.toDomain(): Invitation = Invitation(
+fun InvitationResponse.toModel(): Invitation = Invitation(
     id = id,
     code = code,
     inviteUrl = inviteUrl,
-    inviter = inviter?.toDomain(),
-    circle = circle?.toDomain(),
+    inviter = inviter?.toModel(),
+    circle = circle?.toModel(),
     maxUses = maxUses,
     useCount = useCount,
     expiresAt = expiresAt?.let { Instant.parse(it) },
@@ -39,8 +39,8 @@ fun InvitationResponse.toDomain(): Invitation = Invitation(
     createdAt = Instant.parse(createdAt),
 )
 
-fun PublicInvitationResponse.toDomain(): PublicInvitation = PublicInvitation(
-    inviter = inviter.toDomain(),
-    circle = circle?.toDomain(),
+fun PublicInvitationResponse.toModel(): PublicInvitation = PublicInvitation(
+    inviter = inviter.toModel(),
+    circle = circle?.toModel(),
     isValid = isValid,
 )

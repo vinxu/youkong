@@ -6,7 +6,7 @@ import com.youkong.core.network.model.UserProfileResponse
 import com.youkong.core.network.model.UserResponse
 import kotlinx.datetime.Instant
 
-fun UserResponse.toDomain(): User = User(
+fun UserResponse.toModel(): User = User(
     id = id,
     phone = phone,
     nickname = nickname,
@@ -15,7 +15,7 @@ fun UserResponse.toDomain(): User = User(
     updatedAt = Instant.parse(updatedAt),
 )
 
-fun UserProfileResponse.toDomain(): UserProfile = UserProfile(
+fun UserProfileResponse.toModel(): UserProfile = UserProfile(
     id = id,
     nickname = nickname,
     avatar = avatar,

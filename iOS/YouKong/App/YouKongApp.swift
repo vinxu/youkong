@@ -2,14 +2,17 @@ import SwiftUI
 
 @main
 struct YouKongApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var authManager = AuthManager.shared
     @StateObject private var deepLinkManager = DeepLinkManager.shared
+    @StateObject private var notificationManager = NotificationManager.shared
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(authManager)
                 .environmentObject(deepLinkManager)
+                .environmentObject(notificationManager)
                 .onOpenURL { url in
                     deepLinkManager.handleURL(url)
                 }

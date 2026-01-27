@@ -15,6 +15,17 @@ struct Message: Codable, Identifiable, Equatable {
     let metadata: [String: AnyCodable]?
     let createdAt: Date
     let isRead: Bool
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        sender = try container.decode(UserProfile.self, forKey: .sender)
+        type = try container.decode(MessageType.self, forKey: .type)
+        content = try container.decodeIfPresent(String.self, forKey: .content)
+        metadata = try container.decodeIfPresent([String: AnyCodable].self, forKey: .metadata)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        isRead = try container.decodeIfPresent(Bool.self, forKey: .isRead) ?? false
+    }
 }
 
 struct Conversation: Codable, Identifiable, Equatable, Hashable {

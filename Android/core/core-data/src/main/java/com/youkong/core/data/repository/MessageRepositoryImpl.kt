@@ -1,6 +1,6 @@
 package com.youkong.core.data.repository
 
-import com.youkong.core.data.mapper.toDomain
+import com.youkong.core.data.mapper.toModel
 import com.youkong.core.database.dao.ConversationDao
 import com.youkong.core.database.dao.MessageDao
 import com.youkong.core.database.entity.toDomain
@@ -39,7 +39,7 @@ class MessageRepositoryImpl @Inject constructor(
             val response = messageApi.getConversations()
             val data = response.data
             if (response.isSuccess && data != null) {
-                val conversations = data.map { it.toDomain() }
+                val conversations = data.map { it.toModel() }
                 conversationDao.deleteAll()
                 conversationDao.insertAll(conversations.map { it.toEntity() })
                 // 保存最后一条消息
@@ -78,10 +78,12 @@ class MessageRepositoryImpl @Inject constructor(
             val response = messageApi.getMessages(conversationId)
             val data = response.data
             if (response.isSuccess && data != null) {
-                val messages = data.map { it.toDomain() }
+                val messages = data.map { it.toModel() }
                 messageDao.deleteByConversation(conversationId)
                 messageDao.insertAll(messages.map { it.toEntity(conversationId) })
-                Result.success(messages)
+                // 从数据库读取已排序的消息
+                val sortedMessages = messageDao.getMessages(conversationId).map { it.toDomain() }
+                Result.success(sortedMessages)
             } else {
                 val cached = messageDao.getMessages(conversationId).map { it.toDomain() }
                 if (cached.isNotEmpty()) {
@@ -117,7 +119,7 @@ class MessageRepositoryImpl @Inject constructor(
             )
             val msgData = response.data
             if (response.isSuccess && msgData != null) {
-                val message = msgData.toDomain()
+                val message = msgData.toModel()
                 messageDao.insert(message.toEntity(conversationId))
                 Result.success(message)
             } else {
@@ -143,10 +145,10 @@ class MessageRepositoryImpl @Inject constructor(
             }
 
             // 创建新会话
-            val response = messageApi.createConversation(CreateConversationRequest(userId))
+            val response = messageApi.createConversation(CreateConversationRequest(partnerId = userId))
             val data = response.data
             if (response.isSuccess && data != null) {
-                val conversation = data.toDomain()
+                val conversation = data.toModel()
                 conversationDao.insert(conversation.toEntity())
                 Result.success(conversation)
             } else {
@@ -154,6 +156,22 @@ class MessageRepositoryImpl @Inject constructor(
             }
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    override suspend fun agentReply(conversationId: String): Result<Message> {
+        return try {
+            val response = messageApi.agentReply(conversationId)
+            val msgData = response.data
+            if (response.isSuccess && msgData != null) {
+                val message = msgData.toModel()
+                messageDao.insert(message.toEntity(conversationId))
+                Result.success(message)
+            } else {
+                Result.failure(Exception(response.message ?: "你的元婴罢工了"))
+            }
+        } catch (e: Exception) {
+            Result.failure(Exception("你的元婴罢工了"))
         }
     }
 }

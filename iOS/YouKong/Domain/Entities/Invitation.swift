@@ -1,30 +1,20 @@
 import Foundation
 
-// MARK: - Invitation
+// MARK: - My Invite Info (简化的邀请信息)
 
-struct Invitation: Codable, Identifiable, Equatable {
-    let id: String
-    let code: String
-    let inviteUrl: String
-    let qrcodeUrl: String?
-    let inviter: UserProfile?
-    let circle: CircleInfo?
-    let maxUses: Int
-    let useCount: Int
-    let expiresAt: Date?
-    let status: InvitationStatus
-    let isValid: Bool
-    let createdAt: Date
-
-    // API 返回 camelCase，不需要 CodingKeys
+/// 用户固定的邀请信息
+struct MyInviteInfo: Codable {
+    let code: String       // 邀请码（固定，用户ID前8位）
+    let inviteUrl: String  // 邀请链接
 }
 
-// MARK: - Invitation Status
+// MARK: - Invitation Public Info (接受邀请时使用)
 
-enum InvitationStatus: String, Codable {
-    case active = "ACTIVE"
-    case disabled = "DISABLED"
-    case expired = "EXPIRED"
+/// 邀请公开信息（用于落地页展示）
+struct InvitationPublicInfo: Codable {
+    let inviter: UserProfile
+    let circle: CircleInfo?
+    let isValid: Bool
 }
 
 // MARK: - Circle Info
@@ -35,18 +25,6 @@ struct CircleInfo: Codable, Equatable {
     let emoji: String
     let color: String?
     let memberCount: Int?
-
-    // API 返回 camelCase
-}
-
-// MARK: - Invitation Public Info (落地页用)
-
-struct InvitationPublicInfo: Codable {
-    let inviter: UserProfile
-    let circle: CircleInfo?
-    let isValid: Bool
-
-    // API 返回 camelCase
 }
 
 // MARK: - Accept Invitation Response
@@ -60,22 +38,6 @@ struct AcceptInvitationResponse: Codable {
 struct FriendshipInfo: Codable {
     let userId: String
     let nickname: String
-
-    // API 返回 camelCase
-}
-
-// MARK: - Create Invitation Request
-
-struct CreateInvitationRequest: Encodable {
-    let circleId: String?
-    let maxUses: Int?
-    let expiresDays: Int?
-
-    enum CodingKeys: String, CodingKey {
-        case circleId = "circle_id"
-        case maxUses = "max_uses"
-        case expiresDays = "expires_days"
-    }
 }
 
 // MARK: - Friend Info

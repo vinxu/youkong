@@ -22,11 +22,26 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<key>NSContactsUsageDescription</key>
+	<string>用来找到你的朋友</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>用来判断你在哪里，即使APP在后台</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>用来判断你在哪里（家/公司/外面）</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
 	</dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>
@@ -47,16 +62,5 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-	</dict>
-	<key>NSContactsUsageDescription</key>
-	<string>用来找到你的朋友</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>用来判断你在哪里（家/公司/外面）</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>用来判断你在哪里，即使APP在后台</string>
 </dict>
 </plist>

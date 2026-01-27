@@ -1,6 +1,7 @@
 package com.youkong.core.network.api
 
 import com.youkong.core.network.model.ApiResponse
+import com.youkong.core.network.model.MyInviteResponse
 import com.youkong.core.network.model.UpdateUserRequest
 import com.youkong.core.network.model.UserProfileResponse
 import com.youkong.core.network.model.UserResponse
@@ -23,4 +24,7 @@ interface UserApi {
 
     @GET("users/{id}")
     suspend fun getUser(@Path("id") userId: String): ApiResponse<UserProfileResponse>
+
+    @GET("users/me/invite")
+    suspend fun getMyInvite(): ApiResponse<MyInviteResponse>
 }

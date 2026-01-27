@@ -1,6 +1,6 @@
 package com.youkong.core.data.repository
 
-import com.youkong.core.data.mapper.toDomain
+import com.youkong.core.data.mapper.toModel
 import com.youkong.core.database.dao.AvailabilityDao
 import com.youkong.core.database.entity.toDomain
 import com.youkong.core.database.entity.toEntity
@@ -36,7 +36,7 @@ class AvailabilityRepositoryImpl @Inject constructor(
             val response = availabilityApi.getFriendsAvailabilities()
             val data = response.data
             if (response.isSuccess && data != null) {
-                val availabilities = data.map { it.toDomain() }
+                val availabilities = data.map { it.toModel() }
                 availabilityDao.deleteFriendsAvailabilities()
                 availabilityDao.insertAll(availabilities.map { it.toEntity(isMine = false) })
                 Result.success(availabilities)
@@ -64,7 +64,7 @@ class AvailabilityRepositoryImpl @Inject constructor(
             val response = availabilityApi.getMyAvailabilities()
             val data = response.data
             if (response.isSuccess && data != null) {
-                val availabilities = data.map { it.toDomain() }
+                val availabilities = data.map { it.toModel() }
                 availabilityDao.deleteMyAvailabilities()
                 availabilityDao.insertAll(availabilities.map { it.toEntity(isMine = true) })
                 Result.success(availabilities)
@@ -109,7 +109,7 @@ class AvailabilityRepositoryImpl @Inject constructor(
             )
             val data = response.data
             if (response.isSuccess && data != null) {
-                val availability = data.toDomain()
+                val availability = data.toModel()
                 availabilityDao.insert(availability.toEntity(isMine = true))
                 Result.success(availability)
             } else {

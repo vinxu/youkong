@@ -25,6 +25,7 @@ data class ChatUiState(
     val conversationId: String? = null,
     val isLoading: Boolean = true,
     val isSending: Boolean = false,
+    val isAgentReplying: Boolean = false,
     val error: String? = null,
 )
 
@@ -141,5 +142,33 @@ class ChatViewModel @Inject constructor(
 
     fun clearError() {
         _uiState.update { it.copy(error = null) }
+    }
+
+    fun agentReply() {
+        val conversationId = _uiState.value.conversationId ?: return
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isAgentReplying = true, error = null) }
+
+            messageRepository.agentReply(conversationId)
+                .onSuccess { message ->
+                    addMessageIfNotExists(message)
+                }
+                .onFailure { e ->
+                    _uiState.update { it.copy(error = e.message ?: "你的元婴罢工了") }
+                }
+
+            _uiState.update { it.copy(isAgentReplying = false) }
+        }
+    }
+
+    private fun addMessageIfNotExists(message: Message) {
+        _uiState.update { state ->
+            if (state.messages.any { it.id == message.id }) {
+                state
+            } else {
+                state.copy(messages = state.messages + message)
+            }
+        }
     }
 }

@@ -6,6 +6,7 @@ import androidx.navigation.NavOptions
 import androidx.navigation.NavType
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
+import androidx.navigation.navDeepLink
 import com.youkong.feature.chat.screen.ChatScreen
 
 const val CHAT_ROUTE = "chat/{userId}"
@@ -21,6 +22,9 @@ fun NavGraphBuilder.chatScreen(
         route = CHAT_ROUTE,
         arguments = listOf(
             navArgument("userId") { type = NavType.StringType }
+        ),
+        deepLinks = listOf(
+            navDeepLink { uriPattern = "youkong://chat/{userId}" }
         )
     ) {
         ChatScreen(

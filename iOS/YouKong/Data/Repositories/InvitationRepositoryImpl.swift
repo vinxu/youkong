@@ -1,9 +1,9 @@
 import Foundation
 import Factory
 
-// MARK: - Invitation Repository Implementation
+// MARK: - Invite Repository Implementation (简化版)
 
-final class InvitationRepositoryImpl: InvitationRepositoryProtocol {
+final class InviteRepositoryImpl: InviteRepositoryProtocol {
     @Injected(\.apiClient) private var apiClient
 
     // API Base URL
@@ -16,19 +16,27 @@ final class InvitationRepositoryImpl: InvitationRepositoryProtocol {
         #endif
     }
 
-    func createInvitation(circleId: String?, maxUses: Int?, expiresDays: Int?) async throws -> Invitation {
-        let request = CreateInvitationRequest(
-            circleId: circleId,
-            maxUses: maxUses,
-            expiresDays: expiresDays
-        )
-        let endpoint = APIEndpoint.createInvitation(request: request)
+    func getMyInvite() async throws -> MyInviteInfo {
+        let endpoint = APIEndpoint.getMyInvite
         return try await apiClient.request(endpoint)
     }
 
-    func getMyInvitations() async throws -> [Invitation] {
-        let endpoint = APIEndpoint.getMyInvitations
-        return try await apiClient.request(endpoint)
+    func fetchMyPoster() async throws -> Data {
+        guard let token = KeychainManager.shared.getAccessToken() else {
+            throw NSError(domain: "InviteRepository", code: 401, userInfo: [NSLocalizedDescriptionKey: "未登录"])
+        }
+
+        let url = URL(string: "\(baseURL)/api/v1/users/me/poster")!
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw NSError(domain: "InviteRepository", code: 500, userInfo: [NSLocalizedDescriptionKey: "获取海报失败"])
+        }
+
+        return data
     }
 
     func getInvitationByCode(code: String) async throws -> InvitationPublicInfo {
@@ -36,24 +44,9 @@ final class InvitationRepositoryImpl: InvitationRepositoryProtocol {
         return try await apiClient.request(endpoint)
     }
 
-    func acceptInvitation(code: String) async throws -> AcceptInvitationResponse {
+    func acceptInvitation(code: String) async throws {
         let endpoint = APIEndpoint.acceptInvitation(code: code)
-        return try await apiClient.request(endpoint)
-    }
-
-    func disableInvitation(id: String) async throws {
-        let endpoint = APIEndpoint.disableInvitation(id: id)
         let _: EmptyResponse = try await apiClient.request(endpoint)
-    }
-
-    func getInvitationPosterURL(id: String) -> URL? {
-        guard let token = KeychainManager.shared.getAccessToken() else { return nil }
-        return URL(string: "\(baseURL)/api/v1/invitations/\(id)/poster?token=\(token)")
-    }
-
-    func getInvitationQRCodeURL(id: String) -> URL? {
-        guard let token = KeychainManager.shared.getAccessToken() else { return nil }
-        return URL(string: "\(baseURL)/api/v1/invitations/\(id)/qrcode?token=\(token)")
     }
 }
 

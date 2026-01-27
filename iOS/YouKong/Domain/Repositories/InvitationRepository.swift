@@ -1,28 +1,19 @@
 import Foundation
 
-// MARK: - Invitation Repository Protocol
+// MARK: - Invite Repository Protocol (简化版)
 
-protocol InvitationRepositoryProtocol {
-    /// 创建邀请链接
-    func createInvitation(circleId: String?, maxUses: Int?, expiresDays: Int?) async throws -> Invitation
+protocol InviteRepositoryProtocol {
+    /// 获取我的邀请信息
+    func getMyInvite() async throws -> MyInviteInfo
 
-    /// 获取我创建的邀请列表
-    func getMyInvitations() async throws -> [Invitation]
+    /// 获取我的邀请海报图片数据
+    func fetchMyPoster() async throws -> Data
 
     /// 获取邀请信息（公开，落地页用）
     func getInvitationByCode(code: String) async throws -> InvitationPublicInfo
 
-    /// 接受邀请（加好友+加圈子）
-    func acceptInvitation(code: String) async throws -> AcceptInvitationResponse
-
-    /// 禁用邀请链接
-    func disableInvitation(id: String) async throws
-
-    /// 获取邀请海报图片 URL
-    func getInvitationPosterURL(id: String) -> URL?
-
-    /// 获取邀请二维码 URL
-    func getInvitationQRCodeURL(id: String) -> URL?
+    /// 接受邀请
+    func acceptInvitation(code: String) async throws
 }
 
 // MARK: - Friendship Repository Protocol

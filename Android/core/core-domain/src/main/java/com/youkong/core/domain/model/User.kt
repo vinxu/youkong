@@ -16,3 +16,8 @@ data class UserProfile(
     val nickname: String,
     val avatar: String? = null,
 )
+
+data class MyInvite(
+    val code: String,
+    val inviteUrl: String,
+)

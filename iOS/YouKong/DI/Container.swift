@@ -37,8 +37,8 @@ extension Container {
             .singleton
     }
 
-    var invitationRepository: Factory<InvitationRepositoryProtocol> {
-        Factory(self) { InvitationRepositoryImpl() }
+    var inviteRepository: Factory<InviteRepositoryProtocol> {
+        Factory(self) { InviteRepositoryImpl() }
             .singleton
     }
 

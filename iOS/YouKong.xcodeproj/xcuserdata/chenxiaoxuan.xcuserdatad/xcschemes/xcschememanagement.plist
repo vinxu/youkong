@@ -6,6 +6,8 @@
 	<dict>
 		<key>DeviceActivityMonitorExtension.xcscheme_^#shared#^_</key>
 		<dict>
+			<key>isShown</key>
+			<false/>
 			<key>orderHint</key>
 			<integer>1</integer>
 		</dict>
@@ -13,6 +15,19 @@
 		<dict>
 			<key>orderHint</key>
 			<integer>0</integer>
+		</dict>
+	</dict>
+	<key>SuppressBuildableAutocreation</key>
+	<dict>
+		<key>76373F7C2F2658C90054FAD9</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
+		<key>AAAA00062F2700000054FAD9</key>
+		<dict>
+			<key>primary</key>
+			<true/>
 		</dict>
 	</dict>
 </dict>

@@ -1,6 +1,6 @@
 package com.youkong.core.data.repository
 
-import com.youkong.core.data.mapper.toDomain
+import com.youkong.core.data.mapper.toModel
 import com.youkong.core.domain.model.Friend
 import com.youkong.core.domain.model.FriendRequest
 import com.youkong.core.domain.model.FriendRequestStatus
@@ -35,7 +35,7 @@ class FriendRepositoryImpl @Inject constructor(
             val response = friendApi.getFriends()
             val data = response.data
             if (response.isSuccess && data != null) {
-                val friends = data.map { it.toDomain() }
+                val friends = data.map { it.toModel() }
                 _friends.value = friends
                 Result.success(friends)
             } else {
@@ -65,7 +65,7 @@ class FriendRepositoryImpl @Inject constructor(
             val response = friendApi.getInvitedByMe()
             val data = response.data
             if (response.isSuccess && data != null) {
-                Result.success(data.map { it.toDomain() })
+                Result.success(data.map { it.toModel() })
             } else {
                 Result.failure(Exception(response.message))
             }
@@ -79,7 +79,7 @@ class FriendRepositoryImpl @Inject constructor(
             val response = friendApi.getInvitedMe()
             val data = response.data
             if (response.isSuccess && data != null) {
-                Result.success(data.map { it.toDomain() })
+                Result.success(data.map { it.toModel() })
             } else {
                 Result.failure(Exception(response.message))
             }

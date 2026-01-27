@@ -6,6 +6,7 @@ import com.youkong.core.network.api.AgentApi
 import com.youkong.core.network.api.AuthApi
 import com.youkong.core.network.api.AvailabilityApi
 import com.youkong.core.network.api.CircleApi
+import com.youkong.core.network.api.DeviceApi
 import com.youkong.core.network.api.FriendApi
 import com.youkong.core.network.api.InvitationApi
 import com.youkong.core.network.api.MessageApi
@@ -115,4 +116,9 @@ object NetworkModule {
     @Singleton
     fun provideAgentApi(retrofit: Retrofit): AgentApi =
         retrofit.create(AgentApi::class.java)
+
+    @Provides
+    @Singleton
+    fun provideDeviceApi(retrofit: Retrofit): DeviceApi =
+        retrofit.create(DeviceApi::class.java)
 }

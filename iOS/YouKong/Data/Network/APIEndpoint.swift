@@ -89,6 +89,14 @@ extension APIEndpoint {
         APIEndpoint(path: "/api/v1/conversations")
     }
 
+    static func createConversation(partnerId: String) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/conversations",
+            method: .post,
+            body: ["partnerId": partnerId]
+        )
+    }
+
     static func getMessages(conversationId: String) -> APIEndpoint {
         APIEndpoint(path: "/api/v1/conversations/\(conversationId)/messages")
     }
@@ -98,6 +106,13 @@ extension APIEndpoint {
             path: "/api/v1/conversations/\(conversationId)/messages",
             method: .post,
             body: request
+        )
+    }
+
+    static func agentReply(conversationId: String) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/conversations/\(conversationId)/agent-reply",
+            method: .post
         )
     }
 
@@ -197,20 +212,14 @@ extension APIEndpoint {
         APIEndpoint(path: "/api/v1/friends/invited-me")
     }
 
-    // MARK: - Invitations
+    // MARK: - Invite (简化的邀请系统)
 
-    static func createInvitation(request: CreateInvitationRequest) -> APIEndpoint {
-        APIEndpoint(
-            path: "/api/v1/invitations",
-            method: .post,
-            body: request
-        )
+    /// 获取我的邀请信息
+    static var getMyInvite: APIEndpoint {
+        APIEndpoint(path: "/api/v1/users/me/invite")
     }
 
-    static var getMyInvitations: APIEndpoint {
-        APIEndpoint(path: "/api/v1/invitations")
-    }
-
+    /// 获取邀请信息（公开，落地页用）
     static func getInvitationByCode(code: String) -> APIEndpoint {
         APIEndpoint(
             path: "/api/v1/invite/\(code)",
@@ -218,6 +227,7 @@ extension APIEndpoint {
         )
     }
 
+    /// 接受邀请
     static func acceptInvitation(code: String) -> APIEndpoint {
         APIEndpoint(
             path: "/api/v1/invite/\(code)/accept",
@@ -225,20 +235,37 @@ extension APIEndpoint {
         )
     }
 
-    static func disableInvitation(id: String) -> APIEndpoint {
+    // MARK: - Device Token (Push Notifications)
+
+    /// 注册设备 Token
+    static func registerDeviceToken(token: String, platform: String) -> APIEndpoint {
         APIEndpoint(
-            path: "/api/v1/invitations/\(id)",
-            method: .delete
+            path: "/api/v1/devices/token",
+            method: .post,
+            body: RegisterDeviceTokenRequest(token: token, platform: platform)
         )
     }
 
-    static func getInvitationPoster(id: String) -> APIEndpoint {
-        APIEndpoint(path: "/api/v1/invitations/\(id)/poster")
+    /// 注销设备 Token
+    static func unregisterDeviceToken(token: String) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/devices/token",
+            method: .delete,
+            body: ["token": token]
+        )
     }
 
-    static func getInvitationQRCode(id: String) -> APIEndpoint {
-        APIEndpoint(path: "/api/v1/invitations/\(id)/qrcode")
+    /// 获取未读消息数（Badge）
+    static var getBadgeCount: APIEndpoint {
+        APIEndpoint(path: "/api/v1/users/me/badge")
     }
+}
+
+// MARK: - Request Types
+
+struct RegisterDeviceTokenRequest: Codable {
+    let token: String
+    let platform: String
 }
 
 extension Dictionary: Encodable where Key == String, Value == String {}

@@ -26,7 +26,7 @@ data class MessageResponse(
     @SerialName("createdAt")
     val createdAt: String,
     @SerialName("isRead")
-    val isRead: Boolean,
+    val isRead: Boolean = false,
 )
 
 @Serializable
@@ -38,6 +38,6 @@ data class SendMessageRequest(
 
 @Serializable
 data class CreateConversationRequest(
-    @SerialName("userId")
-    val userId: String,
+    @SerialName("partnerId")
+    val partnerId: String,
 )

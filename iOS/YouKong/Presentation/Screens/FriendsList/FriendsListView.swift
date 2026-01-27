@@ -7,12 +7,14 @@ import FamilyControls
 
 struct FriendsListView: View {
     @StateObject private var viewModel = FriendsListViewModel()
+    @StateObject private var notificationManager = NotificationManager.shared
     @State private var selectedFriend: FriendRecommendation?
     @State private var showAgentData = false
     @State private var showFriendsHub = false
+    @State private var navigationPath = NavigationPath()
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             Group {
                 if viewModel.isLoading && viewModel.friends.isEmpty {
                     loadingView
@@ -64,10 +66,24 @@ struct FriendsListView: View {
             .navigationDestination(for: FriendRecommendation.self) { friend in
                 ChatView(partnerId: friend.friendId, partnerName: friend.name, partnerAvatar: friend.avatar)
             }
+            .navigationDestination(for: NotificationDestination.self) { destination in
+                ChatView(conversationId: destination.conversationId)
+            }
         }
         .task {
             await viewModel.loadFriends()
         }
+        .onChange(of: notificationManager.shouldNavigateToChat) { shouldNavigate in
+            if shouldNavigate, let conversationId = notificationManager.pendingConversationId {
+                handleNotificationNavigation(conversationId: conversationId)
+            }
+        }
+    }
+
+    private func handleNotificationNavigation(conversationId: String) {
+        // 使用 NotificationDestination 进行导航
+        navigationPath.append(NotificationDestination(conversationId: conversationId))
+        notificationManager.clearPendingNavigation()
     }
 
     // MARK: - Friends List
@@ -148,6 +164,12 @@ struct FriendsListView: View {
         }
         .padding()
     }
+}
+
+// MARK: - Notification Destination
+
+struct NotificationDestination: Hashable {
+    let conversationId: String
 }
 
 // MARK: - My Agent Data Sheet

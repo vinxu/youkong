@@ -2,6 +2,8 @@ package com.youkong.app.di
 
 import android.content.Context
 import androidx.work.WorkManager
+import com.youkong.app.push.TPNSHelper
+import com.youkong.core.domain.push.PushManager
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -19,5 +21,13 @@ object AppModule {
         @ApplicationContext context: Context
     ): WorkManager {
         return WorkManager.getInstance(context)
+    }
+
+    @Provides
+    @Singleton
+    fun providePushManager(
+        tpnsHelper: TPNSHelper
+    ): PushManager {
+        return tpnsHelper
     }
 }

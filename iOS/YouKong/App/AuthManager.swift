@@ -32,6 +32,11 @@ final class AuthManager: ObservableObject {
     }
 
     func logout() {
+        // 注销设备 Token
+        Task {
+            await NotificationManager.shared.unregisterDeviceToken()
+        }
+
         keychainManager.clearTokens()
         currentUser = nil
         isAuthenticated = false

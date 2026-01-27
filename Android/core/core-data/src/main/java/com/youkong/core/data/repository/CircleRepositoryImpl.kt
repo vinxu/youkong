@@ -1,6 +1,6 @@
 package com.youkong.core.data.repository
 
-import com.youkong.core.data.mapper.toDomain
+import com.youkong.core.data.mapper.toModel
 import com.youkong.core.database.dao.CircleDao
 import com.youkong.core.database.entity.toDomain
 import com.youkong.core.database.entity.toEntity
@@ -31,7 +31,7 @@ class CircleRepositoryImpl @Inject constructor(
             val response = circleApi.getMyCircles()
             val data = response.data
             if (response.isSuccess && data != null) {
-                val circles = data.map { it.toDomain() }
+                val circles = data.map { it.toModel() }
                 circleDao.deleteAll()
                 circleDao.insertAll(circles.map { it.toEntity() })
                 Result.success(circles)
@@ -60,7 +60,7 @@ class CircleRepositoryImpl @Inject constructor(
             val response = circleApi.getCircle(circleId)
             val data = response.data
             if (response.isSuccess && data != null) {
-                Result.success(data.toDomain())
+                Result.success(data.toModel())
             } else {
                 Result.failure(Exception(response.message))
             }
@@ -74,7 +74,7 @@ class CircleRepositoryImpl @Inject constructor(
             val response = circleApi.createCircle(CreateCircleRequest(name, emoji, color))
             val data = response.data
             if (response.isSuccess && data != null) {
-                val circle = data.toDomain()
+                val circle = data.toModel()
                 circleDao.insert(circle.toEntity())
                 Result.success(circle)
             } else {
@@ -95,7 +95,7 @@ class CircleRepositoryImpl @Inject constructor(
             val response = circleApi.updateCircle(circleId, UpdateCircleRequest(name, emoji, color))
             val data = response.data
             if (response.isSuccess && data != null) {
-                val circle = data.toDomain()
+                val circle = data.toModel()
                 circleDao.insert(circle.toEntity())
                 Result.success(circle)
             } else {

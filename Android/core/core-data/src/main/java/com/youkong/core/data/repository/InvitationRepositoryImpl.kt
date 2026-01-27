@@ -1,6 +1,6 @@
 package com.youkong.core.data.repository
 
-import com.youkong.core.data.mapper.toDomain
+import com.youkong.core.data.mapper.toModel
 import com.youkong.core.domain.model.InviteCircle
 import com.youkong.core.domain.model.Invitation
 import com.youkong.core.domain.model.PublicInvitation
@@ -27,7 +27,7 @@ class InvitationRepositoryImpl @Inject constructor(
             )
             val data = response.data
             if (response.isSuccess && data != null) {
-                Result.success(data.toDomain())
+                Result.success(data.toModel())
             } else {
                 Result.failure(Exception(response.message))
             }
@@ -41,7 +41,7 @@ class InvitationRepositoryImpl @Inject constructor(
             val response = invitationApi.getMyInvitations()
             val data = response.data
             if (response.isSuccess && data != null) {
-                Result.success(data.map { it.toDomain() })
+                Result.success(data.map { it.toModel() })
             } else {
                 Result.failure(Exception(response.message))
             }
@@ -55,7 +55,7 @@ class InvitationRepositoryImpl @Inject constructor(
             val response = invitationApi.getPublicInvitation(code)
             val data = response.data
             if (response.isSuccess && data != null) {
-                Result.success(data.toDomain())
+                Result.success(data.toModel())
             } else {
                 Result.failure(Exception(response.message))
             }
@@ -69,7 +69,7 @@ class InvitationRepositoryImpl @Inject constructor(
             val response = invitationApi.getInvitationDetail(id)
             val data = response.data
             if (response.isSuccess && data != null) {
-                Result.success(data.toDomain())
+                Result.success(data.toModel())
             } else {
                 Result.failure(Exception(response.message))
             }
@@ -96,7 +96,7 @@ class InvitationRepositoryImpl @Inject constructor(
             val response = invitationApi.acceptInvitation(code)
             val data = response.data
             if (response.isSuccess) {
-                Result.success(data?.joinedCircle?.toDomain())
+                Result.success(data?.joinedCircle?.toModel())
             } else {
                 Result.failure(Exception(response.message))
             }

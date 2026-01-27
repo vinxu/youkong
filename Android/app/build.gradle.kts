@@ -1,7 +1,17 @@
+import java.util.Properties
+
 plugins {
     id("youkong.android.application")
     id("youkong.android.application.compose")
     id("youkong.android.hilt")
+}
+
+// 加载 local.properties
+val localProperties = Properties().apply {
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        load(localPropertiesFile.inputStream())
+    }
 }
 
 android {
@@ -20,6 +30,13 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        // TPNS 推送配置（从 local.properties 读取）
+        val tpnsAccessId = localProperties.getProperty("TPNS_ACCESS_ID") ?: "0"
+        val tpnsAccessKey = localProperties.getProperty("TPNS_ACCESS_KEY") ?: ""
+        // ACCESS_ID 必须是数字类型
+        manifestPlaceholders["TPNS_ACCESS_ID"] = tpnsAccessId.toLongOrNull() ?: 0L
+        manifestPlaceholders["TPNS_ACCESS_KEY"] = tpnsAccessKey
     }
 
     buildTypes {
@@ -80,6 +97,15 @@ dependencies {
 
     // Splash
     implementation("androidx.core:core-splashscreen:1.0.1")
+
+    // TPNS 推送
+    implementation("com.tencent.tpns:tpns:1.3.9.0-release")
+    // 厂商通道（小米、华为）
+    implementation("com.tencent.tpns:xiaomi:1.3.9.0-release")
+    implementation("com.tencent.tpns:huawei:1.3.9.0-release")
+
+    // Coil (for configuring ImageLoader with auth)
+    implementation(libs.coil.compose)
 
     // Testing
     testImplementation(libs.junit)
