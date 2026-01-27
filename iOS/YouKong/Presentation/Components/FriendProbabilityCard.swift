@@ -9,27 +9,6 @@ struct FriendProbabilityCard: View {
         ProbabilityColors.color(for: friend.probability)
     }
 
-    /// 从 reason 中提取 emoji（如果有的话）
-    private var activityEmoji: String {
-        // 检查 reason 开头是否是 emoji
-        if let firstChar = friend.reason.first, firstChar.isEmoji {
-            return String(firstChar)
-        }
-        // 默认返回一个通用 emoji
-        return "📱"
-    }
-
-    /// 从 reason 中提取文字描述（去掉开头的 emoji）
-    private var activityText: String {
-        let reason = friend.reason.trimmingCharacters(in: .whitespaces)
-        if let firstChar = reason.first, firstChar.isEmoji {
-            // 去掉开头的 emoji 和可能的空格
-            let text = String(reason.dropFirst()).trimmingCharacters(in: .whitespaces)
-            return text.isEmpty ? reason : text
-        }
-        return reason
-    }
-
     var body: some View {
         HStack(spacing: UIConstants.Spacing.md) {
             // 头像
@@ -41,11 +20,11 @@ struct FriendProbabilityCard: View {
                     .font(.headline)
                     .foregroundColor(.primary)
 
-                // Emoji + 正在做什么
+                // Emoji + 活动描述
                 HStack(spacing: 4) {
-                    Text(activityEmoji)
+                    Text(friend.displayEmoji)
                         .font(.subheadline)
-                    Text(activityText)
+                    Text(friend.displayActivity)
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
@@ -56,8 +35,8 @@ struct FriendProbabilityCard: View {
 
             // 有空程度和百分比
             VStack(alignment: .trailing, spacing: 4) {
-                // 状态标签（如 "可能有空"）
-                Text(ProbabilityColors.description(for: friend.probability))
+                // 状态标签（如 "可能有空"）- 使用 reason 字段
+                Text(friend.reason)
                     .font(.subheadline)
                     .fontWeight(.medium)
                     .foregroundColor(probabilityColor)
@@ -79,16 +58,6 @@ struct FriendProbabilityCard: View {
         .background(Color(.systemBackground))
         .cornerRadius(UIConstants.CornerRadius.md)
         .shadow(color: .black.opacity(0.05), radius: 5, y: 2)
-    }
-}
-
-// MARK: - Character Extension for Emoji Detection
-
-extension Character {
-    /// 判断字符是否是 emoji
-    var isEmoji: Bool {
-        guard let scalar = unicodeScalars.first else { return false }
-        return scalar.properties.isEmoji && (scalar.value > 0x238C || unicodeScalars.count > 1)
     }
 }
 
@@ -143,8 +112,10 @@ struct AvatarView: View {
             avatar: nil,
             probability: 95,
             confidence: .high,
-            reason: "🎮 在玩游戏",
+            reason: "很可能有空",
             color: "#22C55E",
+            emoji: "🎮",
+            activity: "在玩游戏",
             updatedAt: Int(Date().timeIntervalSince1970 * 1000)
         ))
 
@@ -154,8 +125,10 @@ struct AvatarView: View {
             avatar: nil,
             probability: 65,
             confidence: .medium,
-            reason: "📺 在刷视频，在家",
+            reason: "可能有空",
             color: "#86EFAC",
+            emoji: "📺",
+            activity: "在刷视频",
             updatedAt: Int(Date().timeIntervalSince1970 * 1000)
         ))
 
@@ -163,10 +136,12 @@ struct AvatarView: View {
             friendId: "3",
             name: "王五",
             avatar: nil,
-            probability: 45,
+            probability: 40,
             confidence: .medium,
-            reason: "💼 在公司加班",
+            reason: "不太确定",
             color: "#FACC15",
+            emoji: "💼",
+            activity: "在公司加班",
             updatedAt: Int(Date().timeIntervalSince1970 * 1000)
         ))
 
@@ -176,8 +151,10 @@ struct AvatarView: View {
             avatar: nil,
             probability: 15,
             confidence: .high,
-            reason: "🚗 在路上",
+            reason: "可能在忙",
             color: "#EF4444",
+            emoji: "🚗",
+            activity: "在路上",
             updatedAt: Int(Date().timeIntervalSince1970 * 1000)
         ))
 
@@ -189,6 +166,8 @@ struct AvatarView: View {
             confidence: .low,
             reason: "数据不足",
             color: "#9CA3AF",
+            emoji: nil,
+            activity: nil,
             updatedAt: Int(Date().timeIntervalSince1970 * 1000)
         ))
     }

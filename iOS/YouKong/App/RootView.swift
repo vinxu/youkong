@@ -11,17 +11,37 @@ struct RootView: View {
     var body: some View {
         Group {
             if authManager.isAuthenticated {
-                if hasCompletedOnboarding || permissionManager.status.allGranted {
+                if hasCompletedOnboarding {
+                    // 已完成引导，直接进入主页面
                     MainTabView()
                         .task {
+                            // 检查权限状态（用于数据收集）
+                            await permissionManager.checkAllPermissions()
                             // 启动数据收集
                             startDataCollection()
                         }
+                } else if permissionManager.isChecking {
+                    // 正在检查权限状态
+                    ProgressView("检查权限...")
+                } else if permissionManager.status.allGranted {
+                    // 权限都已授权，直接进入主页面
+                    MainTabView()
+                        .task {
+                            hasCompletedOnboarding = true
+                            startDataCollection()
+                        }
                 } else {
+                    // 显示权限请求页面
                     PermissionRequestView(isCompleted: $hasCompletedOnboarding)
                 }
             } else {
                 LoginView()
+            }
+        }
+        .task {
+            // APP 启动时检查权限状态
+            if authManager.isAuthenticated && !hasCompletedOnboarding {
+                await permissionManager.checkAllPermissions()
             }
         }
         .animation(.easeInOut, value: authManager.isAuthenticated)

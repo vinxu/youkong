@@ -1,24 +1,53 @@
 import SwiftUI
 import Factory
 
-// MARK: - Add Friend View (发送好友请求)
+// MARK: - Add Friend View (发送好友请求) - 作为 NavigationLink 目标使用
 
 struct AddFriendView: View {
+    @StateObject private var viewModel = AddFriendViewModel()
+
+    var body: some View {
+        AddFriendContentView(viewModel: viewModel)
+            .navigationTitle("添加好友")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Add Friend Sheet View - 作为 Sheet 使用（带 NavigationStack）
+
+struct AddFriendSheetView: View {
     @StateObject private var viewModel = AddFriendViewModel()
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
+            AddFriendContentView(viewModel: viewModel)
+                .navigationTitle("添加好友")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("取消") {
+                            dismiss()
+                        }
+                    }
+                }
+        }
+    }
+}
+
+// MARK: - Add Friend Content View - 内容视图
+
+struct AddFriendContentView: View {
+    @ObservedObject var viewModel: AddFriendViewModel
+
+    var body: some View {
+        ScrollView {
             VStack(spacing: 24) {
                 // 说明文字
                 VStack(spacing: 8) {
                     Image(systemName: "person.badge.plus")
                         .font(.system(size: 48))
                         .foregroundColor(.primaryGreen)
-
-                    Text("添加好友")
-                        .font(.title2)
-                        .fontWeight(.semibold)
 
                     Text("输入好友的手机号码")
                         .foregroundColor(.secondary)
@@ -72,8 +101,6 @@ struct AddFriendView: View {
                         .padding(.horizontal)
                 }
 
-                Spacer()
-
                 // 发送请求按钮
                 Button {
                     Task {
@@ -96,15 +123,6 @@ struct AddFriendView: View {
                 }
                 .disabled(!viewModel.isValidPhone || viewModel.isLoading)
                 .padding()
-            }
-            .navigationTitle("添加好友")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") {
-                        dismiss()
-                    }
-                }
             }
         }
     }

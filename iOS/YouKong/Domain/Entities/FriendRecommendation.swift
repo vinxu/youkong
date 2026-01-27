@@ -9,8 +9,10 @@ struct FriendRecommendation: Codable, Identifiable, Equatable, Hashable {
     let avatar: String?
     let probability: Int    // 0-100, -1 表示无数据
     let confidence: Confidence
-    let reason: String      // 口语化理由，如"刷了40分钟手机，在家"
+    let reason: String      // 有空程度状态，如"可能有空"
     let color: String       // 颜色代码，如 "#22C55E"
+    let emoji: String?      // 活动 emoji，如 "🎮"
+    let activity: String?   // 活动描述，如 "在玩游戏"
     let updatedAt: Int      // 毫秒时间戳
 
     var id: String { friendId }
@@ -23,6 +25,8 @@ struct FriendRecommendation: Codable, Identifiable, Equatable, Hashable {
         case confidence
         case reason
         case color
+        case emoji
+        case activity
         case updatedAt = "updated_at"
     }
 
@@ -37,6 +41,16 @@ struct FriendRecommendation: Codable, Identifiable, Equatable, Hashable {
             return "无数据"
         }
         return "\(probability)%"
+    }
+
+    /// 显示用的 emoji（如果没有则用默认）
+    var displayEmoji: String {
+        emoji ?? "📱"
+    }
+
+    /// 显示用的活动描述
+    var displayActivity: String {
+        activity ?? reason
     }
 }
 

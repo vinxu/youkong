@@ -144,9 +144,19 @@ class ScreenDataCollector: ObservableObject {
     func startMonitoring() {
         isMonitoring = true
 
+        // 先加载保存的选择
+        loadSelection()
+        loadSharedData()
+
         #if canImport(FamilyControls)
         if #available(iOS 16.0, *) {
-            startDeviceActivityMonitoring()
+            // 只有在有选择时才启动监控
+            if hasSelection {
+                startDeviceActivityMonitoring()
+                print("📱 [ScreenData] 启动监控，已选择 \(activitySelection.applicationTokens.count) 个应用，\(activitySelection.categoryTokens.count) 个分类")
+            } else {
+                print("⚠️ [ScreenData] 未选择监控应用，跳过启动监控")
+            }
         }
         #endif
 

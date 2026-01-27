@@ -17,7 +17,9 @@ import com.youkong.feature.auth.navigation.navigateToPhoneInput
 import com.youkong.feature.chat.navigation.chatScreen
 import com.youkong.feature.chat.navigation.navigateToChat
 import com.youkong.feature.friends.navigation.FRIENDS_ROUTE
+import com.youkong.feature.friends.navigation.addFriendScreen
 import com.youkong.feature.friends.navigation.friendsScreen
+import com.youkong.feature.friends.navigation.navigateToAddFriend
 import com.youkong.feature.friends.navigation.navigateToFriends
 import com.youkong.feature.home.navigation.HOME_ROUTE
 import com.youkong.feature.home.navigation.homeScreen
@@ -114,6 +116,16 @@ fun YouKongNavHost(
             },
             onNavigateToInvitation = {
                 navController.navigateToInvitation()
+            },
+            onNavigateToAddFriend = {
+                navController.navigateToAddFriend()
+            },
+        )
+
+        // 添加好友页面
+        addFriendScreen(
+            onBackClick = {
+                navController.popBackStack()
             },
         )
 

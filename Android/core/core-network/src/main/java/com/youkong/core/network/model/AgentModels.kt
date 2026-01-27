@@ -143,6 +143,8 @@ data class FriendProbabilityResponse(
     val confidence: String, // "high", "medium", "low"
     val reason: String,
     val color: String,
+    val emoji: String? = null, // 活动 emoji
+    val activity: String? = null, // 活动描述
     @SerialName("updated_at")
     val updatedAt: Long, // 毫秒时间戳
 )

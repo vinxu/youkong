@@ -74,7 +74,7 @@ struct FriendsManagementView: View {
             }
         }
         .sheet(isPresented: $showAddFriend) {
-            AddFriendView()
+            AddFriendSheetView()
         }
         .sheet(isPresented: $showContactFriends) {
             NavigationStack {

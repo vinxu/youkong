@@ -85,6 +85,8 @@ class AgentRepositoryImpl @Inject constructor(
             confidence = Confidence.fromString(confidence),
             reason = reason,
             color = color,
+            emoji = emoji,
+            activity = activity,
             updatedAt = updatedAt,
         )
     }

@@ -9,6 +9,7 @@ struct FriendsListView: View {
     @StateObject private var viewModel = FriendsListViewModel()
     @State private var selectedFriend: FriendRecommendation?
     @State private var showAgentData = false
+    @State private var showFriendsHub = false
 
     var body: some View {
         NavigationStack {
@@ -33,17 +34,32 @@ struct FriendsListView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        ProfileView()
-                    } label: {
-                        Image(systemName: "person.circle")
-                            .font(.title3)
-                            .foregroundColor(.primary)
+                    HStack(spacing: 16) {
+                        // 添加好友入口
+                        Button {
+                            showFriendsHub = true
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.title3)
+                                .foregroundColor(.primary)
+                        }
+
+                        // 个人中心
+                        NavigationLink {
+                            ProfileView()
+                        } label: {
+                            Image(systemName: "person.circle")
+                                .font(.title3)
+                                .foregroundColor(.primary)
+                        }
                     }
                 }
             }
             .sheet(isPresented: $showAgentData) {
                 MyAgentDataSheet()
+            }
+            .sheet(isPresented: $showFriendsHub) {
+                FriendsHubView()
             }
             .navigationDestination(for: FriendRecommendation.self) { friend in
                 ChatView(partnerId: friend.friendId, partnerName: friend.name, partnerAvatar: friend.avatar)
@@ -303,11 +319,35 @@ struct MyAgentDataSheet: View {
                             .font(.headline)
                     }
 
-                    // App Group 数据
+                    // 屏幕时间监控设置
                     GroupBox {
                         VStack(alignment: .leading, spacing: 12) {
+                            row("已选应用", value: "\(selectedAppCount) 个")
+                            row("已选分类", value: "\(selectedCategoryCount) 个")
                             row("屏幕时间", value: "\(extensionMinutes) 分钟")
                             row("更新时间", value: extensionLastUpdate?.formatted(.dateTime.hour().minute().second()) ?? "无")
+
+                            Divider()
+
+                            // 选择要监控的应用按钮
+                            Button {
+                                showAppPicker = true
+                            } label: {
+                                HStack {
+                                    Image(systemName: "apps.iphone")
+                                    Text("选择要监控的应用")
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            if selectedAppCount == 0 && selectedCategoryCount == 0 {
+                                Text("⚠️ 请选择要监控的应用或分类，否则无法获取屏幕使用时间")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                            }
 
                             Button("清除测试数据") {
                                 clearTestData()
@@ -316,7 +356,7 @@ struct MyAgentDataSheet: View {
                             .foregroundColor(.red)
                         }
                     } label: {
-                        Label("Extension 数据", systemImage: "app.badge")
+                        Label("屏幕时间监控", systemImage: "app.badge")
                             .font(.headline)
                     }
 
@@ -346,7 +386,38 @@ struct MyAgentDataSheet: View {
             .task {
                 await uploadAndPredict()
             }
+            .sheet(isPresented: $showAppPicker) {
+                appPickerSheet
+            }
         }
+    }
+
+    // MARK: - App Picker Sheet
+
+    @ViewBuilder
+    private var appPickerSheet: some View {
+        #if canImport(FamilyControls)
+        if #available(iOS 16.0, *) {
+            NavigationStack {
+                FamilyActivityPickerView(
+                    selection: Binding(
+                        get: { ScreenDataCollector.shared.activitySelection },
+                        set: { ScreenDataCollector.shared.activitySelection = $0 }
+                    )
+                ) {
+                    // 保存选择并重新启动监控
+                    ScreenDataCollector.shared.saveSelection()
+                    ScreenDataCollector.shared.startMonitoring()
+                    loadData()
+                    showAppPicker = false
+                }
+            }
+        } else {
+            Text("需要 iOS 16 或更高版本")
+        }
+        #else
+        Text("当前设备不支持屏幕时间监控")
+        #endif
     }
 
     private func loadData() {
@@ -526,6 +597,54 @@ struct MyAgentDataSheet: View {
         }
     }
 }
+
+// MARK: - Family Activity Picker View
+
+#if canImport(FamilyControls)
+import FamilyControls
+
+@available(iOS 16.0, *)
+struct FamilyActivityPickerView: View {
+    @Binding var selection: FamilyActivitySelection
+    let onSave: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // 说明文字
+            VStack(spacing: 8) {
+                Text("选择要监控的应用")
+                    .font(.headline)
+                Text("选择后，我们可以了解你的屏幕使用情况来判断你是否有空")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding()
+            .background(Color(.systemGroupedBackground))
+
+            // FamilyActivityPicker
+            FamilyActivityPicker(selection: $selection)
+        }
+        .navigationTitle("选择应用")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("取消") {
+                    dismiss()
+                }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("保存") {
+                    onSave()
+                }
+                .fontWeight(.semibold)
+            }
+        }
+    }
+}
+#endif
 
 #Preview {
     FriendsListView()

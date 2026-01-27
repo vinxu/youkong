@@ -18,7 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
@@ -59,6 +59,7 @@ fun FriendsListScreen(
     onNavigateToSettings: () -> Unit,
     onNavigateToAgentData: () -> Unit,
     onNavigateToInvitation: () -> Unit,
+    onNavigateToAddFriend: () -> Unit,
     viewModel: FriendsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -79,10 +80,10 @@ fun FriendsListScreen(
                     Text(text = "有空好友")
                 },
                 actions = {
-                    IconButton(onClick = onNavigateToInvitation) {
+                    IconButton(onClick = onNavigateToAddFriend) {
                         Icon(
-                            imageVector = Icons.Default.Share,
-                            contentDescription = "邀请好友",
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "添加好友",
                         )
                     }
                     IconButton(onClick = { viewModel.refresh() }) {

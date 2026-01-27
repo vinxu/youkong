@@ -12,6 +12,15 @@ data class Friend(
 enum class FriendSource {
     INVITATION, SEARCH, MANUAL, CONTACTS, REQUEST;
 
+    val displayName: String
+        get() = when (this) {
+            INVITATION -> "通过邀请"
+            SEARCH -> "通过搜索"
+            MANUAL -> "手动添加"
+            CONTACTS -> "通过通讯录"
+            REQUEST -> "通过好友请求"
+        }
+
     companion object {
         fun fromString(value: String): FriendSource {
             return when (value.uppercase()) {

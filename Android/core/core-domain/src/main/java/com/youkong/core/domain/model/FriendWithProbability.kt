@@ -9,6 +9,8 @@ data class FriendWithProbability(
     val confidence: Confidence,
     val reason: String,
     val color: String,
+    val emoji: String?, // 活动 emoji，如 🎮
+    val activity: String?, // 活动描述，如 "在玩游戏"
     val updatedAt: Long, // 毫秒时间戳
 )
 

@@ -32,6 +32,7 @@ import coil.compose.AsyncImage
 import com.youkong.core.domain.model.FriendWithProbability
 import com.youkong.core.domain.model.getFreeStatus
 import com.youkong.core.ui.theme.Gray400
+import com.youkong.core.ui.theme.Primary
 import com.youkong.core.ui.theme.ProbabilityColors
 import com.youkong.core.ui.theme.TextSecondary
 
@@ -133,9 +134,11 @@ fun FriendCard(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // emoji + 活动描述
+                    // emoji + 活动描述（优先使用后端返回的，否则用本地计算的）
+                    val displayEmoji = friend.emoji ?: freeStatus.emoji
+                    val displayActivity = friend.activity ?: friend.reason
                     Text(
-                        text = "${freeStatus.emoji} ${friend.reason}",
+                        text = "$displayEmoji $displayActivity",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary,
                         maxLines = 1,
