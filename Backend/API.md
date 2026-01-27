@@ -188,7 +188,54 @@ interface UpdateUserRequest {
 
 ---
 
-### 2.3 获取用户信息
+### 2.3 获取我的邀请海报
+
+**GET** `/users/me/poster`
+
+> 返回当前用户的固定邀请海报图片（PNG），每个用户有唯一固定的邀请码
+
+**响应**
+| Header | 值 |
+|--------|-----|
+| Content-Type | image/png |
+| Content-Disposition | inline; filename="my_invite_poster.png" |
+
+**说明**
+- 邀请码为用户ID前8位（去掉横杠），固定不变
+- 海报包含：产品介绍、用户头像昵称、二维码、域名
+- 图片尺寸: 750x1334
+
+---
+
+### 2.4 获取我的邀请信息
+
+**GET** `/users/me/invite`
+
+> 获取当前用户的固定邀请码和邀请链接
+
+**响应数据**
+```typescript
+interface MyInviteInfo {
+  code: string       // 邀请码（用户ID前8位）
+  inviteUrl: string  // 完整邀请链接
+}
+```
+
+**示例响应**
+```json
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "code": "a1b2c3d4",
+    "inviteUrl": "https://playa.cn/i/a1b2c3d4"
+  }
+}
+```
+
+---
+
+### 2.5 获取用户信息
 
 **GET** `/users/:id`
 
@@ -208,7 +255,7 @@ interface UserProfile {
 
 ---
 
-### 2.4 搜索用户
+### 2.6 搜索用户
 
 **GET** `/users/search?keyword=xxx`
 
