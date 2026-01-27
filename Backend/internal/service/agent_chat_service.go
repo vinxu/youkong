@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,6 +64,7 @@ func NewAgentChatService(
 // GenerateReply 生成 Agent 回复
 func (s *AgentChatService) GenerateReply(ctx context.Context, conversationID, userID string) (*model.AgentReplyResponse, error) {
 	if s.chatSession == nil {
+		log.Printf("[AgentChat] chatSession 为空，LLM 客户端未初始化")
 		return nil, fmt.Errorf("你的元婴罢工了")
 	}
 
@@ -117,6 +119,7 @@ func (s *AgentChatService) GenerateReply(ctx context.Context, conversationID, us
 	// 调用 LLM 生成回复
 	reply, err := s.chatSession.GenerateReply(ctx, toLLMMessages(messages))
 	if err != nil {
+		log.Printf("[AgentChat] LLM 调用失败: %v", err)
 		return nil, fmt.Errorf("你的元婴罢工了")
 	}
 
