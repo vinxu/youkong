@@ -8,6 +8,7 @@ import (
 	"youkong/internal/middleware"
 	"youkong/internal/pkg/poster"
 	"youkong/internal/pkg/response"
+	"youkong/internal/repository"
 	"youkong/internal/service"
 )
 
@@ -15,13 +16,15 @@ type UserHandler struct {
 	userService     *service.UserService
 	posterGenerator *poster.Generator
 	inviteBaseURL   string
+	messageRepo     *repository.MessageRepository
 }
 
-func NewUserHandler(userService *service.UserService, posterGenerator *poster.Generator, inviteBaseURL string) *UserHandler {
+func NewUserHandler(userService *service.UserService, posterGenerator *poster.Generator, inviteBaseURL string, messageRepo *repository.MessageRepository) *UserHandler {
 	return &UserHandler{
 		userService:     userService,
 		posterGenerator: posterGenerator,
 		inviteBaseURL:   inviteBaseURL,
+		messageRepo:     messageRepo,
 	}
 }
 
@@ -171,5 +174,25 @@ func (h *UserHandler) GetMyInviteInfo(c *gin.Context) {
 	response.Success(c, gin.H{
 		"code":      inviteCode,
 		"inviteUrl": inviteURL,
+	})
+}
+
+// GetBadgeCount 获取未读消息数（用于 App Badge）
+// GET /api/v1/users/me/badge
+func (h *UserHandler) GetBadgeCount(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	count, err := h.messageRepo.GetTotalUnreadCount(c.Request.Context(), userID)
+	if err != nil {
+		response.InternalError(c, "获取未读数失败: "+err.Error())
+		return
+	}
+
+	response.Success(c, gin.H{
+		"count": count,
 	})
 }

@@ -121,3 +121,51 @@ func (r *MessageRepository) GetLastMessage(ctx context.Context, conversationID s
 	}
 	return &msg, nil
 }
+
+// GetMessagesAfterID 获取指定消息ID之后的消息
+func (r *MessageRepository) GetMessagesAfterID(ctx context.Context, conversationID, afterMsgID string, limit int) ([]*model.Message, error) {
+	var messages []*model.Message
+
+	if afterMsgID == "" {
+		// 没有指定消息ID，返回空
+		return messages, nil
+	}
+
+	// 先获取指定消息的创建时间
+	var afterMsg model.Message
+	query := `SELECT * FROM messages WHERE id = ?`
+	err := r.db.GetContext(ctx, &afterMsg, query, afterMsgID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return messages, nil
+		}
+		return nil, err
+	}
+
+	// 获取该时间之后的消息
+	query = `SELECT * FROM messages WHERE conversation_id = ? AND created_at > ? ORDER BY created_at ASC LIMIT ?`
+	err = r.db.SelectContext(ctx, &messages, query, conversationID, afterMsg.CreatedAt, limit)
+	return messages, err
+}
+
+// GetByConversationID 获取会话的消息（按时间正序）
+func (r *MessageRepository) GetByConversationID(ctx context.Context, conversationID string, limit int) ([]*model.Message, error) {
+	var messages []*model.Message
+	query := `SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ?`
+	err := r.db.SelectContext(ctx, &messages, query, conversationID, limit)
+	return messages, err
+}
+
+// GetTotalUnreadCount 获取用户所有会话的总未读消息数
+func (r *MessageRepository) GetTotalUnreadCount(ctx context.Context, userID string) (int, error) {
+	var count int
+	query := `
+		SELECT COUNT(*) FROM messages m
+		JOIN conversations c ON m.conversation_id = c.id
+		WHERE (c.user1_id = ? OR c.user2_id = ?)
+		  AND m.sender_id != ?
+		  AND m.read_at IS NULL
+	`
+	err := r.db.GetContext(ctx, &count, query, userID, userID, userID)
+	return count, err
+}

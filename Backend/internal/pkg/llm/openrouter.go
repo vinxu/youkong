@@ -162,6 +162,55 @@ type SanitizedUserState struct {
 	Probability      int              // 有空概率 0-100
 }
 
+// ChatWithMessages 多轮对话
+func (c *OpenRouterClient) ChatWithMessages(ctx context.Context, messages []ChatMessage) (string, error) {
+	req := ChatRequest{
+		Model:    c.model,
+		Messages: messages,
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", openRouterAPIURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	httpReq.Header.Set("HTTP-Referer", "https://youkong.app")
+	httpReq.Header.Set("X-Title", "YouKong")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	var chatResp ChatResponse
+	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+		return "", fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	if chatResp.Error != nil {
+		return "", fmt.Errorf("api error: %s", chatResp.Error.Message)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return "", fmt.Errorf("no response choices")
+	}
+
+	return chatResp.Choices[0].Message.Content, nil
+}
+
 // GenerateFreeReason 生成隐私安全的有空理由
 func (c *OpenRouterClient) GenerateFreeReason(ctx context.Context, state SanitizedUserState) (string, error) {
 	prompt := fmt.Sprintf(`你是一个帮助用户判断朋友是否有空的助手。

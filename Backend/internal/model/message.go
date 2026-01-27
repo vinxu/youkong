@@ -2,9 +2,44 @@ package model
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"time"
 )
+
+// NullRawMessage 支持 NULL 的 json.RawMessage
+type NullRawMessage json.RawMessage
+
+// Scan 实现 sql.Scanner 接口
+func (n *NullRawMessage) Scan(value interface{}) error {
+	if value == nil {
+		*n = nil
+		return nil
+	}
+	switch v := value.(type) {
+	case []byte:
+		*n = NullRawMessage(v)
+	case string:
+		*n = NullRawMessage(v)
+	}
+	return nil
+}
+
+// Value 实现 driver.Valuer 接口
+func (n NullRawMessage) Value() (driver.Value, error) {
+	if n == nil {
+		return nil, nil
+	}
+	return []byte(n), nil
+}
+
+// MarshalJSON 实现 json.Marshaler
+func (n NullRawMessage) MarshalJSON() ([]byte, error) {
+	if n == nil {
+		return []byte("null"), nil
+	}
+	return json.RawMessage(n).MarshalJSON()
+}
 
 type MessageType string
 
@@ -29,7 +64,7 @@ type Message struct {
 	SenderID       string          `db:"sender_id" json:"senderId"`
 	Type           MessageType     `db:"type" json:"type"`
 	Content        sql.NullString  `db:"content" json:"content,omitempty"`
-	Metadata       json.RawMessage `db:"metadata" json:"metadata,omitempty"`
+	Metadata       NullRawMessage  `db:"metadata" json:"metadata,omitempty"`
 	CreatedAt      time.Time       `db:"created_at" json:"createdAt"`
 	ReadAt         sql.NullTime    `db:"read_at" json:"readAt,omitempty"`
 }
@@ -47,7 +82,7 @@ type MessageResponse struct {
 	Sender    UserProfile     `json:"sender"`
 	Type      MessageType     `json:"type"`
 	Content   string          `json:"content,omitempty"`
-	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	Metadata  NullRawMessage  `json:"metadata,omitempty"`
 	CreatedAt time.Time       `json:"createdAt"`
 	IsRead    bool            `json:"isRead"`
 }
