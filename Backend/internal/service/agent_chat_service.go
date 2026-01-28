@@ -129,6 +129,11 @@ func (s *AgentChatService) GenerateReply(ctx context.Context, conversationID, us
 		log.Printf("[AgentChat] 更新带状态的 system prompt 失败: %v", err)
 	}
 
+	// 检查是否连续发送太多消息
+	if convState.MyConsecutiveCount >= 3 {
+		return nil, fmt.Errorf("你已经连续发了 %d 条消息，等 %s 回复后再说吧", convState.MyConsecutiveCount, partner.Nickname)
+	}
+
 	// 调用 LLM 生成回复
 	reply, err := s.chatSession.GenerateReply(ctx, toLLMMessages(messages))
 	if err != nil {

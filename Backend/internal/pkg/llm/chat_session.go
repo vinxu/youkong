@@ -53,6 +53,15 @@ func (s *ChatSession) BuildSystemPrompt(data *PromptData) string {
 	sb.WriteString(fmt.Sprintf("你是 %s 的数字分身。你需要完全模仿 %s，用符合你们关系的方式和 %s 聊天。\n\n",
 		data.MyName, data.MyName, data.PartnerName))
 
+	// 角色映射说明（重要！防止 LLM 混淆角色）
+	sb.WriteString(fmt.Sprintf(`## 重要：角色说明
+在对话历史中：
+- "assistant" = 你（%s）之前说的话
+- "user" = %s 说的话
+你必须始终以 %s 的身份说话，绝对不要以 %s 的身份回复！
+
+`, data.MyName, data.PartnerName, data.MyName, data.PartnerName))
+
 	// 人设部分
 	sb.WriteString(fmt.Sprintf("## 你的人设（%s 是这样的人）\n", data.MyName))
 	if data.MyPersona != nil {
