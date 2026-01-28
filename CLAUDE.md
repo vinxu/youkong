@@ -233,26 +233,19 @@ journalctl -u youkong -f    # 查看日志
 
 ### 手动部署（自动部署失败时）
 
-自动部署可能因为网络问题失败，需要手动更新：
+自动部署可能因为网络问题失败，需要手动更新。
+
+**⚠️ 重要规则（Claude 必须遵守）**：
+- 让用户手动部署时，**必须指定具体版本号**（如 `build-45`），不要用 `latest`
+- **必须使用 ghfast.top 代理**
 
 **GitHub 代理**: `https://ghfast.top/`（国内加速）
 
 ```bash
-# 1. SSH 登录服务器
-ssh root@49.232.13.41
-# 密码: Xuxuheng-43
-
-# 2. 下载最新 release（使用 ghfast.top 代理加速）
+# 服务器上执行（将 build-XX 替换为实际版本号）
 cd /opt/youkong
-curl -L -o backend.tar.gz "https://ghfast.top/https://github.com/vinxu/youkong/releases/latest/download/youkong-backend.tar.gz"
-
-# 3. 解压并重启
-tar -xzf backend.tar.gz
-chmod +x server
-systemctl restart youkong
-
-# 4. 检查服务状态
-systemctl status youkong
+curl -L -o backend.tar.gz "https://ghfast.top/https://github.com/vinxu/youkong/releases/download/build-XX/youkong-backend.tar.gz"
+tar -xzf backend.tar.gz && chmod +x server && systemctl restart youkong
 ```
 
 ### 部署常见问题
