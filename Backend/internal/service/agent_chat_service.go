@@ -116,23 +116,18 @@ func (s *AgentChatService) GenerateReply(ctx context.Context, conversationID, us
 	// 分析对话状态
 	convState := s.analyzeHistoryState(history)
 
-	// 决定是否使用 Curator 压缩上下文
-	var chatPrompt string
+	// 直接使用原始上下文（Curator 异步处理，不阻塞主请求）
+	chatPrompt := s.chatSession.BuildChatPrompt(history, user.Nickname, partner.Nickname)
+	log.Printf("[AgentChat] 使用原始上下文，%d 条消息", len(history))
+
+	// 异步调用 Curator 提取关键信息（下次请求时可用）
 	if s.curatorService != nil && s.curatorService.NeedsCuration(len(history)) {
-		// 消息较多，使用 Curator 压缩
-		curated, err := s.curatorService.CurateContext(ctx, conversationID, history, user.Nickname, partner.Nickname)
-		if err != nil {
-			log.Printf("[AgentChat] Curator 失败: %v, 使用原始上下文", err)
-			chatPrompt = s.chatSession.BuildChatPrompt(history, user.Nickname, partner.Nickname)
-		} else {
-			// 使用 Curator 精选的上下文
-			chatPrompt = s.buildCuratedChatPrompt(curated, user.Nickname, partner.Nickname)
-			log.Printf("[AgentChat] 使用 Curator 压缩上下文，原始 %d 条消息", len(history))
-		}
-	} else {
-		// 消息较少，直接使用原始上下文
-		chatPrompt = s.chatSession.BuildChatPrompt(history, user.Nickname, partner.Nickname)
-		log.Printf("[AgentChat] 使用原始上下文，%d 条消息", len(history))
+		go func() {
+			historyCopy := make([]llm.ChatHistoryMessage, len(history))
+			copy(historyCopy, history)
+			s.curatorService.CurateContext(context.Background(), conversationID, historyCopy, user.Nickname, partner.Nickname)
+			log.Printf("[AgentChat] Curator 异步处理完成，%d 条消息", len(historyCopy))
+		}()
 	}
 
 	// 获取记忆总结（添加到 System Prompt）
