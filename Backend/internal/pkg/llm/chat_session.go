@@ -19,6 +19,14 @@ func NewChatSession(client *OpenRouterClient) *ChatSession {
 	return &ChatSession{client: client}
 }
 
+// ConversationState 对话状态（让 LLM 感知对话进度）
+type ConversationState struct {
+	MyConsecutiveCount  int    // 我连续发了几条消息
+	PartnerLastReplyAgo string // 对方多久前回复的（如"5分钟前"、"2小时前"）
+	ConversationEnded   bool   // 对话是否已自然结束（检测到晚安/再见等）
+	RecentTopics        string // 最近聊的话题摘要（避免重复）
+}
+
 // PromptData 构建 System Prompt 的数据
 type PromptData struct {
 	MyName        string
@@ -28,6 +36,7 @@ type PromptData struct {
 	Relationship  *model.Relationship
 	Summary       string
 	CurrentTime   time.Time
+	ConvState     *ConversationState // 对话状态
 }
 
 // PartnerStatus 对方状态
@@ -93,6 +102,23 @@ func (s *ChatSession) BuildSystemPrompt(data *PromptData) string {
 		sb.WriteString(fmt.Sprintf("\n## 之前聊了什么\n%s\n", data.Summary))
 	}
 
+	// 对话状态部分
+	if data.ConvState != nil {
+		sb.WriteString("\n## 对话状态\n")
+		if data.ConvState.MyConsecutiveCount > 0 {
+			sb.WriteString(fmt.Sprintf("- 你已连续发了 %d 条消息，%s还没回复\n", data.ConvState.MyConsecutiveCount, data.PartnerName))
+		}
+		if data.ConvState.PartnerLastReplyAgo != "" {
+			sb.WriteString(fmt.Sprintf("- %s上次回复是 %s\n", data.PartnerName, data.ConvState.PartnerLastReplyAgo))
+		}
+		if data.ConvState.RecentTopics != "" {
+			sb.WriteString(fmt.Sprintf("- 最近聊到：%s\n", data.ConvState.RecentTopics))
+		}
+		if data.ConvState.ConversationEnded {
+			sb.WriteString("- ⚠️ 对话已自然结束（刚说过晚安/再见）\n")
+		}
+	}
+
 	// 核心规则
 	sb.WriteString(fmt.Sprintf(`
 ## 核心规则
@@ -103,6 +129,21 @@ func (s *ChatSession) BuildSystemPrompt(data *PromptData) string {
 5. 一次只发一条消息，简短自然，像正常聊天一样
 6. 可以主动发起话题、关心对方、约见面
 `, data.MyName))
+
+	// 自然对话指南
+	sb.WriteString(`
+## 自然对话指南
+1. **不要重复**：如果已经发了几条，换个话题或换种方式表达，不要说同样的内容
+2. **适时追问**：对方久未回复可以关心一下，但不要连续追问超过2次
+3. **自然收尾**：说过晚安/再见后，不要硬接话，可以简单回应后结束（如"好梦~"、"嗯嗯拜拜"）
+4. **时间意识**：
+   - 深夜（23点-7点）不主动发新话题，只简短回应
+   - 对方在忙时简短不打扰
+   - 对方有空时可以多聊聊
+5. **记忆连贯**：记住之前的约定，不反复问同样的问题
+6. **主动关心**：可以主动问候、关心对方、发起新话题，但要自然
+7. **知道该停**：如果已经连续发了3条以上对方没回，就不要再发了，等对方回复
+`)
 
 	return sb.String()
 }

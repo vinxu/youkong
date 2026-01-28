@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -120,6 +121,12 @@ func (s *AgentChatService) GenerateReply(ctx context.Context, conversationID, us
 	messages, err := convCtx.GetMessages()
 	if err != nil {
 		return nil, fmt.Errorf("解析上下文失败: %w", err)
+	}
+
+	// 分析对话状态并更新 system prompt
+	convState := s.analyzeConversationState(messages)
+	if err := s.updateSystemPromptWithState(ctx, convCtx, user, partner, convState); err != nil {
+		log.Printf("[AgentChat] 更新带状态的 system prompt 失败: %v", err)
 	}
 
 	// 调用 LLM 生成回复
@@ -393,4 +400,164 @@ func toLLMMessages(messages []model.LLMMessage) []llm.ChatMessage {
 		}
 	}
 	return result
+}
+
+// analyzeConversationState 分析对话状态
+func (s *AgentChatService) analyzeConversationState(messages []model.LLMMessage) *llm.ConversationState {
+	state := &llm.ConversationState{}
+
+	// 过滤掉 system 消息
+	var chatMessages []model.LLMMessage
+	for _, msg := range messages {
+		if msg.Role != "system" {
+			chatMessages = append(chatMessages, msg)
+		}
+	}
+
+	if len(chatMessages) == 0 {
+		return state
+	}
+
+	// 1. 统计末尾连续 assistant 消息数量
+	for i := len(chatMessages) - 1; i >= 0; i-- {
+		if chatMessages[i].Role == "assistant" {
+			state.MyConsecutiveCount++
+		} else {
+			break
+		}
+	}
+
+	// 2. 计算对方上次回复距今时间（基于消息位置估算）
+	// 找到最后一个 user 消息的位置
+	lastUserIdx := -1
+	for i := len(chatMessages) - 1; i >= 0; i-- {
+		if chatMessages[i].Role == "user" {
+			lastUserIdx = i
+			break
+		}
+	}
+
+	if lastUserIdx >= 0 {
+		// 根据之后的 assistant 消息数量估算时间
+		msgsSinceUser := len(chatMessages) - 1 - lastUserIdx
+		if msgsSinceUser == 0 {
+			state.PartnerLastReplyAgo = "刚刚"
+		} else if msgsSinceUser <= 2 {
+			state.PartnerLastReplyAgo = "几分钟前"
+		} else if msgsSinceUser <= 5 {
+			state.PartnerLastReplyAgo = "一会儿前"
+		} else {
+			state.PartnerLastReplyAgo = "较长时间前"
+		}
+	}
+
+	// 3. 检测对话是否已自然结束
+	endKeywords := []string{"晚安", "再见", "拜拜", "下次聊", "回头见", "886", "88", "拜", "睡了", "先这样", "改天聊"}
+	// 检查最后几条消息
+	checkCount := 3
+	if len(chatMessages) < checkCount {
+		checkCount = len(chatMessages)
+	}
+	for i := len(chatMessages) - checkCount; i < len(chatMessages); i++ {
+		content := chatMessages[i].Content
+		for _, kw := range endKeywords {
+			if containsKeyword(content, kw) {
+				state.ConversationEnded = true
+				break
+			}
+		}
+		if state.ConversationEnded {
+			break
+		}
+	}
+
+	// 4. 提取最近话题（简单实现：取最后几条非 system 消息的摘要）
+	topicCount := 3
+	if len(chatMessages) < topicCount {
+		topicCount = len(chatMessages)
+	}
+	var recentContents []string
+	for i := len(chatMessages) - topicCount; i < len(chatMessages); i++ {
+		content := chatMessages[i].Content
+		// 截取前20个字符作为话题摘要
+		if len(content) > 20 {
+			content = content[:20] + "..."
+		}
+		recentContents = append(recentContents, content)
+	}
+	if len(recentContents) > 0 {
+		state.RecentTopics = strings.Join(recentContents, " / ")
+	}
+
+	return state
+}
+
+// containsKeyword 检查内容是否包含关键词
+func containsKeyword(content, keyword string) bool {
+	return strings.Contains(strings.ToLower(content), strings.ToLower(keyword))
+}
+
+// updateSystemPromptWithState 更新带对话状态的 system prompt
+func (s *AgentChatService) updateSystemPromptWithState(ctx context.Context, convCtx *model.ConversationContext, user, partner *model.User, convState *llm.ConversationState) error {
+	// 构建新的 system prompt（带状态）
+	newSystemPrompt := s.buildSystemPromptWithState(ctx, user, partner, convState)
+
+	// 获取当前消息列表
+	messages, err := convCtx.GetMessages()
+	if err != nil {
+		return err
+	}
+
+	// 更新第一个 system 消息
+	if len(messages) > 0 && messages[0].Role == "system" {
+		messages[0].Content = newSystemPrompt
+	} else {
+		// 如果没有 system 消息，插入一个
+		messages = append([]model.LLMMessage{{Role: "system", Content: newSystemPrompt}}, messages...)
+	}
+
+	// 保存更新后的消息
+	messagesJSON, err := json.Marshal(messages)
+	if err != nil {
+		return err
+	}
+
+	convCtx.Messages = string(messagesJSON)
+	convCtx.TokenCount = len(convCtx.Messages) / 4
+	convCtx.UpdatedAt = time.Now()
+
+	return s.contextRepo.Update(ctx, convCtx)
+}
+
+// buildSystemPromptWithState 构建带状态的 System Prompt
+func (s *AgentChatService) buildSystemPromptWithState(ctx context.Context, user, partner *model.User, convState *llm.ConversationState) string {
+	// 获取用户人设
+	persona, _ := s.personaRepo.GetOrCreate(ctx, user.ID)
+
+	// 获取关系画像
+	rel, _ := s.relRepo.GetOrCreate(ctx, user.ID, partner.ID)
+
+	// 获取对方状态（从分析缓存）
+	var partnerStatus *llm.PartnerStatus
+	if s.memoryRepo != nil {
+		if cache, err := s.memoryRepo.GetAnalysisCache(ctx, partner.ID); err == nil && cache != nil {
+			partnerStatus = &llm.PartnerStatus{
+				Emoji:       cache.LifeStatus.Emoji,
+				Label:       cache.LifeStatus.Label,
+				Probability: cache.Availability.Probability,
+			}
+		}
+	}
+
+	data := &llm.PromptData{
+		MyName:        user.Nickname,
+		MyPersona:     persona,
+		PartnerName:   partner.Nickname,
+		PartnerStatus: partnerStatus,
+		Relationship:  rel,
+		CurrentTime:   time.Now(),
+		ConvState:     convState,
+	}
+
+	return s.chatSession.BuildSystemPrompt(data)
 }
