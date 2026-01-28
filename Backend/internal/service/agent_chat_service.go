@@ -105,6 +105,11 @@ func (s *AgentChatService) GenerateReply(ctx context.Context, conversationID, us
 		return nil, fmt.Errorf("获取上下文失败: %w", err)
 	}
 
+	// 每次生成回复时更新 system prompt（确保时间和状态是最新的）
+	if err := s.updateSystemPrompt(ctx, convCtx, user, partner); err != nil {
+		log.Printf("[AgentChat] 更新 system prompt 失败: %v", err)
+	}
+
 	// 同步所有新消息到上下文（正确分配角色）
 	if err := s.syncMessages(ctx, convCtx, conversationID, userID); err != nil {
 		// 同步失败不影响主流程，记录日志
@@ -233,6 +238,38 @@ func (s *AgentChatService) getOrCreateContext(ctx context.Context, conversationI
 	}
 
 	return convCtx, nil
+}
+
+// updateSystemPrompt 更新上下文中的 system prompt（确保时间和状态是最新的）
+func (s *AgentChatService) updateSystemPrompt(ctx context.Context, convCtx *model.ConversationContext, user, partner *model.User) error {
+	// 构建新的 system prompt
+	newSystemPrompt := s.buildSystemPrompt(ctx, user, partner)
+
+	// 获取当前消息列表
+	messages, err := convCtx.GetMessages()
+	if err != nil {
+		return err
+	}
+
+	// 更新第一个 system 消息
+	if len(messages) > 0 && messages[0].Role == "system" {
+		messages[0].Content = newSystemPrompt
+	} else {
+		// 如果没有 system 消息，插入一个
+		messages = append([]model.LLMMessage{{Role: "system", Content: newSystemPrompt}}, messages...)
+	}
+
+	// 保存更新后的消息
+	messagesJSON, err := json.Marshal(messages)
+	if err != nil {
+		return err
+	}
+
+	convCtx.Messages = string(messagesJSON)
+	convCtx.TokenCount = len(convCtx.Messages) / 4
+	convCtx.UpdatedAt = time.Now()
+
+	return s.contextRepo.Update(ctx, convCtx)
 }
 
 // buildSystemPrompt 构建 System Prompt
