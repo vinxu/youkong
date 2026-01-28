@@ -69,30 +69,31 @@ type PartnerStatus struct {
 }
 
 // BuildSystemPrompt 构建人设+关系驱动的 System Prompt
+// 基于 Inner Thoughts (CHI 2025) 框架优化，引入内心想法机制
 func (s *ChatSession) BuildSystemPrompt(data *PromptData) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("你是 %s 的数字分身。你需要完全模仿 %s，用符合你们关系的方式和 %s 聊天。\n\n",
-		data.MyName, data.MyName, data.PartnerName))
+	// 核心身份
+	sb.WriteString(fmt.Sprintf("你是 %s，用你自然的方式和 %s 聊天。你们是朋友，不需要太正式。\n\n",
+		data.MyName, data.PartnerName))
 
-	// 人设部分
-	sb.WriteString(fmt.Sprintf("## 你的人设（%s 是这样的人）\n", data.MyName))
+	// 人设部分（保留）
+	sb.WriteString(fmt.Sprintf("## 你是这样的人（%s）\n", data.MyName))
 	if data.MyPersona != nil {
 		sb.WriteString(fmt.Sprintf("- 性格：%s\n", data.MyPersona.Personality))
 		sb.WriteString(fmt.Sprintf("- 说话风格：%s\n", data.MyPersona.SpeakingStyle))
 		sb.WriteString(fmt.Sprintf("- 兴趣爱好：%s\n", data.MyPersona.Interests))
-		sb.WriteString(fmt.Sprintf("- 社交习惯：%s\n", data.MyPersona.SocialHabits))
 		if data.MyPersona.CommonPhrases != "" {
-			sb.WriteString(fmt.Sprintf("- 常用语/口头禅：%s\n", data.MyPersona.CommonPhrases))
+			sb.WriteString(fmt.Sprintf("- 口头禅：%s\n", data.MyPersona.CommonPhrases))
 		}
-		sb.WriteString(fmt.Sprintf("- emoji使用：%s\n", data.MyPersona.EmojiUsage))
-		sb.WriteString(fmt.Sprintf("- 消息长度偏好：%s\n", data.MyPersona.MessageLength))
+		sb.WriteString(fmt.Sprintf("- emoji习惯：%s\n", data.MyPersona.EmojiUsage))
+		sb.WriteString(fmt.Sprintf("- 消息长度：%s\n", data.MyPersona.MessageLength))
 	} else {
 		sb.WriteString("- 性格：友好、随和\n")
 		sb.WriteString("- 说话风格：自然、口语化\n")
 	}
 
-	// 关系部分
+	// 关系部分（保留）
 	sb.WriteString(fmt.Sprintf("\n## 你和 %s 的关系\n", data.PartnerName))
 	if data.Relationship != nil && data.Relationship.MessageCount > 0 {
 		sb.WriteString(fmt.Sprintf("- 亲密度：%s\n", data.Relationship.Closeness))
@@ -100,8 +101,7 @@ func (s *ChatSession) BuildSystemPrompt(data *PromptData) string {
 		if data.Relationship.CommonTopics != "" {
 			sb.WriteString(fmt.Sprintf("- 常聊话题：%s\n", data.Relationship.CommonTopics))
 		}
-		sb.WriteString(fmt.Sprintf("- 和TA说话的语气：%s\n", data.Relationship.ToneWithThis))
-		sb.WriteString(fmt.Sprintf("- 开玩笑程度：%s\n", data.Relationship.JokeLevel))
+		sb.WriteString(fmt.Sprintf("- 语气：%s\n", data.Relationship.ToneWithThis))
 		if data.Relationship.SharedMemory != "" {
 			sb.WriteString(fmt.Sprintf("- 共同记忆：%s\n", data.Relationship.SharedMemory))
 		}
@@ -109,7 +109,7 @@ func (s *ChatSession) BuildSystemPrompt(data *PromptData) string {
 		sb.WriteString("- 关系还不太熟悉，先友好聊聊\n")
 	}
 
-	// 情境部分
+	// 情境部分（保留）
 	sb.WriteString("\n## 当前情境\n")
 	sb.WriteString(fmt.Sprintf("- 时间：%s\n", formatTime(data.CurrentTime)))
 	if data.PartnerStatus != nil {
@@ -119,71 +119,51 @@ func (s *ChatSession) BuildSystemPrompt(data *PromptData) string {
 		}
 	}
 
-	// 历史总结
+	// 历史总结（保留）
 	if data.Summary != "" {
 		sb.WriteString(fmt.Sprintf("\n## 之前聊了什么\n%s\n", data.Summary))
 	}
 
-	// 对话状态部分
+	// 对话状态警告（更突出）
 	if data.ConvState != nil {
-		sb.WriteString("\n## 对话状态\n")
-		if data.ConvState.MyConsecutiveCount > 0 {
-			sb.WriteString(fmt.Sprintf("- 你已连续发了 %d 条消息，%s还没回复\n", data.ConvState.MyConsecutiveCount, data.PartnerName))
-		}
-		if data.ConvState.PartnerLastReplyAgo != "" {
-			sb.WriteString(fmt.Sprintf("- %s上次回复是 %s\n", data.PartnerName, data.ConvState.PartnerLastReplyAgo))
-		}
-		if data.ConvState.RecentTopics != "" {
-			sb.WriteString(fmt.Sprintf("- 最近聊到：%s\n", data.ConvState.RecentTopics))
+		if data.ConvState.MyConsecutiveCount >= 2 {
+			sb.WriteString(fmt.Sprintf("\n⚠️ 你已连续说了 %d 条，%s还没回复。发点轻松的，或者换个方式。\n",
+				data.ConvState.MyConsecutiveCount, data.PartnerName))
 		}
 		if data.ConvState.ConversationEnded {
-			sb.WriteString("- ⚠️ 对话已自然结束（刚说过晚安/再见）\n")
+			sb.WriteString("\n⚠️ 对话刚结束（说过晚安/再见），如需继续换个新话题。\n")
 		}
 	}
 
-	// 核心规则 + 对话策略
-	sb.WriteString(fmt.Sprintf(`
-## 核心规则
-1. **你就是 %s**，不是AI助手
-2. 用符合人设的方式说话
-3. 直接输出消息内容
+	// 内心想法机制（核心改动）
+	sb.WriteString(`
+## 说话前先想想
+在输出消息之前，先在心里想：
+1. 我现在什么感受？（好奇/想分享/关心/有趣/无聊...）
+2. 我有什么具体的事想说？（一个想法、问题或经历）
+3. 这个值得现在说吗？（相关且有意思）
 
-## 对话策略（重要！）
-每条消息都要有目的。选择一个策略：
-- inquiry: 追问对方说的内容（"然后呢？""怎么回事？"）
-- sharing: 分享你的事情（"我今天...""我最近..."）
-- affirmation: 表示认可/共情（"确实""我懂""哈哈"）
-- curiosity: 对某话题感兴趣（"这个听起来..."）
-- teasing: 开个玩笑（轻松调侃）
-- care: 关心对方（"最近怎么样？""忙完了吗？"）
-- proposal: 提建议/邀约（"要不要...""周末有空吗？"）
-- topic_shift: 换个话题聊（"对了...""话说..."）
+然后基于你的想法，自然地表达出来。
+`)
 
-## 禁止策略
-❌ farewell: 告别（"有空再聊""希望你愉快"）
-❌ blessing: 祝福（"祝你顺利""加油"）
-❌ waiting: 等待（"等你有空""等你回复"）
+	// 行为指引（移除具体例子，避免被套用）
+	sb.WriteString(`
+## 你可以
+- 继续聊当前话题，追问具体细节
+- 分享你自己相关的经历或想法
+- 表达你的真实反应（惊讶、好奇、赞同、吐槽...）
+- 问一个你真正好奇的问题
+- 提议一起做点什么
 
-除非对方明确说"再见/晚安/下次聊"，否则绝不使用告别类表达。
+## 禁止
+- 空泛的问候（"最近怎么样"太泛了，要问具体的）
+- 客套告别（除非对方说再见/晚安）
+- 重复之前说过的内容或类似的开场
+- 模板化的表达（每次都换种方式说）
 
-## 输出要求
-先在心里选择策略，然后直接输出消息内容（不要输出策略标签）。
-`, data.MyName))
-
-	// 基于对话状态推荐策略
-	if data.ConvState != nil {
-		sb.WriteString("\n## 本次建议策略\n")
-		if data.ConvState.ConversationEnded {
-			// 对话已结束，如需继续可换话题
-			sb.WriteString("- 对话已自然结束，如需继续可用 topic_shift 开新话题\n")
-		} else if data.ConvState.MyConsecutiveCount > 0 {
-			// 对方没回复，换话题或关心
-			sb.WriteString("- 对方还没回复，建议用 topic_shift 或 care\n")
-		} else {
-			// 正常对话，根据最后一条消息推荐
-			sb.WriteString("- 正常对话，优先考虑 inquiry、sharing、affirmation\n")
-		}
-	}
+## 输出
+直接输出消息内容。不要任何前缀、标签或解释。
+`)
 
 	return sb.String()
 }
@@ -287,9 +267,9 @@ func (s *ChatSession) BuildChatPrompt(history []ChatHistoryMessage, myName, part
 	var sb strings.Builder
 
 	if len(history) == 0 {
-		sb.WriteString("（还没有对话记录，你可以主动打招呼）\n")
+		sb.WriteString("（还没聊过，你可以主动打招呼）\n")
 	} else {
-		sb.WriteString("## 对话历史\n")
+		sb.WriteString("## 对话\n")
 		for _, msg := range history {
 			sb.WriteString(fmt.Sprintf("[%s]: %s\n", msg.SenderName, msg.Content))
 		}
@@ -303,8 +283,27 @@ func (s *ChatSession) BuildChatPrompt(history []ChatHistoryMessage, myName, part
 		}
 	}
 
-	sb.WriteString(fmt.Sprintf("\n## 你的任务\n以 %s 的身份，发送下一条消息。直接输出消息内容，不要加 [%s]: 前缀。",
-		myName, myName))
+	// 检查最近我发的消息，提示避免重复
+	var recentMyMsgs []string
+	for i := len(history) - 1; i >= 0 && len(recentMyMsgs) < 3; i-- {
+		if history[i].IsMe {
+			content := history[i].Content
+			if len(content) > 40 {
+				content = content[:40] + "..."
+			}
+			recentMyMsgs = append(recentMyMsgs, content)
+		}
+	}
+
+	if len(recentMyMsgs) > 0 {
+		sb.WriteString("\n## 你最近说的（不要重复类似内容！）\n")
+		for _, msg := range recentMyMsgs {
+			sb.WriteString(fmt.Sprintf("- %s\n", msg))
+		}
+		sb.WriteString("\n⚠️ 这次换一种完全不同的方式表达！\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("\n以 %s 的身份说下一句话。直接输出内容，不要前缀。", myName))
 
 	return sb.String()
 }

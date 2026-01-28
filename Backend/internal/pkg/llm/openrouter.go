@@ -164,12 +164,18 @@ type SanitizedUserState struct {
 
 // ChatWithMessages 多轮对话
 func (c *OpenRouterClient) ChatWithMessages(ctx context.Context, messages []ChatMessage) (string, error) {
-	req := ChatRequest{
-		Model:    c.model,
-		Messages: messages,
+	// 使用 map 构建请求，以便添加多样性控制参数
+	requestBody := map[string]interface{}{
+		"model":              c.model,
+		"messages":           messages,
+		"temperature":        0.85,  // 提高创造性
+		"top_p":              0.9,
+		"frequency_penalty":  0.5,   // 惩罚重复词汇
+		"presence_penalty":   0.3,   // 惩罚重复话题
+		"repetition_penalty": 1.1,   // 通义千问专用参数
 	}
 
-	body, err := json.Marshal(req)
+	body, err := json.Marshal(requestBody)
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
