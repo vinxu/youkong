@@ -27,6 +27,13 @@ import (
 	"youkong/internal/service"
 )
 
+// 版本信息（通过 ldflags 注入）
+var (
+	Version   = "dev"
+	Commit    = "unknown"
+	BuildTime = "unknown"
+)
+
 func main() {
 	// 加载配置
 	cfg, err := config.Load()
@@ -194,7 +201,12 @@ func main() {
 
 	// 健康检查
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
+		c.JSON(200, gin.H{
+			"status":    "ok",
+			"version":   Version,
+			"commit":    Commit,
+			"buildTime": BuildTime,
+		})
 	})
 
 	// 部署 webhook

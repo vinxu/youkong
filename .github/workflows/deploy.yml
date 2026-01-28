@@ -28,7 +28,11 @@ jobs:
         run: |
           cd Backend
           go mod download
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o server ./cmd/server/...
+          VERSION="build-${{ github.run_number }}"
+          COMMIT="${{ github.sha }}"
+          BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          LDFLAGS="-X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildTime=${BUILD_TIME}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o server ./cmd/server/...
           tar -czvf youkong-backend.tar.gz server migrations/
 
       - name: Upload Backend Artifact
