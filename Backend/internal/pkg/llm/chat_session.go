@@ -9,6 +9,14 @@ import (
 	"youkong/internal/model"
 )
 
+// ChatHistoryMessage 带发送者信息的消息
+type ChatHistoryMessage struct {
+	SenderName string    // 发送者名字（如"小明"、"A"）
+	Content    string    // 消息内容
+	IsMe       bool      // 是否是"我"发的
+	Time       time.Time // 发送时间
+}
+
 // ChatSession LLM 聊天会话管理
 type ChatSession struct {
 	client *OpenRouterClient
@@ -52,15 +60,6 @@ func (s *ChatSession) BuildSystemPrompt(data *PromptData) string {
 
 	sb.WriteString(fmt.Sprintf("你是 %s 的数字分身。你需要完全模仿 %s，用符合你们关系的方式和 %s 聊天。\n\n",
 		data.MyName, data.MyName, data.PartnerName))
-
-	// 角色映射说明（重要！防止 LLM 混淆角色）
-	sb.WriteString(fmt.Sprintf(`## 重要：角色说明
-在对话历史中：
-- "assistant" = 你（%s）之前说的话
-- "user" = %s 说的话
-你必须始终以 %s 的身份说话，绝对不要以 %s 的身份回复！
-
-`, data.MyName, data.PartnerName, data.MyName, data.PartnerName))
 
 	// 人设部分
 	sb.WriteString(fmt.Sprintf("## 你的人设（%s 是这样的人）\n", data.MyName))
@@ -163,9 +162,17 @@ func (s *ChatSession) GenerateReply(ctx context.Context, messages []ChatMessage)
 		return "", fmt.Errorf("LLM chat failed: %w", err)
 	}
 
-	// 清理回复（移除可能的引号或前缀）
+	// 清理回复
 	reply = strings.TrimSpace(reply)
 	reply = strings.Trim(reply, "\"'")
+
+	// 移除可能的 [名字]: 前缀（LLM 可能会加上）
+	if idx := strings.Index(reply, "]:"); idx != -1 && idx < 20 {
+		// 检查是否是 [xxx]: 格式的前缀
+		if strings.HasPrefix(reply, "[") {
+			reply = strings.TrimSpace(reply[idx+2:])
+		}
+	}
 
 	return reply, nil
 }
@@ -235,4 +242,32 @@ func formatTime(t time.Time) string {
 	}
 
 	return fmt.Sprintf("%s %s %d点", dayStr, period, hour)
+}
+
+// BuildChatPrompt 构建显式标注发送者的对话历史 prompt
+// 使用 [名字]: 消息 格式，避免 LLM 角色混淆
+func (s *ChatSession) BuildChatPrompt(history []ChatHistoryMessage, myName, partnerName string) string {
+	var sb strings.Builder
+
+	if len(history) == 0 {
+		sb.WriteString("（还没有对话记录，你可以主动打招呼）\n")
+	} else {
+		sb.WriteString("## 对话历史\n")
+		for _, msg := range history {
+			sb.WriteString(fmt.Sprintf("[%s]: %s\n", msg.SenderName, msg.Content))
+		}
+	}
+
+	// 标注对话状态
+	if len(history) > 0 {
+		lastMsg := history[len(history)-1]
+		if lastMsg.IsMe {
+			sb.WriteString(fmt.Sprintf("\n（%s 还没回复）\n", partnerName))
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf("\n## 你的任务\n以 %s 的身份，发送下一条消息。直接输出消息内容，不要加 [%s]: 前缀。",
+		myName, myName))
+
+	return sb.String()
 }

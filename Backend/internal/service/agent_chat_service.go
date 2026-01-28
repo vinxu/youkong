@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -26,6 +25,7 @@ type AgentChatService struct {
 	userRepo            *repository.UserRepository
 	memoryRepo          *repository.MemoryRepository
 	chatSession         *llm.ChatSession
+	curatorService      *ContextCuratorService
 	wsManager           *ws.Manager
 	relService          *RelationshipService
 	notificationService *NotificationService
@@ -45,8 +45,10 @@ func NewAgentChatService(
 	notificationService *NotificationService,
 ) *AgentChatService {
 	var session *llm.ChatSession
+	var curator *ContextCuratorService
 	if llmClient != nil {
 		session = llm.NewChatSession(llmClient)
+		curator = NewContextCuratorService(llmClient, memoryRepo)
 	}
 	return &AgentChatService{
 		contextRepo:         contextRepo,
@@ -56,6 +58,7 @@ func NewAgentChatService(
 		userRepo:            userRepo,
 		memoryRepo:          memoryRepo,
 		chatSession:         session,
+		curatorService:      curator,
 		wsManager:           wsManager,
 		relService:          relService,
 		notificationService: notificationService,
@@ -63,6 +66,7 @@ func NewAgentChatService(
 }
 
 // GenerateReply 生成 Agent 回复
+// 使用显式对话格式：[名字]: 消息，避免 LLM 角色混淆
 func (s *AgentChatService) GenerateReply(ctx context.Context, conversationID, userID string) (*model.AgentReplyResponse, error) {
 	if s.chatSession == nil {
 		log.Printf("[AgentChat] chatSession 为空，LLM 客户端未初始化")
@@ -100,50 +104,57 @@ func (s *AgentChatService) GenerateReply(ctx context.Context, conversationID, us
 		return nil, fmt.Errorf("获取对方用户信息失败")
 	}
 
-	// 获取或创建 LLM 上下文
-	convCtx, err := s.getOrCreateContext(ctx, conversationID, user, partner)
+	// 从数据库获取最近 20 条消息（按时间倒序，最新的在前面）
+	dbMessages, err := s.messageRepo.GetMessagesByConversationID(ctx, conversationID, 20, 0)
 	if err != nil {
-		return nil, fmt.Errorf("获取上下文失败: %w", err)
+		log.Printf("[AgentChat] 获取消息失败: %v", err)
 	}
 
-	// 每次生成回复时更新 system prompt（确保时间和状态是最新的）
-	if err := s.updateSystemPrompt(ctx, convCtx, user, partner); err != nil {
-		log.Printf("[AgentChat] 更新 system prompt 失败: %v", err)
+	// 转换为带发送者名字的消息格式
+	history := s.buildChatHistory(dbMessages, userID, user.Nickname, partner.Nickname)
+
+	// 分析对话状态
+	convState := s.analyzeHistoryState(history)
+
+	// 决定是否使用 Curator 压缩上下文
+	var chatPrompt string
+	if s.curatorService != nil && s.curatorService.NeedsCuration(len(history)) {
+		// 消息较多，使用 Curator 压缩
+		curated, err := s.curatorService.CurateContext(ctx, conversationID, history, user.Nickname, partner.Nickname)
+		if err != nil {
+			log.Printf("[AgentChat] Curator 失败: %v, 使用原始上下文", err)
+			chatPrompt = s.chatSession.BuildChatPrompt(history, user.Nickname, partner.Nickname)
+		} else {
+			// 使用 Curator 精选的上下文
+			chatPrompt = s.buildCuratedChatPrompt(curated, user.Nickname, partner.Nickname)
+			log.Printf("[AgentChat] 使用 Curator 压缩上下文，原始 %d 条消息", len(history))
+		}
+	} else {
+		// 消息较少，直接使用原始上下文
+		chatPrompt = s.chatSession.BuildChatPrompt(history, user.Nickname, partner.Nickname)
+		log.Printf("[AgentChat] 使用原始上下文，%d 条消息", len(history))
 	}
 
-	// 同步所有新消息到上下文（正确分配角色）
-	if err := s.syncMessages(ctx, convCtx, conversationID, userID); err != nil {
-		// 同步失败不影响主流程，记录日志
-		log.Printf("[AgentChat] 同步消息失败: %v", err)
+	// 获取记忆总结（添加到 System Prompt）
+	var memorySummary string
+	if s.curatorService != nil {
+		memorySummary = s.curatorService.GetMemorySummary(ctx, conversationID)
 	}
 
-	// 获取 LLM 消息
-	messages, err := convCtx.GetMessages()
-	if err != nil {
-		return nil, fmt.Errorf("解析上下文失败: %w", err)
-	}
+	// 构建 System Prompt（人设 + 关系 + 规则 + 记忆）
+	systemPrompt := s.buildSystemPromptWithMemory(ctx, user, partner, convState, memorySummary)
 
-	// 分析对话状态并更新 system prompt
-	convState := s.analyzeConversationState(messages)
-	if err := s.updateSystemPromptWithState(ctx, convCtx, user, partner, convState); err != nil {
-		log.Printf("[AgentChat] 更新带状态的 system prompt 失败: %v", err)
+	// 构建 LLM 消息（只有 2 条：system + user）
+	messages := []llm.ChatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: chatPrompt},
 	}
 
 	// 调用 LLM 生成回复
-	reply, err := s.chatSession.GenerateReply(ctx, toLLMMessages(messages))
+	reply, err := s.chatSession.GenerateReply(ctx, messages)
 	if err != nil {
 		log.Printf("[AgentChat] LLM 调用失败: %v", err)
 		return nil, fmt.Errorf("你的元婴罢工了")
-	}
-
-	// 追加回复到上下文
-	if err := convCtx.AddMessage("assistant", reply); err != nil {
-		return nil, fmt.Errorf("保存上下文失败: %w", err)
-	}
-
-	// 保存上下文
-	if err := s.contextRepo.Update(ctx, convCtx); err != nil {
-		// 上下文保存失败不影响主流程
 	}
 
 	// 保存消息到数据库
@@ -162,9 +173,6 @@ func (s *AgentChatService) GenerateReply(ctx context.Context, conversationID, us
 
 	// 更新会话最后消息时间
 	s.messageRepo.UpdateConversationLastMessage(ctx, conversationID)
-
-	// 更新上下文的最后同步消息ID
-	s.contextRepo.UpdateLastSyncMsgID(ctx, conversationID, msg.ID)
 
 	// 构建响应
 	response := &model.AgentReplyResponse{
@@ -198,268 +206,104 @@ func (s *AgentChatService) GenerateReply(ctx context.Context, conversationID, us
 		}
 	}()
 
-	// 检查是否需要总结
-	if convCtx.NeedsSummary(4000) {
-		go s.summarizeAndReset(context.Background(), convCtx, user, partner)
-	}
+	// 异步更新消息计数（用于 Curator 判断是否需要总结）
+	go func() {
+		if s.memoryRepo != nil {
+			s.memoryRepo.IncrementMessageCount(context.Background(), conversationID)
+		}
+	}()
 
 	return response, nil
 }
 
-// getOrCreateContext 获取或创建 LLM 上下文
-func (s *AgentChatService) getOrCreateContext(ctx context.Context, conversationID string, user, partner *model.User) (*model.ConversationContext, error) {
-	convCtx, err := s.contextRepo.GetByConversationID(ctx, conversationID)
-	if err != nil {
-		return nil, err
-	}
+// buildChatHistory 从数据库消息构建带发送者名字的对话历史
+// dbMessages 是按时间倒序的（最新的在前），需要反转为正序（最早的在前）
+func (s *AgentChatService) buildChatHistory(dbMessages []*model.Message, myUserID, myName, partnerName string) []llm.ChatHistoryMessage {
+	history := make([]llm.ChatHistoryMessage, 0, len(dbMessages))
 
-	if convCtx != nil {
-		return convCtx, nil
-	}
+	for i := len(dbMessages) - 1; i >= 0; i-- {
+		msg := dbMessages[i]
 
-	// 创建新上下文
-	systemPrompt := s.buildSystemPrompt(ctx, user, partner)
-
-	initialMessages := []model.LLMMessage{
-		{Role: "system", Content: systemPrompt},
-	}
-
-	messagesJSON, err := json.Marshal(initialMessages)
-	if err != nil {
-		return nil, err
-	}
-
-	now := time.Now()
-	convCtx = &model.ConversationContext{
-		ConversationID: conversationID,
-		Messages:       string(messagesJSON),
-		TokenCount:     len(string(messagesJSON)) / 4,
-		Summary:        "",
-		LastSyncMsgID:  "",
-		UpdatedAt:      now,
-		CreatedAt:      now,
-	}
-
-	if err := s.contextRepo.Create(ctx, convCtx); err != nil {
-		return nil, err
-	}
-
-	return convCtx, nil
-}
-
-// updateSystemPrompt 更新上下文中的 system prompt（确保时间和状态是最新的）
-func (s *AgentChatService) updateSystemPrompt(ctx context.Context, convCtx *model.ConversationContext, user, partner *model.User) error {
-	// 构建新的 system prompt
-	newSystemPrompt := s.buildSystemPrompt(ctx, user, partner)
-
-	// 获取当前消息列表
-	messages, err := convCtx.GetMessages()
-	if err != nil {
-		return err
-	}
-
-	// 更新第一个 system 消息
-	if len(messages) > 0 && messages[0].Role == "system" {
-		messages[0].Content = newSystemPrompt
-	} else {
-		// 如果没有 system 消息，插入一个
-		messages = append([]model.LLMMessage{{Role: "system", Content: newSystemPrompt}}, messages...)
-	}
-
-	// 保存更新后的消息
-	messagesJSON, err := json.Marshal(messages)
-	if err != nil {
-		return err
-	}
-
-	convCtx.Messages = string(messagesJSON)
-	convCtx.TokenCount = len(convCtx.Messages) / 4
-	convCtx.UpdatedAt = time.Now()
-
-	return s.contextRepo.Update(ctx, convCtx)
-}
-
-// buildSystemPrompt 构建 System Prompt
-func (s *AgentChatService) buildSystemPrompt(ctx context.Context, user, partner *model.User) string {
-	// 获取用户人设
-	persona, _ := s.personaRepo.GetOrCreate(ctx, user.ID)
-
-	// 获取关系画像
-	rel, _ := s.relRepo.GetOrCreate(ctx, user.ID, partner.ID)
-
-	// 获取对方状态（从分析缓存）
-	var partnerStatus *llm.PartnerStatus
-	if s.memoryRepo != nil {
-		if cache, err := s.memoryRepo.GetAnalysisCache(ctx, partner.ID); err == nil && cache != nil {
-			partnerStatus = &llm.PartnerStatus{
-				Emoji:       cache.LifeStatus.Emoji,
-				Label:       cache.LifeStatus.Label,
-				Probability: cache.Availability.Probability,
-			}
+		// 只处理文本消息
+		if msg.Type != model.MessageTypeText {
+			continue
 		}
-	}
 
-	data := &llm.PromptData{
-		MyName:        user.Nickname,
-		MyPersona:     persona,
-		PartnerName:   partner.Nickname,
-		PartnerStatus: partnerStatus,
-		Relationship:  rel,
-		CurrentTime:   time.Now(),
-	}
-
-	return s.chatSession.BuildSystemPrompt(data)
-}
-
-// syncMessages 同步所有未同步的消息到上下文，正确分配角色
-// 从 LLM 视角：
-//   - "assistant" = 我（当前用户）说的话（包括 Agent 代说的）
-//   - "user" = 对方说的话（包括对方的 Agent 代说的）
-func (s *AgentChatService) syncMessages(ctx context.Context, convCtx *model.ConversationContext, conversationID, userID string) error {
-	// 获取最后同步消息之后的新消息
-	newMessages, err := s.messageRepo.GetMessagesAfterID(ctx, conversationID, convCtx.LastSyncMsgID, 20)
-	if err != nil {
-		return err
-	}
-
-	if len(newMessages) == 0 {
-		return nil
-	}
-
-	// 将所有新消息添加到上下文，根据发送者分配正确的角色
-	for _, msg := range newMessages {
 		content := ""
 		if msg.Content.Valid {
-			content = msg.Content.String
+			content = strings.TrimSpace(msg.Content.String)
 		}
 
-		if msg.SenderID == userID {
-			// 这是"我"（包括我的 Agent）发送的消息 → "assistant"
-			if err := convCtx.AddMessage("assistant", content); err != nil {
-				return err
-			}
-		} else {
-			// 这是对方发送的消息 → "user"
-			if err := convCtx.AddMessage("user", content); err != nil {
-				return err
-			}
+		// 跳过空消息
+		if content == "" {
+			continue
 		}
 
-		// 更新最后同步消息ID
-		convCtx.LastSyncMsgID = msg.ID
-	}
-
-	// 保存上下文
-	return s.contextRepo.Update(ctx, convCtx)
-}
-
-// summarizeAndReset 总结并重置上下文
-func (s *AgentChatService) summarizeAndReset(ctx context.Context, convCtx *model.ConversationContext, user, partner *model.User) {
-	messages, err := convCtx.GetMessages()
-	if err != nil {
-		return
-	}
-
-	// 调用 LLM 总结
-	summary, err := s.chatSession.SummarizeConversation(ctx, toLLMMessages(messages))
-	if err != nil {
-		return
-	}
-
-	// 重建 System Prompt（包含总结）
-	persona, _ := s.personaRepo.GetOrCreate(ctx, user.ID)
-	rel, _ := s.relRepo.GetOrCreate(ctx, user.ID, partner.ID)
-
-	data := &llm.PromptData{
-		MyName:       user.Nickname,
-		MyPersona:    persona,
-		PartnerName:  partner.Nickname,
-		Relationship: rel,
-		Summary:      summary,
-		CurrentTime:  time.Now(),
-	}
-
-	newSystemPrompt := s.chatSession.BuildSystemPrompt(data)
-
-	// 重置上下文
-	newMessages := []model.LLMMessage{
-		{Role: "system", Content: newSystemPrompt},
-	}
-
-	messagesJSON, _ := json.Marshal(newMessages)
-	s.contextRepo.ResetContext(ctx, convCtx.ConversationID, string(messagesJSON), summary)
-}
-
-// toLLMMessages 转换消息格式
-func toLLMMessages(messages []model.LLMMessage) []llm.ChatMessage {
-	result := make([]llm.ChatMessage, len(messages))
-	for i, msg := range messages {
-		result[i] = llm.ChatMessage{
-			Role:    msg.Role,
-			Content: msg.Content,
+		isMe := msg.SenderID == myUserID
+		senderName := partnerName
+		if isMe {
+			senderName = myName
 		}
+
+		history = append(history, llm.ChatHistoryMessage{
+			SenderName: senderName,
+			Content:    content,
+			IsMe:       isMe,
+			Time:       msg.CreatedAt,
+		})
 	}
-	return result
+
+	return history
 }
 
-// analyzeConversationState 分析对话状态
-func (s *AgentChatService) analyzeConversationState(messages []model.LLMMessage) *llm.ConversationState {
+// analyzeHistoryState 分析对话历史状态
+func (s *AgentChatService) analyzeHistoryState(history []llm.ChatHistoryMessage) *llm.ConversationState {
 	state := &llm.ConversationState{}
 
-	// 过滤掉 system 消息
-	var chatMessages []model.LLMMessage
-	for _, msg := range messages {
-		if msg.Role != "system" {
-			chatMessages = append(chatMessages, msg)
-		}
-	}
-
-	if len(chatMessages) == 0 {
+	if len(history) == 0 {
 		return state
 	}
 
-	// 1. 统计末尾连续 assistant 消息数量
-	for i := len(chatMessages) - 1; i >= 0; i-- {
-		if chatMessages[i].Role == "assistant" {
+	// 1. 统计末尾连续"我"发送的消息数量
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].IsMe {
 			state.MyConsecutiveCount++
 		} else {
 			break
 		}
 	}
 
-	// 2. 计算对方上次回复距今时间（基于消息位置估算）
-	// 找到最后一个 user 消息的位置
-	lastUserIdx := -1
-	for i := len(chatMessages) - 1; i >= 0; i-- {
-		if chatMessages[i].Role == "user" {
-			lastUserIdx = i
+	// 2. 计算对方上次回复距今时间
+	var lastPartnerTime time.Time
+	for i := len(history) - 1; i >= 0; i-- {
+		if !history[i].IsMe {
+			lastPartnerTime = history[i].Time
 			break
 		}
 	}
 
-	if lastUserIdx >= 0 {
-		// 根据之后的 assistant 消息数量估算时间
-		msgsSinceUser := len(chatMessages) - 1 - lastUserIdx
-		if msgsSinceUser == 0 {
+	if !lastPartnerTime.IsZero() {
+		elapsed := time.Since(lastPartnerTime)
+		switch {
+		case elapsed < 5*time.Minute:
 			state.PartnerLastReplyAgo = "刚刚"
-		} else if msgsSinceUser <= 2 {
-			state.PartnerLastReplyAgo = "几分钟前"
-		} else if msgsSinceUser <= 5 {
-			state.PartnerLastReplyAgo = "一会儿前"
-		} else {
+		case elapsed < 30*time.Minute:
+			state.PartnerLastReplyAgo = fmt.Sprintf("%d分钟前", int(elapsed.Minutes()))
+		case elapsed < 2*time.Hour:
+			state.PartnerLastReplyAgo = fmt.Sprintf("%d小时前", int(elapsed.Hours()))
+		default:
 			state.PartnerLastReplyAgo = "较长时间前"
 		}
 	}
 
 	// 3. 检测对话是否已自然结束
 	endKeywords := []string{"晚安", "再见", "拜拜", "下次聊", "回头见", "886", "88", "拜", "睡了", "先这样", "改天聊"}
-	// 检查最后几条消息
 	checkCount := 3
-	if len(chatMessages) < checkCount {
-		checkCount = len(chatMessages)
+	if len(history) < checkCount {
+		checkCount = len(history)
 	}
-	for i := len(chatMessages) - checkCount; i < len(chatMessages); i++ {
-		content := chatMessages[i].Content
+	for i := len(history) - checkCount; i < len(history); i++ {
+		content := history[i].Content
 		for _, kw := range endKeywords {
 			if containsKeyword(content, kw) {
 				state.ConversationEnded = true
@@ -471,17 +315,18 @@ func (s *AgentChatService) analyzeConversationState(messages []model.LLMMessage)
 		}
 	}
 
-	// 4. 提取最近话题（简单实现：取最后几条非 system 消息的摘要）
+	// 4. 提取最近话题
 	topicCount := 3
-	if len(chatMessages) < topicCount {
-		topicCount = len(chatMessages)
+	if len(history) < topicCount {
+		topicCount = len(history)
 	}
 	var recentContents []string
-	for i := len(chatMessages) - topicCount; i < len(chatMessages); i++ {
-		content := chatMessages[i].Content
-		// 截取前20个字符作为话题摘要
-		if len(content) > 20 {
-			content = content[:20] + "..."
+	for i := len(history) - topicCount; i < len(history); i++ {
+		content := history[i].Content
+		// 使用 rune 正确处理中文字符截断
+		runes := []rune(content)
+		if len(runes) > 20 {
+			content = string(runes[:20]) + "..."
 		}
 		recentContents = append(recentContents, content)
 	}
@@ -492,45 +337,19 @@ func (s *AgentChatService) analyzeConversationState(messages []model.LLMMessage)
 	return state
 }
 
+
 // containsKeyword 检查内容是否包含关键词
 func containsKeyword(content, keyword string) bool {
 	return strings.Contains(strings.ToLower(content), strings.ToLower(keyword))
 }
 
-// updateSystemPromptWithState 更新带对话状态的 system prompt
-func (s *AgentChatService) updateSystemPromptWithState(ctx context.Context, convCtx *model.ConversationContext, user, partner *model.User, convState *llm.ConversationState) error {
-	// 构建新的 system prompt（带状态）
-	newSystemPrompt := s.buildSystemPromptWithState(ctx, user, partner, convState)
-
-	// 获取当前消息列表
-	messages, err := convCtx.GetMessages()
-	if err != nil {
-		return err
-	}
-
-	// 更新第一个 system 消息
-	if len(messages) > 0 && messages[0].Role == "system" {
-		messages[0].Content = newSystemPrompt
-	} else {
-		// 如果没有 system 消息，插入一个
-		messages = append([]model.LLMMessage{{Role: "system", Content: newSystemPrompt}}, messages...)
-	}
-
-	// 保存更新后的消息
-	messagesJSON, err := json.Marshal(messages)
-	if err != nil {
-		return err
-	}
-
-	convCtx.Messages = string(messagesJSON)
-	convCtx.TokenCount = len(convCtx.Messages) / 4
-	convCtx.UpdatedAt = time.Now()
-
-	return s.contextRepo.Update(ctx, convCtx)
+// buildSystemPromptWithState 构建带状态的 System Prompt（已废弃，使用 buildSystemPromptWithMemory）
+func (s *AgentChatService) buildSystemPromptWithState(ctx context.Context, user, partner *model.User, convState *llm.ConversationState) string {
+	return s.buildSystemPromptWithMemory(ctx, user, partner, convState, "")
 }
 
-// buildSystemPromptWithState 构建带状态的 System Prompt
-func (s *AgentChatService) buildSystemPromptWithState(ctx context.Context, user, partner *model.User, convState *llm.ConversationState) string {
+// buildSystemPromptWithMemory 构建带记忆的 System Prompt
+func (s *AgentChatService) buildSystemPromptWithMemory(ctx context.Context, user, partner *model.User, convState *llm.ConversationState, memorySummary string) string {
 	// 获取用户人设
 	persona, _ := s.personaRepo.GetOrCreate(ctx, user.ID)
 
@@ -555,9 +374,39 @@ func (s *AgentChatService) buildSystemPromptWithState(ctx context.Context, user,
 		PartnerName:   partner.Nickname,
 		PartnerStatus: partnerStatus,
 		Relationship:  rel,
+		Summary:       memorySummary, // 使用记忆总结
 		CurrentTime:   time.Now(),
 		ConvState:     convState,
 	}
 
 	return s.chatSession.BuildSystemPrompt(data)
+}
+
+// buildCuratedChatPrompt 使用 Curator 结果构建对话 Prompt
+func (s *AgentChatService) buildCuratedChatPrompt(curated *model.CuratedContext, myName, partnerName string) string {
+	var sb strings.Builder
+
+	sb.WriteString("## 对话历史（精选）\n")
+	sb.WriteString(curated.Context)
+
+	// 添加关键点提示
+	if len(curated.KeyPoints) > 0 {
+		sb.WriteString("\n## 关键点\n")
+		for _, point := range curated.KeyPoints {
+			sb.WriteString(fmt.Sprintf("• %s\n", point))
+		}
+	}
+
+	// 标注对话状态
+	switch curated.State {
+	case "waiting_for_reply":
+		sb.WriteString(fmt.Sprintf("\n（%s 还没回复）\n", partnerName))
+	case "ending":
+		sb.WriteString("\n（对话可能要结束了）\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("\n## 你的任务\n以 %s 的身份，发送下一条消息。直接输出消息内容，不要加 [%s]: 前缀。",
+		myName, myName))
+
+	return sb.String()
 }

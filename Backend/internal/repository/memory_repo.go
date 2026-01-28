@@ -295,3 +295,91 @@ func (r *MemoryRepository) GetAnalysisCacheByUserIDs(ctx context.Context, userID
 	}
 	return result, nil
 }
+
+// ========== ConversationMemory 操作 ==========
+
+// GetConversationMemory 获取会话记忆
+func (r *MemoryRepository) GetConversationMemory(ctx context.Context, conversationID string) (*model.ConversationMemory, error) {
+	var memory model.ConversationMemory
+	query := `SELECT * FROM conversation_memories WHERE conversation_id = ?`
+	err := r.db.GetContext(ctx, &memory, query, conversationID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &memory, nil
+}
+
+// CreateConversationMemory 创建会话记忆
+func (r *MemoryRepository) CreateConversationMemory(ctx context.Context, memory *model.ConversationMemory) error {
+	query := `INSERT INTO conversation_memories (conversation_id, memories, summary, total_messages)
+              VALUES (?, ?, ?, ?)`
+	_, err := r.db.ExecContext(ctx, query,
+		memory.ConversationID,
+		memory.Memories,
+		memory.Summary,
+		memory.TotalMessages,
+	)
+	return err
+}
+
+// UpdateConversationMemory 更新会话记忆
+func (r *MemoryRepository) UpdateConversationMemory(ctx context.Context, memory *model.ConversationMemory) error {
+	query := `UPDATE conversation_memories SET
+              memories = ?,
+              summary = ?,
+              last_summary_at = ?,
+              total_messages = ?,
+              updated_at = NOW()
+              WHERE conversation_id = ?`
+	_, err := r.db.ExecContext(ctx, query,
+		memory.Memories,
+		memory.Summary,
+		memory.LastSummaryAt,
+		memory.TotalMessages,
+		memory.ConversationID,
+	)
+	return err
+}
+
+// UpsertConversationMemory 插入或更新会话记忆
+func (r *MemoryRepository) UpsertConversationMemory(ctx context.Context, memory *model.ConversationMemory) error {
+	query := `INSERT INTO conversation_memories (conversation_id, memories, summary, total_messages)
+              VALUES (?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE
+              memories = VALUES(memories),
+              summary = VALUES(summary),
+              total_messages = VALUES(total_messages),
+              updated_at = NOW()`
+	_, err := r.db.ExecContext(ctx, query,
+		memory.ConversationID,
+		memory.Memories,
+		memory.Summary,
+		memory.TotalMessages,
+	)
+	return err
+}
+
+// UpdateConversationSummary 更新对话总结
+func (r *MemoryRepository) UpdateConversationSummary(ctx context.Context, conversationID, summary string) error {
+	query := `UPDATE conversation_memories SET
+              summary = ?,
+              last_summary_at = NOW(),
+              updated_at = NOW()
+              WHERE conversation_id = ?`
+	_, err := r.db.ExecContext(ctx, query, summary, conversationID)
+	return err
+}
+
+// IncrementMessageCount 增加消息计数
+func (r *MemoryRepository) IncrementMessageCount(ctx context.Context, conversationID string) error {
+	query := `INSERT INTO conversation_memories (conversation_id, total_messages)
+              VALUES (?, 1)
+              ON DUPLICATE KEY UPDATE
+              total_messages = total_messages + 1,
+              updated_at = NOW()`
+	_, err := r.db.ExecContext(ctx, query, conversationID)
+	return err
+}
