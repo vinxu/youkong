@@ -139,6 +139,9 @@ func (m *Manager) HandleConnection(userID string, conn *websocket.Conn) {
 			break
 		}
 
+		// 收到消息，重置读取超时
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+
 		var msg WSMessage
 		if err := json.Unmarshal(message, &msg); err != nil {
 			continue

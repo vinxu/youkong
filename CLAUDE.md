@@ -235,14 +235,16 @@ journalctl -u youkong -f    # 查看日志
 
 自动部署可能因为网络问题失败，需要手动更新：
 
+**GitHub 代理**: `https://ghfast.top/`（国内加速）
+
 ```bash
 # 1. SSH 登录服务器
 ssh root@49.232.13.41
 # 密码: Xuxuheng-43
 
-# 2. 下载最新 release（注意：文件是 tar.gz 压缩包）
+# 2. 下载最新 release（使用 ghfast.top 代理加速）
 cd /opt/youkong
-curl -L -o backend.tar.gz "https://github.com/vinxu/youkong/releases/latest/download/youkong-backend.tar.gz"
+curl -L -o backend.tar.gz "https://ghfast.top/https://github.com/vinxu/youkong/releases/latest/download/youkong-backend.tar.gz"
 
 # 3. 解压并重启
 tar -xzf backend.tar.gz
@@ -258,8 +260,8 @@ systemctl status youkong
 | 问题 | 原因 | 解决方案 |
 |------|------|----------|
 | 服务启动失败 (status=203/EXEC) | 下载的文件不是可执行文件 | 用 `file server` 检查，重新下载 |
-| 下载的是 HTML/ASCII 文件 | 代理失败或重定向问题 | 直接从 GitHub 下载，加 `-L` 参数 |
-| 代理 (ghproxy.net) 连接失败 | 代理不稳定 | 直接用 GitHub 源地址 |
+| 下载的是 HTML/ASCII 文件 | 代理失败或重定向问题 | 换代理或直接从 GitHub 下载，加 `-L` 参数 |
+| 代理连接失败 | 代理不稳定 | 换其他代理：gh-proxy.com、ghproxy.link |
 | 数据库表不存在 | 迁移未执行 | 手动执行 SQL（见下方） |
 | 接口返回数据缺少字段 | 代码未更新或配置缺失 | 检查 release 版本和 .env 配置 |
 
