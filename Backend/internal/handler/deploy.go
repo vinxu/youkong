@@ -187,6 +187,14 @@ func (h *DeployHandler) deployBackend(url string) error {
 		return fmt.Errorf("设置权限失败: %w", err)
 	}
 
+	// 在停止服务之前，先安排一个延迟启动任务（因为停止后当前进程也会终止）
+	// 使用 nohup + setsid 确保启动任务在独立进程组中运行，不会被父进程终止影响
+	h.logger.Info("安排延迟启动任务")
+	startCmd := exec.Command("bash", "-c", "nohup setsid bash -c 'sleep 5 && systemctl start youkong' > /dev/null 2>&1 &")
+	if err := startCmd.Start(); err != nil {
+		h.logger.Warn("安排启动任务失败", zap.Error(err))
+	}
+
 	// 停止服务（释放文件锁）
 	h.logger.Info("停止服务以更新二进制文件")
 	stopCmd := exec.Command("systemctl", "stop", "youkong")
