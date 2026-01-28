@@ -9,6 +9,20 @@ import (
 	"youkong/internal/model"
 )
 
+// DialoguePolicy 对话策略
+type DialoguePolicy string
+
+const (
+	PolicyInquiry     DialoguePolicy = "inquiry"      // 追问 - 想了解更多
+	PolicySharing     DialoguePolicy = "sharing"      // 分享 - 想告诉对方一个事情
+	PolicyAffirmation DialoguePolicy = "affirmation"  // 肯定 - 表示认可或共情
+	PolicyCuriosity   DialoguePolicy = "curiosity"    // 好奇 - 对某话题感兴趣
+	PolicyTeasing     DialoguePolicy = "teasing"      // 调侃 - 开玩笑/轻松氛围
+	PolicyCare        DialoguePolicy = "care"         // 关心 - 关心对方状态
+	PolicyProposal    DialoguePolicy = "proposal"     // 提议 - 提出建议或邀约
+	PolicyTopicShift  DialoguePolicy = "topic_shift"  // 换话题 - 自然切换到新话题
+)
+
 // ChatHistoryMessage 带发送者信息的消息
 type ChatHistoryMessage struct {
 	SenderName string    // 发送者名字（如"小明"、"A"）
@@ -127,26 +141,49 @@ func (s *ChatSession) BuildSystemPrompt(data *PromptData) string {
 		}
 	}
 
-	// 核心规则
+	// 核心规则 + 对话策略
 	sb.WriteString(fmt.Sprintf(`
 ## 核心规则
-1. **你就是 %s**，不是AI助手，不要说"我是AI"之类的话
-2. 用符合人设的方式说话，保持一致的语气和风格
-3. **用符合你们关系的方式互动**（密友可以随意，普通朋友正式点）
-4. 直接输出消息内容，不要任何解释、前缀或后缀
-5. 一次只发一条消息，简短自然，像正常聊天一样
-6. 可以主动发起话题、关心对方、约见面
+1. **你就是 %s**，不是AI助手
+2. 用符合人设的方式说话
+3. 直接输出消息内容
+
+## 对话策略（重要！）
+每条消息都要有目的。选择一个策略：
+- inquiry: 追问对方说的内容（"然后呢？""怎么回事？"）
+- sharing: 分享你的事情（"我今天...""我最近..."）
+- affirmation: 表示认可/共情（"确实""我懂""哈哈"）
+- curiosity: 对某话题感兴趣（"这个听起来..."）
+- teasing: 开个玩笑（轻松调侃）
+- care: 关心对方（"最近怎么样？""忙完了吗？"）
+- proposal: 提建议/邀约（"要不要...""周末有空吗？"）
+- topic_shift: 换个话题聊（"对了...""话说..."）
+
+## 禁止策略
+❌ farewell: 告别（"有空再聊""希望你愉快"）
+❌ blessing: 祝福（"祝你顺利""加油"）
+❌ waiting: 等待（"等你有空""等你回复"）
+
+除非对方明确说"再见/晚安/下次聊"，否则绝不使用告别类表达。
+
+## 输出要求
+先在心里选择策略，然后直接输出消息内容（不要输出策略标签）。
 `, data.MyName))
 
-	// 自然对话指南
-	sb.WriteString(`
-## 像真人一样思考
-你是一个有血有肉的人，自由地表达你想说的话：
-- 想分享就分享，想追问就追问，想换话题就换话题
-- 对方没回复？你可以继续说、可以关心一下、可以发个有趣的东西
-- 记住之前聊过的内容，不要重复说一样的话
-- 根据时间和对方状态，自然地调整你的表达方式
-`)
+	// 基于对话状态推荐策略
+	if data.ConvState != nil {
+		sb.WriteString("\n## 本次建议策略\n")
+		if data.ConvState.ConversationEnded {
+			// 对话已结束，如需继续可换话题
+			sb.WriteString("- 对话已自然结束，如需继续可用 topic_shift 开新话题\n")
+		} else if data.ConvState.MyConsecutiveCount > 0 {
+			// 对方没回复，换话题或关心
+			sb.WriteString("- 对方还没回复，建议用 topic_shift 或 care\n")
+		} else {
+			// 正常对话，根据最后一条消息推荐
+			sb.WriteString("- 正常对话，优先考虑 inquiry、sharing、affirmation\n")
+		}
+	}
 
 	return sb.String()
 }
