@@ -72,10 +72,19 @@ youkong/
 │   │   ├── service/       # 业务逻辑层
 │   │   └── pkg/           # 工具包 (jwt, response, tencent, validator)
 │   └── migrations/        # SQL 迁移脚本
+├── docs/              # 开发文档
+│   └── Holmes_Agent_Guide.md  # 福尔摩斯推理框架客户端开发指南
 ├── Android/           # (待开发)
 ├── iOS/               # (待开发)
 └── Web/               # (待开发)
 ```
+
+## 开发文档
+
+| 文档 | 说明 |
+|------|------|
+| `Backend/API.md` | 后端 API 接口文档 |
+| `docs/Holmes_Agent_Guide.md` | 福尔摩斯推理框架 - iOS/Android 开发指南 |
 
 ## 技术栈
 

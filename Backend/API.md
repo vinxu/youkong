@@ -1612,7 +1612,280 @@ interface HandleFriendRequestRequest {
 
 ---
 
-## 十一、WebSocket 连接（预留）
+## 十一、福尔摩斯推理框架 API
+
+> 福尔摩斯推理框架通过多维度数据（时间、位置、屏幕、日历、移动等）像侦探一样推断用户是否有空。
+
+### 11.1 好友有空概率列表（福尔摩斯版）
+
+**GET** `/friends/holmes-probability`
+
+> 获取好友的有空概率列表，包含完整的推理过程
+
+**响应数据**
+```typescript
+interface HolmesFriendListResponse {
+  friends: HolmesAPIResponse[]
+  generated_at: number           // 毫秒时间戳
+}
+
+interface HolmesAPIResponse {
+  friend_id: string
+  name: string
+  avatar?: string
+
+  // 原始线索（供前端展示推理过程）
+  raw_data?: HolmesClue
+
+  // 特征层
+  features?: HolmesFeatures
+
+  // 推理过程
+  reasoning?: HolmesReasoning
+
+  // 最终结果
+  result: {
+    available: boolean
+    probability: number          // 0-100
+    confidence: 'high' | 'medium' | 'low'
+    summary: string              // 简短总结（15字以内）
+    emoji?: string
+    color: string
+  }
+
+  updated_at: number
+}
+```
+
+**示例响应**
+```json
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "friends": [
+      {
+        "friend_id": "user456",
+        "name": "小王",
+        "avatar": "https://...",
+        "raw_data": {
+          "timestamp": "2026-01-28T15:42:00+08:00",
+          "weekday": "周六",
+          "time_period": "下午3点42分",
+          "is_weekend": true,
+          "place_name": "星巴克(三里屯店)",
+          "place_type": "leisure",
+          "at_place_since_minutes": 23,
+          "steps_today": 2847,
+          "steps_last_hour": 127,
+          "screen_active": true,
+          "screen_duration_mins": 18,
+          "activity_type": "entertainment",
+          "has_calendar_event": false
+        },
+        "features": {
+          "location_type": "星巴克(三里屯店)",
+          "movement_state": "静止（已23分钟）",
+          "time_period": "周末下午",
+          "activity": "娱乐内容（已18分钟）",
+          "schedule": "无日程",
+          "device_state": "正常"
+        },
+        "reasoning": {
+          "model": "qwen3-max-2026-01-23",
+          "thinking": "周六下午在星巴克坐了20多分钟，一直在看娱乐内容，没有日程安排。这种场景通常表示用户在休闲放松，社交意愿应该比较高...",
+          "conclusion": "很可能有空约朋友"
+        },
+        "result": {
+          "available": true,
+          "probability": 88,
+          "confidence": "high",
+          "summary": "在咖啡厅休闲",
+          "emoji": "☕",
+          "color": "#22C55E"
+        },
+        "updated_at": 1706430120000
+      }
+    ],
+    "generated_at": 1706430120000
+  }
+}
+```
+
+---
+
+### 11.2 单个好友福尔摩斯分析详情
+
+**GET** `/friends/:id/holmes`
+
+> 获取单个好友的完整福尔摩斯分析结果
+
+**响应数据**
+```typescript
+interface HolmesResult {
+  raw_data: HolmesClue
+  features: HolmesFeatures
+  reasoning: HolmesReasoning
+  result: {
+    available: boolean
+    probability: number
+    confidence: string
+    summary: string
+  }
+  generated_at: string
+}
+```
+
+---
+
+### 11.3 数据结构定义
+
+**HolmesClue - 原始线索**
+```typescript
+interface HolmesClue {
+  // 时间线索
+  timestamp: string              // ISO 8601
+  weekday: string                // 星期几（中文）
+  time_period: string            // 时间段描述
+  is_weekend: boolean
+
+  // 位置线索
+  place_name?: string            // 地点名称
+  place_type: string             // home/work/leisure/transit/unknown
+  at_place_since_minutes: number // 在此地多久
+  altitude?: number              // 海拔（米）
+  floor?: number                 // 推测楼层
+
+  // 移动线索
+  is_moving: boolean
+  movement_type?: string         // stationary/walking/running/driving
+  steps_today?: number
+  steps_last_hour?: number
+  stationary_minutes?: number
+
+  // 屏幕线索
+  screen_active: boolean
+  screen_duration_mins?: number
+  activity_type?: string         // entertainment/productivity/communication/idle
+  last_active_minutes_ago?: number
+
+  // 日历线索
+  has_calendar_event: boolean
+  calendar_event_title?: string  // 脱敏后的标题
+  event_end_minutes?: number
+  today_remaining_events: number
+
+  // 设备线索
+  headphones_connected?: boolean
+  focus_mode_on?: boolean
+  low_battery_mode?: boolean
+  battery_level?: number
+}
+```
+
+**HolmesFeatures - 特征层**
+```typescript
+interface HolmesFeatures {
+  location_type: string          // 咖啡厅/办公室/家/商场/...
+  movement_state: string         // 静止/步行/乘车/跑步
+  time_period: string            // 工作日上午/周末下午/...
+  activity: string               // 娱乐内容/工作内容/通讯/闲置
+  schedule: string               // 有会议/无日程/会议即将结束
+  device_state: string           // 专注模式/低电量/戴耳机/...
+}
+```
+
+**HolmesReasoning - 推理过程**
+```typescript
+interface HolmesReasoning {
+  model: string                  // 使用的模型
+  thinking: string               // 思考过程
+  conclusion: string             // 推理结论
+}
+```
+
+---
+
+### 11.4 扩展状态上报请求
+
+**POST** `/agent/status`
+
+> 上报用户状态，支持新增的日历、移动、海拔数据
+
+**请求参数**
+```typescript
+interface ExtendedStatusReportRequest {
+  screen?: ScreenData
+  location?: LocationData
+  extended_location?: ExtendedLocationData  // 扩展位置数据
+  battery?: BatteryData
+  mode?: ModeData
+  connection?: ConnectionData
+  display?: DisplayData
+  calendar?: CalendarData         // 新增：日历数据
+  movement?: MovementData         // 新增：移动状态
+  altitude?: AltitudeData         // 新增：海拔数据
+}
+
+// 新增数据结构
+interface CalendarData {
+  has_current_event: boolean      // 当前是否有日程
+  current_event_title?: string    // 当前日程标题（脱敏后）
+  event_end_minutes?: number      // 当前日程还有多久结束
+  next_event_in_minutes?: number  // 下个日程还有多久开始
+  today_remaining_count: number   // 今天剩余日程数量
+}
+
+interface MovementData {
+  is_moving: boolean              // 是否在移动
+  movement_type?: string          // stationary/walking/running/driving/cycling
+  steps_today?: number            // 今日步数
+  steps_last_hour?: number        // 最近1小时步数
+  stationary_minutes?: number     // 静止了多久（分钟）
+  moving_direction?: string       // to_work/to_home/unknown
+  current_speed_kmh?: number      // 当前速度（km/h）
+}
+
+interface AltitudeData {
+  altitude: number                // 当前海拔（米）
+  relative_altitude?: number      // 相对海拔变化
+  floor?: number                  // 推测楼层
+}
+
+interface ExtendedLocationData {
+  place_type: string              // 位置类型
+  place_name?: string             // 地点名称（如"星巴克(三里屯店)"）
+  at_place_since_minutes: number  // 在此位置待了多久
+  latitude?: number               // 纬度
+  longitude?: number              // 经度
+}
+```
+
+**响应数据**
+```typescript
+interface StatusReportResponse {
+  success: boolean
+  next_report_in: number          // 下次上报间隔（秒）
+  analysis?: AnalysisResult       // 旧版分析结果
+  holmes?: HolmesResult           // 福尔摩斯分析结果
+}
+```
+
+---
+
+### 11.5 福尔摩斯推理示例
+
+| 线索组合 | LLM 推理 | 结论 |
+|----------|----------|------|
+| 早8点 + 步行 + 向公司方向 + 步频快 | 正在赶去上班，步频快说明可能要迟到 | 没空 (95%) |
+| 周六 + 咖啡厅 + 静止 + 看娱乐内容 | 周末在咖啡厅休闲，很放松 | 有空 (88%) |
+| 工作日 + 公司 + 14楼 + 日历有会议 | 在办公室楼层，正在开会 | 没空 (98%) |
+| 晚8点 + 在家 + 躺着 + 屏幕闲置 | 可能在休息或看电视 | 可能有空 (65%) |
+| 海拔快速上升 + 在商场 | 在坐电梯，可能在逛街 | 有空 (70%) |
+
+---
+
+## 十二、WebSocket 连接（预留）
 
 ```
 ws://api.youkong.app/ws?token=<jwt_token>

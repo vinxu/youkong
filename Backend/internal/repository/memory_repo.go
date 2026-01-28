@@ -383,3 +383,282 @@ func (r *MemoryRepository) IncrementMessageCount(ctx context.Context, conversati
 	_, err := r.db.ExecContext(ctx, query, conversationID)
 	return err
 }
+
+// ========== 福尔摩斯分析缓存操作 ==========
+
+// HolmesAnalysisCacheRow 福尔摩斯分析缓存数据库行
+type HolmesAnalysisCacheRow struct {
+	ID                  int64     `db:"id"`
+	UserID              string    `db:"user_id"`
+	RawClues            string    `db:"raw_clues"`
+	Features            string    `db:"features"`
+	ReasoningModel      string    `db:"reasoning_model"`
+	ReasoningThinking   string    `db:"reasoning_thinking"`
+	ReasoningConclusion string    `db:"reasoning_conclusion"`
+	ResultAvailable     bool      `db:"result_available"`
+	ResultProbability   int       `db:"result_probability"`
+	ResultConfidence    string    `db:"result_confidence"`
+	ResultSummary       string    `db:"result_summary"`
+	ResultEmoji         string    `db:"result_emoji"`
+	InputHash           string    `db:"input_hash"`
+	ExpiresAt           time.Time `db:"expires_at"`
+	CreatedAt           time.Time `db:"created_at"`
+	UpdatedAt           time.Time `db:"updated_at"`
+}
+
+// SaveHolmesCache 保存福尔摩斯分析缓存
+func (r *MemoryRepository) SaveHolmesCache(ctx context.Context, userID string, result *model.HolmesResult, inputHash string, ttl time.Duration) error {
+	// 序列化 RawData 和 Features
+	rawCluesJSON, _ := json.Marshal(result.RawData)
+	featuresJSON, _ := json.Marshal(result.Features)
+
+	expiresAt := time.Now().Add(ttl)
+
+	query := `INSERT INTO holmes_analysis_cache (
+		user_id, raw_clues, features,
+		reasoning_model, reasoning_thinking, reasoning_conclusion,
+		result_available, result_probability, result_confidence, result_summary, result_emoji,
+		input_hash, expires_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON DUPLICATE KEY UPDATE
+		raw_clues = VALUES(raw_clues),
+		features = VALUES(features),
+		reasoning_model = VALUES(reasoning_model),
+		reasoning_thinking = VALUES(reasoning_thinking),
+		reasoning_conclusion = VALUES(reasoning_conclusion),
+		result_available = VALUES(result_available),
+		result_probability = VALUES(result_probability),
+		result_confidence = VALUES(result_confidence),
+		result_summary = VALUES(result_summary),
+		result_emoji = VALUES(result_emoji),
+		input_hash = VALUES(input_hash),
+		expires_at = VALUES(expires_at),
+		updated_at = NOW()`
+
+	reasoningModel := ""
+	reasoningThinking := ""
+	reasoningConclusion := ""
+	if result.Reasoning != nil {
+		reasoningModel = result.Reasoning.Model
+		reasoningThinking = result.Reasoning.Thinking
+		reasoningConclusion = result.Reasoning.Conclusion
+	}
+
+	_, err := r.db.ExecContext(ctx, query,
+		userID,
+		string(rawCluesJSON),
+		string(featuresJSON),
+		reasoningModel,
+		reasoningThinking,
+		reasoningConclusion,
+		result.Result.Available,
+		result.Result.Probability,
+		result.Result.Confidence,
+		result.Result.Summary,
+		"", // emoji 可以从 summary 推断
+		inputHash,
+		expiresAt,
+	)
+	return err
+}
+
+// GetHolmesCache 获取福尔摩斯分析缓存
+func (r *MemoryRepository) GetHolmesCache(ctx context.Context, userID string) (*model.HolmesResult, error) {
+	var row HolmesAnalysisCacheRow
+	query := `SELECT * FROM holmes_analysis_cache WHERE user_id = ? AND expires_at > NOW()`
+	err := r.db.GetContext(ctx, &row, query, userID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	// 反序列化
+	var rawData *model.HolmesClue
+	var features *model.HolmesFeatures
+	if row.RawClues != "" {
+		json.Unmarshal([]byte(row.RawClues), &rawData)
+	}
+	if row.Features != "" {
+		json.Unmarshal([]byte(row.Features), &features)
+	}
+
+	result := &model.HolmesResult{
+		RawData:  rawData,
+		Features: features,
+		Reasoning: &model.HolmesReasoning{
+			Model:      row.ReasoningModel,
+			Thinking:   row.ReasoningThinking,
+			Conclusion: row.ReasoningConclusion,
+		},
+		GeneratedAt: row.UpdatedAt,
+	}
+	result.Result.Available = row.ResultAvailable
+	result.Result.Probability = row.ResultProbability
+	result.Result.Confidence = row.ResultConfidence
+	result.Result.Summary = row.ResultSummary
+
+	return result, nil
+}
+
+// GetHolmesCacheByUserIDs 批量获取福尔摩斯分析缓存
+func (r *MemoryRepository) GetHolmesCacheByUserIDs(ctx context.Context, userIDs []string) (map[string]*model.HolmesResult, error) {
+	if len(userIDs) == 0 {
+		return map[string]*model.HolmesResult{}, nil
+	}
+
+	query, args, err := sqlx.In(`SELECT * FROM holmes_analysis_cache WHERE user_id IN (?) AND expires_at > NOW()`, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	query = r.db.Rebind(query)
+
+	var rows []HolmesAnalysisCacheRow
+	err = r.db.SelectContext(ctx, &rows, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*model.HolmesResult)
+	for _, row := range rows {
+		var rawData *model.HolmesClue
+		var features *model.HolmesFeatures
+		if row.RawClues != "" {
+			json.Unmarshal([]byte(row.RawClues), &rawData)
+		}
+		if row.Features != "" {
+			json.Unmarshal([]byte(row.Features), &features)
+		}
+
+		holmesResult := &model.HolmesResult{
+			RawData:  rawData,
+			Features: features,
+			Reasoning: &model.HolmesReasoning{
+				Model:      row.ReasoningModel,
+				Thinking:   row.ReasoningThinking,
+				Conclusion: row.ReasoningConclusion,
+			},
+			GeneratedAt: row.UpdatedAt,
+		}
+		holmesResult.Result.Available = row.ResultAvailable
+		holmesResult.Result.Probability = row.ResultProbability
+		holmesResult.Result.Confidence = row.ResultConfidence
+		holmesResult.Result.Summary = row.ResultSummary
+
+		result[row.UserID] = holmesResult
+	}
+	return result, nil
+}
+
+// ========== 用户状态反馈操作（用于学习）==========
+
+// SaveStatusFeedback 保存状态反馈
+func (r *MemoryRepository) SaveStatusFeedback(ctx context.Context, userID string, historyID int64, predictedAvailable bool, predictedProbability int, predictedConfidence string, actualAvailable bool, feedbackSource string) error {
+	query := `INSERT INTO user_status_feedback (
+		user_id, status_history_id,
+		predicted_available, predicted_probability, predicted_confidence,
+		actual_available, feedback_source
+	) VALUES (?, ?, ?, ?, ?, ?, ?)`
+
+	_, err := r.db.ExecContext(ctx, query,
+		userID,
+		historyID,
+		predictedAvailable,
+		predictedProbability,
+		predictedConfidence,
+		actualAvailable,
+		feedbackSource,
+	)
+	return err
+}
+
+// GetFeedbackByTimeSlot 获取特定时间槽的反馈数据（用于 Few-shot 学习）
+func (r *MemoryRepository) GetFeedbackByTimeSlot(ctx context.Context, userID string, dayOfWeek, hourOfDay, limit int) ([]map[string]interface{}, error) {
+	query := `SELECT f.*, h.raw_data
+		FROM user_status_feedback f
+		JOIN status_histories h ON f.status_history_id = h.id
+		WHERE f.user_id = ?
+		AND h.day_of_week = ?
+		AND h.hour_of_day = ?
+		ORDER BY f.created_at DESC
+		LIMIT ?`
+
+	rows, err := r.db.QueryContext(ctx, query, userID, dayOfWeek, hourOfDay, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		var id, historyID int64
+		var feedbackUserID, confidence, source, rawData string
+		var predictedAvailable, actualAvailable bool
+		var probability int
+		var createdAt time.Time
+		var weight float64
+
+		err := rows.Scan(&id, &feedbackUserID, &historyID, &predictedAvailable, &probability, &confidence, &actualAvailable, &source, &weight, &createdAt, &rawData)
+		if err != nil {
+			continue
+		}
+
+		results = append(results, map[string]interface{}{
+			"raw_data":              rawData,
+			"predicted_available":   predictedAvailable,
+			"predicted_probability": probability,
+			"actual_available":      actualAvailable,
+			"feedback_source":       source,
+		})
+	}
+
+	return results, nil
+}
+
+// ========== 用户时间槽统计操作 ==========
+
+// UpdateTimeSlotStats 更新时间槽统计
+func (r *MemoryRepository) UpdateTimeSlotStats(ctx context.Context, userID string, dayOfWeek, hourOfDay int, available bool, locationType, activityType string, screenDuration int) error {
+	availableInt := 0
+	if available {
+		availableInt = 1
+	}
+
+	query := `INSERT INTO user_time_slot_stats (
+		user_id, day_of_week, hour_of_day,
+		sample_count, available_count, available_rate,
+		common_location_type, common_activity_type, avg_screen_duration_mins
+	) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+	ON DUPLICATE KEY UPDATE
+		sample_count = sample_count + 1,
+		available_count = available_count + ?,
+		available_rate = (available_count + ?) * 100 / (sample_count + 1),
+		common_location_type = COALESCE(?, common_location_type),
+		common_activity_type = COALESCE(?, common_activity_type),
+		avg_screen_duration_mins = (avg_screen_duration_mins * sample_count + ?) / (sample_count + 1),
+		updated_at = NOW()`
+
+	availableRate := availableInt * 100 // 第一条记录的有空率
+
+	_, err := r.db.ExecContext(ctx, query,
+		userID, dayOfWeek, hourOfDay,
+		availableInt, availableRate, locationType, activityType, screenDuration,
+		availableInt, availableInt, locationType, activityType, screenDuration,
+	)
+	return err
+}
+
+// GetTimeSlotStats 获取时间槽统计
+func (r *MemoryRepository) GetTimeSlotStats(ctx context.Context, userID string, dayOfWeek, hourOfDay int) (int, int, error) {
+	var sampleCount, availableRate int
+	query := `SELECT sample_count, available_rate FROM user_time_slot_stats WHERE user_id = ? AND day_of_week = ? AND hour_of_day = ?`
+	err := r.db.QueryRowContext(ctx, query, userID, dayOfWeek, hourOfDay).Scan(&sampleCount, &availableRate)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return 0, 50, nil // 默认50%
+		}
+		return 0, 0, err
+	}
+	return sampleCount, availableRate, nil
+}

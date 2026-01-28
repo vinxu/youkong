@@ -300,6 +300,8 @@ func main() {
 				friends.GET("/invited-by-me", friendshipHandler.GetInvitedByMe)
 				friends.GET("/invited-me", friendshipHandler.GetInvitedMe)
 				friends.GET("/free-probability", agentHandler.GetFreeProbability)
+				friends.GET("/holmes-probability", agentHandler.GetHolmesFreeProbability) // 福尔摩斯版（带推理过程）
+				friends.GET("/:id/holmes", agentHandler.GetHolmesAnalysis)               // 单个好友详情
 
 				// 好友请求
 				friends.POST("/request", friendshipHandler.SendFriendRequest)

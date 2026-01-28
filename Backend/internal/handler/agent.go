@@ -42,17 +42,21 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 		return
 	}
 
-	// 1. 保存实时状态到 Redis（兼容旧逻辑）
-	legacyReq := &model.StatusReportRequest{
-		Screen:   req.Screen,
-		Location: req.Location,
-	}
-	if err := h.agentService.ReportStatus(c.Request.Context(), userID, legacyReq); err != nil {
-		response.InternalError(c, "上报失败")
-		return
+	// 1. 使用福尔摩斯推理框架进行分析
+	holmesResult, err := h.agentService.ReportExtendedStatus(c.Request.Context(), userID, &req)
+	if err != nil {
+		// 福尔摩斯分析失败，降级到旧逻辑
+		legacyReq := &model.StatusReportRequest{
+			Screen:   req.Screen,
+			Location: req.Location,
+		}
+		if err := h.agentService.ReportStatus(c.Request.Context(), userID, legacyReq); err != nil {
+			response.InternalError(c, "上报失败")
+			return
+		}
 	}
 
-	// 2. 分析状态并更新记忆
+	// 2. 同时更新核心记忆（保持向后兼容）
 	var analysisResult *model.AnalysisResult
 	if h.memoryService != nil {
 		result, err := h.memoryService.AnalyzeAndUpdateMemory(c.Request.Context(), userID, &req)
@@ -61,11 +65,17 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 		}
 	}
 
-	// 3. 返回增强响应
-	resp := model.StatusReportResponse{
+	// 3. 构建响应
+	resp := struct {
+		Success      bool                  `json:"success"`
+		NextReportIn int                   `json:"next_report_in"`
+		Analysis     *model.AnalysisResult `json:"analysis,omitempty"`
+		Holmes       *model.HolmesResult   `json:"holmes,omitempty"` // 福尔摩斯分析结果
+	}{
 		Success:      true,
 		NextReportIn: 60,
 		Analysis:     analysisResult,
+		Holmes:       holmesResult,
 	}
 
 	response.Success(c, resp)
@@ -219,4 +229,58 @@ func (h *AgentHandler) GetMemory(c *gin.Context) {
 	}
 
 	response.Success(c, memory)
+}
+
+// GetHolmesFreeProbability 获取好友有空概率列表（福尔摩斯版，带完整推理过程）
+// GET /api/friends/holmes-probability
+func (h *AgentHandler) GetHolmesFreeProbability(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	// 获取福尔摩斯分析列表
+	result, err := h.agentService.GetFriendsHolmesAnalysis(c.Request.Context(), userID)
+	if err != nil {
+		response.InternalError(c, "获取失败")
+		return
+	}
+
+	response.Success(c, result)
+}
+
+// GetHolmesAnalysis 获取单个好友的福尔摩斯分析详情
+// GET /api/friends/:id/holmes
+func (h *AgentHandler) GetHolmesAnalysis(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	friendID := c.Param("id")
+	if friendID == "" {
+		response.ParamError(c, "好友ID不能为空")
+		return
+	}
+
+	// TODO: 验证好友关系
+
+	// 获取福尔摩斯分析
+	result, err := h.agentService.GetHolmesAnalysis(c.Request.Context(), friendID)
+	if err != nil {
+		response.InternalError(c, "获取失败")
+		return
+	}
+
+	if result == nil {
+		response.Success(c, gin.H{
+			"message": "暂无分析数据",
+			"friend_id": friendID,
+		})
+		return
+	}
+
+	response.Success(c, result)
 }

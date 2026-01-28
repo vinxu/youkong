@@ -25,10 +25,11 @@ const (
 
 // AgentService Agent 服务
 type AgentService struct {
-	redisClient    *tencent.RedisClient
-	userRepo       *repository.UserRepository
-	friendshipRepo *repository.FriendshipRepository
-	llmClient      *llm.OpenRouterClient
+	redisClient     *tencent.RedisClient
+	userRepo        *repository.UserRepository
+	friendshipRepo  *repository.FriendshipRepository
+	llmClient       *llm.OpenRouterClient
+	holmesAnalyzer  *llm.HolmesAnalyzer
 }
 
 // NewAgentService 创建 Agent 服务
@@ -38,11 +39,16 @@ func NewAgentService(
 	friendshipRepo *repository.FriendshipRepository,
 	llmClient *llm.OpenRouterClient,
 ) *AgentService {
+	var holmesAnalyzer *llm.HolmesAnalyzer
+	if llmClient != nil {
+		holmesAnalyzer = llm.NewHolmesAnalyzer(llmClient)
+	}
 	return &AgentService{
-		redisClient:    redisClient,
-		userRepo:       userRepo,
-		friendshipRepo: friendshipRepo,
-		llmClient:      llmClient,
+		redisClient:     redisClient,
+		userRepo:        userRepo,
+		friendshipRepo:  friendshipRepo,
+		llmClient:       llmClient,
+		holmesAnalyzer:  holmesAnalyzer,
 	}
 }
 
@@ -459,4 +465,303 @@ func getTimeScore(t time.Time) (int, string) {
 	}
 	// 0:00 - 9:00
 	return -30, ""
+}
+
+// ========== 福尔摩斯推理框架 ==========
+
+// Redis key 前缀（福尔摩斯分析缓存）
+const (
+	keyHolmesCache = "agent:holmes:%s" // 福尔摩斯分析缓存
+	holmesCacheTTL = 10 * time.Minute  // 缓存10分钟
+)
+
+// ReportExtendedStatus 上报扩展状态（包含日历、移动等数据）
+func (s *AgentService) ReportExtendedStatus(ctx context.Context, userID string, req *model.ExtendedStatusReportRequest) (*model.HolmesResult, error) {
+	// 1. 保存原始状态到 Redis
+	status := model.UserRealtimeStatus{
+		UserID:    userID,
+		UpdatedAt: time.Now(),
+	}
+	if req.Screen != nil {
+		status.Screen = *req.Screen
+	}
+	if req.Location != nil {
+		status.Location = *req.Location
+	}
+
+	data, err := json.Marshal(status)
+	if err != nil {
+		return nil, fmt.Errorf("marshal status: %w", err)
+	}
+
+	key := fmt.Sprintf(keyUserStatus, userID)
+	if err := s.redisClient.Set(ctx, key, data, statusTTL); err != nil {
+		return nil, fmt.Errorf("save status to redis: %w", err)
+	}
+
+	// 2. 保存扩展状态到 Redis（用于福尔摩斯分析）
+	extData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal extended status: %w", err)
+	}
+
+	extKey := fmt.Sprintf("agent:extended:%s", userID)
+	if err := s.redisClient.Set(ctx, extKey, extData, statusTTL); err != nil {
+		return nil, fmt.Errorf("save extended status to redis: %w", err)
+	}
+
+	// 3. 执行福尔摩斯分析
+	if s.holmesAnalyzer == nil {
+		return nil, nil // 无分析器，跳过分析
+	}
+
+	input := &llm.HolmesInput{
+		Status:    req,
+		Timestamp: time.Now(),
+	}
+
+	result, err := s.holmesAnalyzer.Analyze(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("holmes analysis failed: %w", err)
+	}
+
+	// 4. 缓存分析结果
+	if result != nil {
+		cacheData, _ := json.Marshal(result)
+		cacheKey := fmt.Sprintf(keyHolmesCache, userID)
+		_ = s.redisClient.Set(ctx, cacheKey, cacheData, holmesCacheTTL)
+	}
+
+	return result, nil
+}
+
+// GetHolmesAnalysis 获取福尔摩斯分析结果（优先使用缓存）
+func (s *AgentService) GetHolmesAnalysis(ctx context.Context, userID string) (*model.HolmesResult, error) {
+	// 1. 尝试从缓存获取
+	cacheKey := fmt.Sprintf(keyHolmesCache, userID)
+	cacheData, err := s.redisClient.GetBytes(ctx, cacheKey)
+	if err == nil && cacheData != nil {
+		var result model.HolmesResult
+		if json.Unmarshal(cacheData, &result) == nil {
+			return &result, nil
+		}
+	}
+
+	// 2. 缓存未命中，尝试重新分析
+	extKey := fmt.Sprintf("agent:extended:%s", userID)
+	extData, err := s.redisClient.GetBytes(ctx, extKey)
+	if tencent.IsNil(err) || extData == nil {
+		return nil, nil // 无数据
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get extended status: %w", err)
+	}
+
+	var req model.ExtendedStatusReportRequest
+	if err := json.Unmarshal(extData, &req); err != nil {
+		return nil, fmt.Errorf("unmarshal extended status: %w", err)
+	}
+
+	// 3. 执行福尔摩斯分析
+	if s.holmesAnalyzer == nil {
+		return nil, nil
+	}
+
+	input := &llm.HolmesInput{
+		Status:    &req,
+		Timestamp: time.Now(),
+	}
+
+	result, err := s.holmesAnalyzer.Analyze(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("holmes analysis failed: %w", err)
+	}
+
+	// 4. 缓存结果
+	if result != nil {
+		cacheData, _ := json.Marshal(result)
+		_ = s.redisClient.Set(ctx, cacheKey, cacheData, holmesCacheTTL)
+	}
+
+	return result, nil
+}
+
+// GetFriendsHolmesAnalysis 获取好友的福尔摩斯分析列表
+func (s *AgentService) GetFriendsHolmesAnalysis(ctx context.Context, userID string) (*model.HolmesFriendListResponse, error) {
+	// 1. 获取好友列表
+	friends, err := s.friendshipRepo.GetFriendsByUserID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get friends: %w", err)
+	}
+
+	// 2. 获取所有好友的用户信息
+	friendIDs := make([]string, len(friends))
+	for i, f := range friends {
+		friendIDs[i] = f.FriendID
+	}
+
+	users, err := s.userRepo.GetByIDs(ctx, friendIDs)
+	if err != nil {
+		return nil, fmt.Errorf("get users: %w", err)
+	}
+
+	userMap := make(map[string]*model.User)
+	for _, u := range users {
+		userMap[u.ID] = u
+	}
+
+	// 3. 对每个好友获取福尔摩斯分析
+	now := time.Now()
+	responses := make([]model.HolmesAPIResponse, 0, len(friends))
+
+	for _, friend := range friends {
+		user, ok := userMap[friend.FriendID]
+		if !ok {
+			continue
+		}
+
+		// 获取福尔摩斯分析
+		analysis, err := s.GetHolmesAnalysis(ctx, friend.FriendID)
+		if err != nil {
+			// 分析失败，使用默认值
+			responses = append(responses, model.HolmesAPIResponse{
+				FriendID: friend.FriendID,
+				Name:     user.Nickname,
+				Avatar:   user.GetAvatar(),
+				Result: struct {
+					Available   bool   `json:"available"`
+					Probability int    `json:"probability"`
+					Confidence  string `json:"confidence"`
+					Summary     string `json:"summary"`
+					Emoji       string `json:"emoji,omitempty"`
+					Color       string `json:"color"`
+				}{
+					Available:   false,
+					Probability: -1,
+					Confidence:  "low",
+					Summary:     "数据不足",
+					Emoji:       "🤔",
+					Color:       model.GetProbabilityColor(-1),
+				},
+				UpdatedAt: now.UnixMilli(),
+			})
+			continue
+		}
+
+		if analysis == nil {
+			// 无分析数据
+			responses = append(responses, model.HolmesAPIResponse{
+				FriendID: friend.FriendID,
+				Name:     user.Nickname,
+				Avatar:   user.GetAvatar(),
+				Result: struct {
+					Available   bool   `json:"available"`
+					Probability int    `json:"probability"`
+					Confidence  string `json:"confidence"`
+					Summary     string `json:"summary"`
+					Emoji       string `json:"emoji,omitempty"`
+					Color       string `json:"color"`
+				}{
+					Available:   false,
+					Probability: -1,
+					Confidence:  "low",
+					Summary:     "暂无数据",
+					Emoji:       "🤔",
+					Color:       model.GetProbabilityColor(-1),
+				},
+				UpdatedAt: now.UnixMilli(),
+			})
+			continue
+		}
+
+		// 构建响应
+		resp := model.HolmesAPIResponse{
+			FriendID:  friend.FriendID,
+			Name:      user.Nickname,
+			Avatar:    user.GetAvatar(),
+			RawData:   analysis.RawData,
+			Features:  analysis.Features,
+			Reasoning: analysis.Reasoning,
+			Result: struct {
+				Available   bool   `json:"available"`
+				Probability int    `json:"probability"`
+				Confidence  string `json:"confidence"`
+				Summary     string `json:"summary"`
+				Emoji       string `json:"emoji,omitempty"`
+				Color       string `json:"color"`
+			}{
+				Available:   analysis.Result.Available,
+				Probability: analysis.Result.Probability,
+				Confidence:  analysis.Result.Confidence,
+				Summary:     analysis.Result.Summary,
+				Emoji:       getEmojiFromAnalysis(analysis),
+				Color:       model.GetProbabilityColor(analysis.Result.Probability),
+			},
+			UpdatedAt: analysis.GeneratedAt.UnixMilli(),
+		}
+		responses = append(responses, resp)
+	}
+
+	// 4. 按概率排序（降序）
+	for i := 0; i < len(responses)-1; i++ {
+		for j := i + 1; j < len(responses); j++ {
+			if responses[j].Result.Probability > responses[i].Result.Probability {
+				responses[i], responses[j] = responses[j], responses[i]
+			}
+		}
+	}
+
+	return &model.HolmesFriendListResponse{
+		Friends:     responses,
+		GeneratedAt: now.UnixMilli(),
+	}, nil
+}
+
+// getEmojiFromAnalysis 从分析结果中获取 Emoji
+func getEmojiFromAnalysis(analysis *model.HolmesResult) string {
+	if analysis == nil {
+		return "🤔"
+	}
+
+	// 尝试从 Reasoning 的 Conclusion 中推断
+	conclusion := ""
+	if analysis.Reasoning != nil {
+		conclusion = analysis.Reasoning.Conclusion
+	}
+
+	// 根据关键词匹配 Emoji
+	emojiMap := map[string]string{
+		"咖啡":  "☕",
+		"休闲":  "🛋️",
+		"工作":  "💼",
+		"开会":  "📊",
+		"睡觉":  "😴",
+		"运动":  "🏃",
+		"聊天":  "💬",
+		"游戏":  "🎮",
+		"追剧":  "📺",
+		"听音乐": "🎧",
+		"外出":  "🚶",
+		"逛街":  "🛍️",
+		"通勤":  "🚇",
+		"吃饭":  "🍜",
+		"聚会":  "🍻",
+		"专注":  "🔕",
+	}
+
+	for keyword, emoji := range emojiMap {
+		if strings.Contains(conclusion, keyword) || strings.Contains(analysis.Result.Summary, keyword) {
+			return emoji
+		}
+	}
+
+	// 根据概率返回默认 Emoji
+	if analysis.Result.Probability >= 70 {
+		return "🟢"
+	} else if analysis.Result.Probability >= 40 {
+		return "🟡"
+	} else if analysis.Result.Probability >= 0 {
+		return "🔴"
+	}
+	return "🤔"
 }

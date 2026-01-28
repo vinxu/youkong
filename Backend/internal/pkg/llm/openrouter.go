@@ -215,6 +215,48 @@ func (c *OpenRouterClient) ChatWithMessages(ctx context.Context, messages []Chat
 	return chatResp.Choices[0].Message.Content, nil
 }
 
+// chatWithRequestBody 使用自定义请求体发送请求
+func (c *OpenRouterClient) chatWithRequestBody(ctx context.Context, requestBody map[string]interface{}) (string, error) {
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", qwenAPIURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	var chatResp ChatResponse
+	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+		return "", fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	if chatResp.Error != nil {
+		return "", fmt.Errorf("api error: %s (code: %s)", chatResp.Error.Message, chatResp.Error.Code)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return "", fmt.Errorf("no response choices")
+	}
+
+	return chatResp.Choices[0].Message.Content, nil
+}
+
 // GenerateFreeReason 生成隐私安全的有空理由
 func (c *OpenRouterClient) GenerateFreeReason(ctx context.Context, state SanitizedUserState) (string, error) {
 	prompt := fmt.Sprintf(`你是一个帮助用户判断朋友是否有空的助手。
