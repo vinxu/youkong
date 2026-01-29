@@ -9,7 +9,9 @@ import coil.ImageLoaderFactory
 import com.youkong.app.push.TPNSHelper
 import com.youkong.core.agent.worker.DataCollectWorker
 import com.youkong.core.agent.worker.StatusSyncWorker
+import com.youkong.core.datastore.TokenManager
 import com.youkong.core.permission.PermissionManager
+import com.youkong.core.websocket.WebSocketManager
 import dagger.hilt.android.HiltAndroidApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +37,12 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
     @Inject
     lateinit var tpnsHelper: TPNSHelper
 
+    @Inject
+    lateinit var webSocketManager: WebSocketManager
+
+    @Inject
+    lateinit var tokenManager: TokenManager
+
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     override val workManagerConfiguration: Configuration
@@ -55,8 +63,27 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
         // 初始化 TPNS 推送
         tpnsHelper.init()
 
+        // 监听登录状态，连接 WebSocket
+        observeAuthState()
+
         // 监听权限状态变化，自动调度后台任务
         observePermissionState()
+    }
+
+    private fun observeAuthState() {
+        applicationScope.launch {
+            tokenManager.accessToken
+                .distinctUntilChanged()
+                .collect { token ->
+                    if (token != null) {
+                        // 已登录，连接 WebSocket
+                        webSocketManager.connect()
+                    } else {
+                        // 已登出，断开 WebSocket
+                        webSocketManager.disconnect()
+                    }
+                }
+        }
     }
 
     private fun observePermissionState() {

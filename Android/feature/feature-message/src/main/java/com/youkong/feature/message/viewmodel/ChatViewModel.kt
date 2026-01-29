@@ -7,6 +7,7 @@ import com.youkong.core.datastore.UserPreferences
 import com.youkong.core.domain.model.Message
 import com.youkong.core.domain.model.MessageType
 import com.youkong.core.domain.repository.MessageRepository
+import com.youkong.core.websocket.WebSocketManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -30,6 +31,7 @@ class ChatViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val messageRepository: MessageRepository,
     private val userPreferences: UserPreferences,
+    private val webSocketManager: WebSocketManager,
 ) : ViewModel() {
 
     private val conversationIdParam: String? = savedStateHandle["conversationId"]
@@ -43,6 +45,24 @@ class ChatViewModel @Inject constructor(
     init {
         loadCurrentUser()
         initializeConversation()
+        observeWebSocketMessages()
+    }
+
+    private fun observeWebSocketMessages() {
+        viewModelScope.launch {
+            webSocketManager.newMessages.collect { newMessageData ->
+                // 只处理当前会话的消息
+                if (newMessageData.conversationId == conversationId) {
+                    val message = newMessageData.message
+                    // 避免重复添加（发送的消息已经在 sendMessage 中添加了）
+                    if (!_uiState.value.messages.any { it.id == message.id }) {
+                        _uiState.update {
+                            it.copy(messages = it.messages + message)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private fun initializeConversation() {
