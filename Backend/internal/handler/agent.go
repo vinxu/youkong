@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -276,11 +278,70 @@ func (h *AgentHandler) GetHolmesAnalysis(c *gin.Context) {
 
 	if result == nil {
 		response.Success(c, gin.H{
-			"message": "暂无分析数据",
+			"message":   "暂无分析数据",
 			"friend_id": friendID,
 		})
 		return
 	}
 
 	response.Success(c, result)
+}
+
+// ReportStatusStream 流式上报状态（SSE 实时输出推理过程）
+// POST /api/agent/status/stream
+func (h *AgentHandler) ReportStatusStream(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权"})
+		return
+	}
+
+	var req model.ExtendedStatusReportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+		return
+	}
+
+	// 设置 SSE 响应头
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no") // 禁用 nginx 缓冲
+
+	// 获取 ResponseWriter 用于 flush
+	w := c.Writer
+
+	// 流式执行福尔摩斯推理
+	result, err := h.agentService.ReportExtendedStatusStream(c.Request.Context(), userID, &req, func(event interface{}) {
+		// 将事件序列化为 JSON
+		data, err := json.Marshal(event)
+		if err != nil {
+			return
+		}
+
+		// 写入 SSE 格式
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+	})
+
+	if err != nil {
+		// 发送错误事件
+		errEvent := map[string]string{
+			"type":    "error",
+			"content": err.Error(),
+		}
+		data, _ := json.Marshal(errEvent)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+		return
+	}
+
+	// 发送最终结果
+	doneEvent := map[string]interface{}{
+		"type":   "done",
+		"result": result,
+	}
+	data, _ := json.Marshal(doneEvent)
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	w.Flush()
 }

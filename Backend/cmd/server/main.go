@@ -315,6 +315,7 @@ func main() {
 			agent := authorized.Group("/agent")
 			{
 				agent.POST("/status", agentHandler.ReportStatus)
+				agent.POST("/status/stream", agentHandler.ReportStatusStream) // 流式推理（SSE）
 				agent.POST("/query", agentHandler.QueryAgentData)
 				agent.GET("/memory", agentHandler.GetMemory)
 			}

@@ -535,6 +535,69 @@ func (s *AgentService) ReportExtendedStatus(ctx context.Context, userID string, 
 	return result, nil
 }
 
+// ReportExtendedStatusStream 流式上报状态（实时输出推理过程）
+func (s *AgentService) ReportExtendedStatusStream(ctx context.Context, userID string, req *model.ExtendedStatusReportRequest, callback func(event interface{})) (*model.HolmesResult, error) {
+	// 1. 保存原始状态到 Redis
+	status := model.UserRealtimeStatus{
+		UserID:    userID,
+		UpdatedAt: time.Now(),
+	}
+	if req.Screen != nil {
+		status.Screen = *req.Screen
+	}
+	if req.Location != nil {
+		status.Location = *req.Location
+	}
+
+	data, err := json.Marshal(status)
+	if err != nil {
+		return nil, fmt.Errorf("marshal status: %w", err)
+	}
+
+	key := fmt.Sprintf(keyUserStatus, userID)
+	if err := s.redisClient.Set(ctx, key, data, statusTTL); err != nil {
+		return nil, fmt.Errorf("save status to redis: %w", err)
+	}
+
+	// 2. 保存扩展状态到 Redis
+	extData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal extended status: %w", err)
+	}
+
+	extKey := fmt.Sprintf("agent:extended:%s", userID)
+	if err := s.redisClient.Set(ctx, extKey, extData, statusTTL); err != nil {
+		return nil, fmt.Errorf("save extended status to redis: %w", err)
+	}
+
+	// 3. 流式执行福尔摩斯分析
+	if s.holmesAnalyzer == nil {
+		return nil, fmt.Errorf("holmes analyzer not available")
+	}
+
+	input := &llm.HolmesInput{
+		Status:    req,
+		Timestamp: time.Now(),
+	}
+
+	// 使用流式分析
+	result, err := s.holmesAnalyzer.AnalyzeStream(ctx, input, func(event *llm.HolmesStreamEvent) {
+		callback(event)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("holmes stream analysis failed: %w", err)
+	}
+
+	// 4. 缓存分析结果
+	if result != nil {
+		cacheData, _ := json.Marshal(result)
+		cacheKey := fmt.Sprintf(keyHolmesCache, userID)
+		_ = s.redisClient.Set(ctx, cacheKey, cacheData, holmesCacheTTL)
+	}
+
+	return result, nil
+}
+
 // GetHolmesAnalysis 获取福尔摩斯分析结果（优先使用缓存）
 func (s *AgentService) GetHolmesAnalysis(ctx context.Context, userID string) (*model.HolmesResult, error) {
 	// 1. 尝试从缓存获取
