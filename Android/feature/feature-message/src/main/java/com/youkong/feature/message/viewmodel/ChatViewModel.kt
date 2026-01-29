@@ -32,14 +32,52 @@ class ChatViewModel @Inject constructor(
     private val userPreferences: UserPreferences,
 ) : ViewModel() {
 
-    private val conversationId: String = checkNotNull(savedStateHandle["conversationId"])
+    private val conversationIdParam: String? = savedStateHandle["conversationId"]
+    private val partnerIdParam: String? = savedStateHandle["partnerId"]
+
+    private var conversationId: String? = null
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
     init {
         loadCurrentUser()
-        loadMessages()
+        initializeConversation()
+    }
+
+    private fun initializeConversation() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, error = null) }
+
+            // 如果有 partnerId，先创建或获取会话
+            if (partnerIdParam != null) {
+                messageRepository.getOrCreateConversation(partnerIdParam)
+                    .onSuccess { conversation ->
+                        conversationId = conversation.id
+                        _uiState.update { it.copy(partnerName = conversation.partner.nickname) }
+                        loadMessages()
+                    }
+                    .onFailure { e ->
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                error = "创建会话失败: ${e.message}"
+                            )
+                        }
+                    }
+            } else if (conversationIdParam != null) {
+                // 直接使用 conversationId
+                conversationId = conversationIdParam
+                loadMessages()
+            } else {
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        error = "缺少会话参数"
+                    )
+                }
+            }
+        }
     }
 
     private fun loadCurrentUser() {
@@ -50,10 +88,21 @@ class ChatViewModel @Inject constructor(
     }
 
     private fun loadMessages() {
+        val convId = conversationId
+        if (convId == null) {
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    error = "会话ID无效"
+                )
+            }
+            return
+        }
+
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
 
-            messageRepository.getMessages(conversationId)
+            messageRepository.getMessages(convId)
                 .onSuccess { messages ->
                     _uiState.update {
                         it.copy(
@@ -74,11 +123,17 @@ class ChatViewModel @Inject constructor(
     }
 
     fun sendMessage(content: String) {
+        val convId = conversationId
+        if (convId == null) {
+            _uiState.update { it.copy(error = "会话ID无效") }
+            return
+        }
+
         viewModelScope.launch {
             _uiState.update { it.copy(isSending = true) }
 
             messageRepository.sendMessage(
-                conversationId = conversationId,
+                conversationId = convId,
                 type = MessageType.TEXT,
                 content = content,
                 metadata = null,
