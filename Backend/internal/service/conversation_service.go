@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -74,7 +75,14 @@ func (s *ConversationService) GetConversations(ctx context.Context, userID strin
 }
 
 func (s *ConversationService) GetOrCreateConversation(ctx context.Context, userID, partnerID string) (*model.Conversation, error) {
-	conv, err := s.messageRepo.GetConversationByUsers(ctx, userID, partnerID)
+	// 确保user1_id < user2_id以保持一致性
+	user1, user2 := userID, partnerID
+	if user1 > user2 {
+		user1, user2 = user2, user1
+	}
+
+	// 先查询是否已存在（使用排序后的 user_id）
+	conv, err := s.messageRepo.GetConversationByUsers(ctx, user1, user2)
 	if err != nil {
 		return nil, fmt.Errorf("查询会话失败: %w", err)
 	}
@@ -83,12 +91,7 @@ func (s *ConversationService) GetOrCreateConversation(ctx context.Context, userI
 		return conv, nil
 	}
 
-	// 确保user1_id < user2_id以保持一致性
-	user1, user2 := userID, partnerID
-	if user1 > user2 {
-		user1, user2 = user2, user1
-	}
-
+	// 创建新会话
 	conv = &model.Conversation{
 		ID:        uuid.New().String(),
 		User1ID:   user1,
@@ -97,10 +100,34 @@ func (s *ConversationService) GetOrCreateConversation(ctx context.Context, userI
 	}
 
 	if err := s.messageRepo.CreateConversation(ctx, conv); err != nil {
+		// 如果创建失败（可能是并发导致的唯一性冲突），重新查询
+		// 检查错误是否为唯一性约束冲突 (MySQL Error 1062)
+		if isDuplicateKeyError(err) {
+			// 重新查询会话
+			conv, err = s.messageRepo.GetConversationByUsers(ctx, user1, user2)
+			if err != nil {
+				return nil, fmt.Errorf("重新查询会话失败: %w", err)
+			}
+			if conv != nil {
+				return conv, nil
+			}
+		}
 		return nil, fmt.Errorf("创建会话失败: %w", err)
 	}
 
 	return conv, nil
+}
+
+// isDuplicateKeyError 检查是否为唯一性约束错误
+func isDuplicateKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// MySQL Error 1062: Duplicate entry
+	return strings.Contains(errStr, "Duplicate entry") ||
+		strings.Contains(errStr, "duplicate key") ||
+		strings.Contains(errStr, "Error 1062")
 }
 
 func (s *ConversationService) GetOrCreateConversationWithResponse(ctx context.Context, userID, partnerID string) (*model.ConversationResponse, error) {
