@@ -12,6 +12,7 @@ import com.youkong.core.network.api.InvitationApi
 import com.youkong.core.network.api.MessageApi
 import com.youkong.core.network.api.UserApi
 import com.youkong.core.network.interceptor.AuthInterceptor
+import com.youkong.core.network.sse.AgentSseClient
 import com.youkong.core.network.interceptor.TokenAuthenticator
 import dagger.Module
 import dagger.Provides

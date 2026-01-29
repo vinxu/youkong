@@ -50,45 +50,54 @@ struct ConversationRowView: View {
     let conversation: Conversation
 
     var body: some View {
-        HStack(spacing: UIConstants.Spacing.md) {
-            ZStack(alignment: .topTrailing) {
-                AvatarView(url: conversation.partner.avatar, size: 52)
-
-                if conversation.unreadCount > 0 {
-                    Text("\(min(conversation.unreadCount, 99))")
-                        .font(.caption2)
-                        .fontWeight(.bold)
-                        .foregroundColor(.white)
-                        .frame(minWidth: 18, minHeight: 18)
-                        .background(Color.red)
-                        .clipShape(SwiftUI.Circle())
-                        .offset(x: 4, y: -4)
-                }
-            }
+        HStack(spacing: 0) {
+            // 状态指示符
+            Text(conversation.unreadCount > 0 ? CLIConstants.bullet : CLIConstants.hollowBullet)
+                .font(.system(size: 18, design: .monospaced))
+                .foregroundColor(conversation.unreadCount > 0 ? .green : .gray)
+                .frame(width: 30)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(conversation.partner.nickname)
-                        .font(.headline)
+                        .font(.system(size: 16, design: .monospaced))
+                        .fontWeight(.medium)
 
                     Spacer()
 
                     if let lastMessage = conversation.lastMessage {
                         Text(lastMessage.createdAt.relativeDescription)
-                            .font(.caption)
+                            .font(.system(size: 12, design: .monospaced))
                             .foregroundColor(.secondary)
                     }
                 }
 
-                if let lastMessage = conversation.lastMessage {
-                    Text(lastMessagePreview(lastMessage))
-                        .font(.subheadline)
+                // 消息预览
+                HStack(spacing: 4) {
+                    Text(CLIConstants.dash)
+                        .font(.system(size: 12, design: .monospaced))
                         .foregroundColor(.secondary)
-                        .lineLimit(1)
+
+                    if let lastMessage = conversation.lastMessage {
+                        Text(lastMessagePreview(lastMessage))
+                            .font(.system(size: 14, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                // 未读数量
+                if conversation.unreadCount > 0 {
+                    Text("[\(conversation.unreadCount)]")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(.red)
                 }
             }
+
+            Spacer()
         }
-        .padding()
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 
     private func lastMessagePreview(_ message: Message) -> String {

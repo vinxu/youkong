@@ -1,5 +1,7 @@
 package com.youkong.feature.home.component
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,25 +10,19 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DateRange
-import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.youkong.core.domain.model.Availability
 import com.youkong.core.domain.model.LocationType
-import com.youkong.core.ui.component.YouKongAvatar
-import com.youkong.core.ui.component.YouKongCard
-import com.youkong.core.ui.theme.Primary
-import com.youkong.core.ui.theme.TextPrimary
-import com.youkong.core.ui.theme.TextSecondary
+import com.youkong.core.ui.component.cli.TerminalAvatar
+import com.youkong.core.ui.component.cli.TerminalDivider
+import com.youkong.core.ui.theme.ASCII
+import com.youkong.core.ui.theme.CLIColors
 import com.youkong.core.ui.theme.YouKongTheme
 import kotlinx.datetime.Clock
 import kotlinx.datetime.TimeZone
@@ -40,108 +36,114 @@ fun AvailabilityCard(
     onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
-    YouKongCard(
-        modifier = modifier,
-        onClick = onClick,
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(CLIColors.Background)
+            .then(
+                if (onClick != null) Modifier.clickable(onClick = onClick)
+                else Modifier
+            )
+            .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(YouKongTheme.spacing.lg),
+        // 头部：用户信息
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 头部：用户信息
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                YouKongAvatar(
-                    imageUrl = availability.user.avatar,
-                    name = availability.user.nickname,
-                    size = 40.dp,
-                )
+            TerminalAvatar(isOnline = true)
 
-                Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(8.dp))
 
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = availability.user.nickname,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TextPrimary,
-                    )
+            Text(
+                text = availability.user.nickname,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 14.sp,
+                color = CLIColors.TextPrimary,
+            )
 
-                    Text(
-                        text = formatRelativeTime(availability),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary,
-                    )
-                }
+            Spacer(modifier = Modifier.width(8.dp))
 
-                if (isMine && onCancelClick != null) {
-                    IconButton(onClick = onCancelClick) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "取消",
-                            tint = TextSecondary,
-                        )
-                    }
-                }
-            }
+            Text(
+                text = "[${formatRelativeTimeShort(availability)}]",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.TextSecondary,
+            )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.weight(1f))
 
-            // 时间信息
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    imageVector = Icons.Default.DateRange,
-                    contentDescription = null,
-                    tint = Primary,
-                    modifier = Modifier.padding(end = 8.dp),
-                )
+            if (isMine && onCancelClick != null) {
                 Text(
-                    text = formatTimeRange(availability),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextPrimary,
-                )
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // 地点信息
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    imageVector = Icons.Default.LocationOn,
-                    contentDescription = null,
-                    tint = Primary,
-                    modifier = Modifier.padding(end = 8.dp),
-                )
-                Text(
-                    text = formatLocation(availability),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextPrimary,
+                    text = "[X]",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = CLIColors.Red,
+                    modifier = Modifier.clickable(onClick = onCancelClick)
                 )
             }
         }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // 时间信息
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "${ASCII.ARROW_RIGHT} ",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.Green,
+            )
+            Text(
+                text = formatTimeRange(availability),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.TextPrimary,
+            )
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // 地点信息
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "${ASCII.ARROW_RIGHT} ",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.Blue,
+            )
+            Text(
+                text = formatLocation(availability),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.TextPrimary,
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        TerminalDivider()
     }
 }
 
-private fun formatRelativeTime(availability: Availability): String {
+private fun formatRelativeTimeShort(availability: Availability): String {
     val now = Clock.System.now()
     val diff = availability.startTime - now
     val hours = diff.inWholeHours
     val minutes = diff.inWholeMinutes
 
     return when {
-        hours < 0 -> "进行中"
-        hours == 0L -> "${minutes}分钟后"
-        hours < 24 -> "${hours}小时后"
-        hours < 48 -> "明天"
+        hours < 0 -> "NOW"
+        hours == 0L -> "${minutes}m"
+        hours < 24 -> "${hours}h"
+        hours < 48 -> "TMR"
         else -> {
             val date = availability.startTime.toLocalDateTime(TimeZone.currentSystemDefault())
-            "${date.monthNumber}月${date.dayOfMonth}日"
+            "${date.monthNumber}/${date.dayOfMonth}"
         }
     }
 }
@@ -151,16 +153,16 @@ private fun formatTimeRange(availability: Availability): String {
     val start = availability.startTime.toLocalDateTime(tz)
     val end = availability.endTime.toLocalDateTime(tz)
 
-    val startTimeStr = "${start.hour.toString().padStart(2, '0')}:${start.minute.toString().padStart(2, '0')}"
-    val endTimeStr = "${end.hour.toString().padStart(2, '0')}:${end.minute.toString().padStart(2, '0')}"
+    val startTimeStr = "[${start.hour.toString().padStart(2, '0')}:${start.minute.toString().padStart(2, '0')}]"
+    val endTimeStr = "[${end.hour.toString().padStart(2, '0')}:${end.minute.toString().padStart(2, '0')}]"
 
     val dateStr = if (start.dayOfMonth != Clock.System.now().toLocalDateTime(tz).dayOfMonth) {
-        "${start.monthNumber}月${start.dayOfMonth}日 "
+        "${start.monthNumber}/${start.dayOfMonth} "
     } else {
-        "今天 "
+        ""
     }
 
-    return "$dateStr$startTimeStr - $endTimeStr"
+    return "$dateStr$startTimeStr-$endTimeStr"
 }
 
 private fun formatLocation(availability: Availability): String {

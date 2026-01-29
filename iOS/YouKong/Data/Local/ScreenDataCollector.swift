@@ -11,8 +11,8 @@ import ManagedSettings
 
 // MARK: - Screen Data Collector
 
-/// 屏幕使用时间数据收集器
-/// 使用 FamilyControls + DeviceActivity 的阈值回调机制
+/// ⚠️ 屏幕使用时间数据收集器（已禁用 - 方案 C）
+/// 保留接口但不进行任何实际数据收集，始终返回空数据
 class ScreenDataCollector: ObservableObject {
     static let shared = ScreenDataCollector()
 
@@ -51,40 +51,19 @@ class ScreenDataCollector: ObservableObject {
         NotificationCenter.default.removeObserver(self)
     }
 
-    // MARK: - Authorization
+    // MARK: - Authorization (已禁用)
 
-    /// 请求屏幕使用时间授权
+    /// ⚠️ 始终返回 false（方案 C）
     @MainActor
     func requestAuthorization() async -> Bool {
-        #if canImport(FamilyControls)
-        if #available(iOS 16.0, *) {
-            do {
-                try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
-                isAuthorized = true
-                return true
-            } catch {
-                print("Screen Time authorization failed: \(error)")
-                isAuthorized = false
-                return false
-            }
-        }
-        #endif
-
-        // iOS 16 以下或模拟器，使用模拟模式
-        isAuthorized = true
-        return true
+        isAuthorized = false
+        return false
     }
 
-    /// 检查授权状态
+    /// ⚠️ 始终返回未授权（方案 C）
     @MainActor
     func checkAuthorization() {
-        #if canImport(FamilyControls)
-        if #available(iOS 16.0, *) {
-            isAuthorized = AuthorizationCenter.shared.authorizationStatus == .approved
-            return
-        }
-        #endif
-        isAuthorized = true
+        isAuthorized = false
     }
 
     // MARK: - Selection Management
@@ -139,51 +118,22 @@ class ScreenDataCollector: ObservableObject {
     }
     #endif
 
-    // MARK: - Monitoring
+    // MARK: - Monitoring (已禁用)
 
+    /// ⚠️ 空实现（方案 C）
     func startMonitoring() {
-        isMonitoring = true
-
-        // 先加载保存的选择
-        loadSelection()
-        loadSharedData()
-
-        #if canImport(FamilyControls)
-        if #available(iOS 16.0, *) {
-            // 只有在有选择时才启动监控
-            if hasSelection {
-                startDeviceActivityMonitoring()
-                print("📱 [ScreenData] 启动监控，已选择 \(activitySelection.applicationTokens.count) 个应用，\(activitySelection.categoryTokens.count) 个分类")
-            } else {
-                print("⚠️ [ScreenData] 未选择监控应用，跳过启动监控")
-            }
-        }
-        #endif
-
-        // 同时监听 App 前后台状态作为补充
-        if UIApplication.shared.applicationState == .active {
-            sessionStartTime = Date()
-            lastActiveTime = Date()
-        }
-        updateStatus()
+        isMonitoring = false
+        print("⚠️ [ScreenData] 屏幕数据收集已禁用（方案 C）")
     }
 
+    /// ⚠️ 空实现（方案 C）
     func stopMonitoring() {
         isMonitoring = false
-
-        #if canImport(FamilyControls)
-        if #available(iOS 16.0, *) {
-            stopDeviceActivityMonitoring()
-        }
-        #endif
-
-        sessionStartTime = nil
     }
 
+    /// ⚠️ 始终返回空闲状态（方案 C）
     func getCurrentStatus() -> ScreenStatus {
-        loadSharedData()  // 从 App Group 加载最新数据
-        updateStatus()
-        return currentStatus
+        return .idle
     }
 
     // MARK: - Device Activity Monitoring (iOS 16+)

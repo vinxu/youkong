@@ -14,6 +14,105 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 开发命令
 
+### iOS (Swift + SwiftUI)
+
+在 `iOS/` 目录下操作：
+
+```bash
+cd iOS
+
+# 使用 Xcode 打开项目
+open YouKong.xcodeproj
+
+# 命令行构建（模拟器）
+xcodebuild -project YouKong.xcodeproj -scheme YouKong -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 15 Pro' build
+
+# 命令行构建（真机）
+xcodebuild -project YouKong.xcodeproj -scheme YouKong -sdk iphoneos build
+
+# 运行测试
+xcodebuild test -project YouKong.xcodeproj -scheme YouKong -destination 'platform=iOS Simulator,name=iPhone 15 Pro'
+
+# 清理构建产物
+rm -rf ~/Library/Developer/Xcode/DerivedData/YouKong-*
+```
+
+**依赖管理**：
+- SPM (Swift Package Manager) - 在 Xcode 中自动管理
+- 主要依赖：`Factory` (依赖注入)
+
+**调试工具**：
+- 摇一摇手机 → 打开调试面板（Debug 模式）
+- 调试面板功能：查看网络请求/响应、切换 API Base URL、查看 Token
+
+**关键权限**（Info.plist）：
+- `NSLocationAlwaysAndWhenInUseUsageDescription` - 后台位置
+- `NSLocationWhenInUseUsageDescription` - 前台位置
+- `NSCalendarsUsageDescription` - 日历访问
+- `NSMotionUsageDescription` - 运动传感器
+- `NSContactsUsageDescription` - 通讯录
+- 屏幕使用时间需要用户手动在"设置"中授权
+
+### Android (Kotlin + Jetpack Compose)
+
+在 `Android/` 目录下操作：
+
+```bash
+cd Android
+
+# 使用 Android Studio 打开项目（推荐）
+# File → Open → 选择 Android 目录
+
+# 命令行构建
+./gradlew build
+
+# 构建 Debug APK
+./gradlew assembleDebug
+
+# 构建 Release APK
+./gradlew assembleRelease
+
+# 安装到连接的设备/模拟器
+./gradlew installDebug
+
+# 运行测试
+./gradlew test
+
+# 清理构建产物
+./gradlew clean
+
+# 查看所有可用任务
+./gradlew tasks
+
+# 检查依赖更新
+./gradlew dependencyUpdates
+```
+
+**依赖管理**：
+- Gradle Version Catalog (`gradle/libs.versions.toml`) - 集中管理版本
+- 主要依赖：Hilt (依赖注入)、Retrofit (网络)、Room (数据库)、Compose (UI)
+
+**本地配置**（`local.properties`）：
+```properties
+# Android SDK 路径（自动生成）
+sdk.dir=/Users/xxx/Library/Android/sdk
+
+# 腾讯推送服务配置（可选，用于推送通知）
+TPNS_ACCESS_ID=your_access_id
+TPNS_ACCESS_KEY=your_access_key
+```
+
+**关键权限**（AndroidManifest.xml）：
+- `PACKAGE_USAGE_STATS` - 应用使用统计（需引导用户在系统设置中授权）
+- `ACCESS_FINE_LOCATION` / `ACCESS_BACKGROUND_LOCATION` - 位置
+- `READ_CALENDAR` / `WRITE_CALENDAR` - 日历访问
+- `READ_CONTACTS` - 通讯录
+- `ACTIVITY_RECOGNITION` - 运动传感器
+- `ACCESS_NOTIFICATION_POLICY` - 勿扰模式状态
+
+**调试工具**：
+- 设置页面 → 调试面板 → Agent 数据可视化（福尔摩斯推理流式输出）
+
 ### 后端 (Go + Gin)
 
 所有命令在 `Backend/` 目录下执行：
@@ -72,10 +171,111 @@ youkong/
 │   │   ├── service/       # 业务逻辑层
 │   │   └── pkg/           # 工具包 (jwt, response, tencent, validator)
 │   └── migrations/        # SQL 迁移脚本
+├── iOS/               # iOS 应用 (Swift + SwiftUI)
+│   ├── YouKong.xcodeproj/ # Xcode 项目文件
+│   ├── DeviceActivityMonitorExtension/  # 屏幕使用监控扩展
+│   └── YouKong/
+│       ├── App/           # 应用入口、全局 Manager
+│       │   ├── YouKongApp.swift       # App 入口
+│       │   ├── RootView.swift         # 根视图
+│       │   ├── MainTabView.swift      # 主 Tab 导航
+│       │   ├── AuthManager.swift      # 认证管理
+│       │   ├── PermissionManager.swift  # 权限管理
+│       │   ├── NotificationManager.swift  # 通知管理
+│       │   └── AppDelegate.swift      # 生命周期代理
+│       ├── Presentation/  # UI 层
+│       │   ├── Screens/   # 页面
+│       │   │   ├── Auth/            # 登录、验证码
+│       │   │   ├── FriendsList/     # 好友列表（福尔摩斯推理）
+│       │   │   ├── Friends/         # 好友中心
+│       │   │   ├── Invitation/      # 邀请系统
+│       │   │   ├── Messages/        # 聊天消息
+│       │   │   ├── Onboarding/      # 引导页
+│       │   │   └── Profile/         # 个人中心
+│       │   └── Components/  # 可复用组件
+│       │       ├── FriendProbabilityCard.swift  # 好友有空概率卡片
+│       │       ├── CachedAsyncImage.swift       # 图片缓存组件
+│       │       ├── Cards/           # 卡片组件
+│       │       └── Common/          # 通用组件
+│       ├── Domain/        # 领域层
+│       │   ├── Entities/  # 实体（User, Agent, Message, Invitation, etc.）
+│       │   └── Repositories/  # Repository 协议
+│       ├── Data/          # 数据层
+│       │   ├── Network/   # 网络层
+│       │   │   ├── APIClient.swift    # 网络客户端（Actor）
+│       │   │   ├── APIEndpoint.swift  # 接口定义
+│       │   │   ├── APIError.swift     # 错误类型
+│       │   │   ├── APIResponse.swift  # 响应模型
+│       │   │   ├── SSEClient.swift    # SSE 流式客户端
+│       │   │   └── WebSocketManager.swift  # WebSocket（待用）
+│       │   ├── Local/     # 本地数据
+│       │   │   ├── KeychainManager.swift        # Keychain 存储
+│       │   │   ├── CacheManager.swift           # 图片缓存
+│       │   │   ├── ContactsManager.swift        # 通讯录管理
+│       │   │   ├── DeviceStatusCollector.swift  # 状态收集器
+│       │   │   ├── ScreenDataCollector.swift    # 屏幕数据
+│       │   │   ├── LocationDataCollector.swift  # 位置数据
+│       │   │   ├── CalendarDataCollector.swift  # 日历数据
+│       │   │   └── MovementDataCollector.swift  # 运动数据
+│       │   └── Repositories/  # Repository 实现
+│       ├── DI/            # 依赖注入
+│       │   └── Container.swift  # Factory 容器配置
+│       ├── Core/          # 核心工具
+│       │   ├── Constants/ # 常量定义
+│       │   ├── Extensions/  # 扩展
+│       │   ├── Debug/     # 调试工具（网络日志、调试面板）
+│       │   └── Utils/     # 工具类
+│       ├── Resources/     # 资源文件
+│       │   └── Assets.xcassets/  # 图片、颜色资源
+│       ├── Info.plist     # 应用配置
+│       └── YouKong.entitlements  # 权限配置
 ├── docs/              # 开发文档
 │   └── Holmes_Agent_Guide.md  # 福尔摩斯推理框架客户端开发指南
-├── Android/           # (待开发)
-├── iOS/               # (待开发)
+├── Android/           # Android 应用 (Kotlin + Jetpack Compose)
+│   ├── build-logic/       # Gradle 构建约定插件
+│   │   └── convention/    # 自定义插件（统一模块配置）
+│   ├── app/               # 主应用模块
+│   │   └── src/main/java/com/youkong/app/
+│   │       ├── YouKongApplication.kt    # 应用入口（Hilt 初始化）
+│   │       ├── MainActivity.kt          # 单 Activity 架构
+│   │       ├── YouKongNavHost.kt        # 导航图
+│   │       ├── MainViewModel.kt         # 应用级状态
+│   │       └── push/                    # 腾讯推送集成
+│   ├── core/              # 核心模块（共8个）
+│   │   ├── core-ui/           # 共享 UI 组件和主题
+│   │   ├── core-network/      # 网络层
+│   │   │   ├── api/           # Retrofit 接口定义
+│   │   │   ├── model/         # 网络数据模型
+│   │   │   ├── interceptor/   # Auth 拦截器、Token 刷新
+│   │   │   └── sse/           # SSE 流式客户端（福尔摩斯推理）
+│   │   ├── core-data/         # Repository 实现
+│   │   ├── core-domain/       # Domain 模型、Repository 协议
+│   │   ├── core-database/     # Room 数据库
+│   │   ├── core-datastore/    # DataStore（加密存储）
+│   │   ├── core-agent/        # Agent 数据收集框架
+│   │   │   ├── collector/     # 数据收集器
+│   │   │   │   ├── UsageStatsCollector.kt   # 应用使用统计
+│   │   │   │   ├── LocationCollector.kt     # GPS 位置
+│   │   │   │   ├── CalendarCollector.kt     # 日历事件
+│   │   │   │   ├── MovementCollector.kt     # 运动数据
+│   │   │   │   └── DeviceStateCollector.kt  # 设备状态
+│   │   │   ├── model/         # Agent 数据模型
+│   │   │   └── worker/        # 后台数据收集 Worker
+│   │   └── core-permission/   # 权限管理
+│   ├── feature/           # 功能模块（共11个）
+│   │   ├── feature-auth/          # 登录认证
+│   │   ├── feature-home/          # 首页
+│   │   ├── feature-friends/       # 好友列表（福尔摩斯推理）
+│   │   ├── feature-friend/        # 单个好友页面
+│   │   ├── feature-message/       # 消息列表
+│   │   ├── feature-chat/          # 聊天界面
+│   │   ├── feature-profile/       # 个人中心
+│   │   ├── feature-settings/      # 设置（含 Agent 数据可视化）
+│   │   ├── feature-availability/  # 发布有空
+│   │   ├── feature-circle/        # 圈子管理
+│   │   └── feature-invitation/    # 邀请系统
+│   └── gradle/            # Gradle 配置
+│       └── libs.versions.toml  # 版本目录（统一管理依赖版本）
 └── Web/               # (待开发)
 ```
 
@@ -91,10 +291,12 @@ youkong/
 | 平台 | 技术选型 |
 |------|----------|
 | 后端 | Go 1.21, Gin, sqlx, MySQL, Redis, Viper, Zap |
-| iOS (计划) | Swift 5.9+, SwiftUI, MVVM + Clean Architecture |
-| Android (计划) | Kotlin 1.9+, Jetpack Compose, MVVM + Clean Architecture |
+| iOS | Swift 5.9+, SwiftUI, MVVM + Clean Architecture, Factory (DI) |
+| Android | Kotlin 1.9.22, Jetpack Compose, MVVM + Clean Architecture, Hilt (DI), Retrofit, Room, WorkManager |
 
-## 后端架构
+## 架构设计
+
+### 后端架构
 
 采用分层架构，各层通过构造函数注入依赖（见 `cmd/server/main.go`）：
 
@@ -109,6 +311,94 @@ MySQL + Redis
 ```
 
 **初始化顺序**：Config → DB/Redis → Repository → Service → Handler → Router
+
+### iOS 架构
+
+采用 Clean Architecture 分层设计，通过 Factory 实现依赖注入：
+
+```
+Presentation (SwiftUI Views + ViewModels)
+    ↓
+Domain (Entities + Repositories Protocol + Use Cases)
+    ↓
+Data (Repository Implementations + Network + Local)
+```
+
+**核心组件**：
+- **DI Container**: `DI/Container.swift` - 使用 Factory 管理依赖注入
+- **APIClient**: `Data/Network/APIClient.swift` - Actor 隔离的网络层（单例）
+- **Managers**:
+  - `AuthManager` - 认证状态管理（全局单例）
+  - `PermissionManager` - 权限管理（位置、日历、运动、通讯录、屏幕使用）
+  - `NotificationManager` - 推送通知管理
+  - `DeepLinkManager` - 深度链接处理（邀请码）
+- **Collectors**:
+  - `DeviceStatusCollector` - 设备状态收集协调器
+  - `ScreenDataCollector` - 屏幕使用数据（Screen Time API）
+  - `LocationDataCollector` - 位置数据（CoreLocation）
+  - `CalendarDataCollector` - 日历数据（EventKit）
+  - `MovementDataCollector` - 运动数据（CoreMotion）
+
+**数据流**：
+1. View 触发 ViewModel 方法
+2. ViewModel 调用 Repository（通过 @Injected 注入）
+3. Repository 调用 APIClient 或 Local Storage
+4. APIClient 通过 APIEndpoint 构建请求
+5. 响应通过 Decodable 解码为 Entity
+6. ViewModel 更新 @Published 属性
+7. View 自动刷新
+
+### Android 架构
+
+采用 Clean Architecture + 模块化设计，通过 Hilt 实现依赖注入：
+
+```
+Presentation (Feature Modules - Compose UI + ViewModels)
+    ↓
+Domain (Entities + Repository Interfaces)
+    ↓
+Data (Repository Implementations)
+    ↓
+Network (Retrofit) + Database (Room) + DataStore
+```
+
+**核心组件**：
+- **DI Framework**: Hilt + KSP - 编译时依赖注入
+- **模块化**: 11 个 Feature 模块 + 8 个 Core 模块
+- **构建约定**: 自定义 Gradle 插件统一配置（`build-logic/convention/`）
+  - `youkong.android.application` - App 模块配置
+  - `youkong.android.feature` - Feature 模块约定（自动引入 core 依赖）
+  - `youkong.android.hilt` - Hilt 集成
+  - `youkong.android.library.compose` - Compose 库配置
+
+**网络层**：
+- `APIClient` (Retrofit) - RESTful API 调用
+- `AgentSseClient` - SSE 流式客户端（福尔摩斯推理）
+- `AuthInterceptor` - 自动添加 JWT Token
+- `TokenAuthenticator` - Token 过期自动刷新
+
+**数据收集器** (core-agent)：
+- `UsageStatsCollector` - 应用使用统计（需 PACKAGE_USAGE_STATS 权限）
+  - Top 20 应用使用时长分析
+  - Session 级别追踪
+  - Activity 类型检测（娱乐/生产力/通讯/空闲）
+- `LocationCollector` - GPS 定位（FusedLocationProviderClient）
+- `CalendarCollector` - 日历事件
+- `MovementCollector` - 运动传感器数据
+- `DeviceStateCollector` - 设备状态（电量、网络、勿扰模式等）
+
+**后台任务**：
+- `DataCollectWorker` - 定期数据收集（WorkManager）
+- `StatusSyncWorker` - 状态同步到服务器
+- 权限状态变化时自动调度/取消
+
+**数据流**：
+1. Composable 触发 ViewModel 方法
+2. ViewModel 调用 Repository（通过 @Inject 注入）
+3. Repository 调用 API / Database / DataStore
+4. API 通过 Retrofit + Kotlinx Serialization 处理请求/响应
+5. ViewModel 更新 StateFlow / SharedFlow
+6. Composable 自动重组（Recompose）
 
 ## 核心功能
 
@@ -692,13 +982,139 @@ Pink: #EC4899, Orange: #F97316, Blue: #3B82F6
 Green: #22C55E, Purple: #8B5CF6, Yellow: #EAB308
 ```
 
+## iOS 开发要点
+
+### 依赖注入模式
+
+使用 Factory 进行依赖注入，统一在 `DI/Container.swift` 注册：
+
+```swift
+// 1. 在 Container 中注册
+extension Container {
+    var myRepository: Factory<MyRepositoryProtocol> {
+        Factory(self) { MyRepositoryImpl() }
+            .singleton
+    }
+}
+
+// 2. 在 ViewModel 中注入
+class MyViewModel: ObservableObject {
+    @Injected(\.myRepository) private var repository
+}
+```
+
+### 网络请求模式
+
+1. **定义 Endpoint** (`Data/Network/APIEndpoint.swift`)：
+```swift
+extension APIEndpoint {
+    static func getUser(id: String) -> APIEndpoint {
+        .init(path: "/users/\(id)", method: .get)
+    }
+}
+```
+
+2. **调用 APIClient** (在 Repository 中)：
+```swift
+func getUser(id: String) async throws -> User {
+    return try await apiClient.request(.getUser(id: id))
+}
+```
+
+### Agent 数据收集
+
+所有传感器数据收集器实现相同接口：
+
+```swift
+protocol DataCollectorProtocol {
+    func requestPermission() async -> Bool
+    var hasPermission: Bool { get }
+}
+```
+
+**重要规则**：
+- 数据收集必须先检查权限
+- 位置数据可能需要后台权限（NSLocationAlwaysAndWhenInUseUsageDescription）
+- 屏幕使用时间需要 Family Controls 权限，无法通过代码请求
+- 所有 Collector 在 `DeviceStatusCollector` 中统一协调
+
+### 福尔摩斯推理框架
+
+核心逻辑在 `FriendsListView` 和对应 ViewModel：
+
+1. **数据上报**：每 5 分钟上报一次设备状态到 `/api/v1/agent/status`
+2. **获取概率**：从 `/api/v1/friends/free-probability` 获取好友有空概率
+3. **流式推理**：点击好友后通过 SSE 获取完整推理过程（`SSEClient.swift`）
+
+### 深度链接处理
+
+支持两种格式：
+- Custom Scheme: `youkong://invite/ABC123`
+- Universal Link: `http://49.232.13.41:8080/i/ABC123`
+
+处理流程：
+1. `DeepLinkManager` 解析 URL
+2. 设置 `pendingInvitationCode` 和 `showInvitationSheet`
+3. `RootView` 监听并展示邀请接受页面
+
+### 认证流程
+
+1. 用户输入手机号 → 发送验证码
+2. 输入验证码 → 获取 Token
+3. Token 保存在 Keychain（`KeychainManager`）
+4. `AuthManager` 管理登录状态，注入到全局环境
+
+**Token 自动注入**：APIClient 自动从 Keychain 读取 Token 添加到请求头
+
+### 调试技巧
+
+- 摇一摇设备 → 打开调试面板（`DebugPanelView`）
+- 可查看所有网络请求、响应、Token
+- 可动态切换 API Base URL（开发/测试环境）
+- 网络日志自动在 Debug 模式记录（`DebugTool`）
+
+### 图片缓存
+
+使用 `CachedAsyncImage` 替代 `AsyncImage`：
+
+```swift
+CachedAsyncImage(url: avatarURL) { image in
+    image.resizable().aspectRatio(contentMode: .fill)
+} placeholder: {
+    ProgressView()
+}
+```
+
+缓存由 `CacheManager` 管理，自动处理内存和磁盘缓存。
+
 ## 开发规范
 
 ### 命名
 - Go: PascalCase (导出), camelCase (私有)
-- 客户端类/结构体: PascalCase
-- 客户端函数/变量: camelCase
-- Android常量: SCREAMING_SNAKE_CASE
+- Swift: PascalCase (类型/协议), camelCase (属性/方法/变量)
+- SwiftUI View 文件名与类型名一致（如 `LoginView.swift` 定义 `LoginView`）
+- ViewModel 命名：`<Feature>ViewModel`（如 `LoginViewModel`）
+- Repository 协议：`<Domain>RepositoryProtocol`（如 `AuthRepositoryProtocol`）
+- Repository 实现：`<Domain>RepositoryImpl`（如 `AuthRepositoryImpl`）
+- Kotlin: PascalCase (类/接口), camelCase (函数/变量/参数)
+- Composable 函数: PascalCase (如 `FriendListScreen`)
+- Android 常量: SCREAMING_SNAKE_CASE
+
+### Swift 代码风格
+- 使用 `@MainActor` 标记 UI 相关类（ViewModel、Manager）
+- 网络层使用 `actor` 保证线程安全（如 `APIClient`）
+- 优先使用 `async/await` 而非回调
+- 错误处理使用 `throws` 而非 Optional
+- 使用 `@Published` 发布 ViewModel 状态变化
+
+### Kotlin 代码风格
+- ViewModel 使用 StateFlow/SharedFlow 管理状态
+- Repository 返回 Flow 或 suspend 函数
+- 使用 `@Inject constructor` 进行依赖注入
+- 使用 `@HiltViewModel` 标记 ViewModel
+- Composable 函数使用 `remember` 缓存计算结果
+- 优先使用数据类（`data class`）定义模型
+- 网络/数据库操作使用 `withContext(Dispatchers.IO)`
 
 ### Git
 ```
@@ -709,5 +1125,71 @@ Green: #22C55E, Purple: #8B5CF6, Yellow: #EAB308
 ## 兼容性要求
 
 - iOS: 16.0+
-- Android: 8.0+ (API 26)
+- Android: 8.0+ (API 26, SDK 34)
 - 性能: 首屏<1.5s，列表滚动60fps
+
+## Android 特定说明
+
+### Gradle 版本目录
+所有依赖版本在 `gradle/libs.versions.toml` 中统一管理：
+```toml
+[versions]
+kotlin = "1.9.22"
+compose = "1.5.8"
+hilt = "2.50"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+```
+
+在模块中引用：
+```kotlin
+dependencies {
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.hilt.android)
+}
+```
+
+### 自定义构建插件
+新增 Feature 模块时，使用约定插件简化配置：
+```kotlin
+// feature-xxx/build.gradle.kts
+plugins {
+    id("youkong.android.feature")  // 自动包含 Compose、Hilt、Navigation 等
+}
+```
+
+### Agent 数据收集权限流程
+1. 应用启动时 `YouKongApplication` 监听权限状态
+2. 权限授予后自动调度 `DataCollectWorker`（15分钟间隔）
+3. Worker 调用各 Collector 收集数据
+4. 通过 `StatusSyncWorker` 上报到 `/api/v1/agent/status`
+5. 权限撤销时自动取消 Worker
+
+### SSE 流式输出处理
+福尔摩斯推理使用 SSE（Server-Sent Events）流式返回：
+```kotlin
+agentSseClient.streamAgentStatus(request)
+    .catch { /* 错误处理 */ }
+    .collect { event ->
+        when (event.event) {
+            "phase" -> // 阶段标题
+            "clue" -> // 发现的线索
+            "thinking" -> // 推理过程
+            "conclusion" -> // 结论
+            "result" -> // 最终结果（JSON）
+        }
+    }
+```
+
+### 推送通知集成
+使用腾讯移动推送 (TPNS)，需在 `local.properties` 配置：
+```properties
+TPNS_ACCESS_ID=1234567890
+TPNS_ACCESS_KEY=ABCDEFGH
+```
+
+设备 Token 在 `YouKongApplication.onCreate()` 中注册。

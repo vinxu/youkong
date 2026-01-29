@@ -20,8 +20,8 @@ actor APIClient {
     private init() {
 
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 60
+        config.timeoutIntervalForRequest = 120  // LLM 分析可能需要较长时间
+        config.timeoutIntervalForResource = 180
         self.session = URLSession(configuration: config)
 
         self.decoder = JSONDecoder()
@@ -92,10 +92,43 @@ actor APIClient {
             }
         }
 
+        // 处理空响应（当消息列表为空时，后端可能返回空响应体）
+        if data.isEmpty || data.count == 0 {
+            #if DEBUG
+            print("[APIClient] Empty response detected, returning empty array for type: \(T.self)")
+            #endif
+
+            // 特殊处理数组类型
+            if T.self == [Message].self {
+                return [] as! T
+            }
+            if T.self == [Conversation].self {
+                return [] as! T
+            }
+            if T.self == EmptyResponse.self {
+                return EmptyResponse() as! T
+            }
+
+            throw APIError.invalidResponse
+        }
+
         let apiResponse: APIResponse<T>
         do {
             apiResponse = try decoder.decode(APIResponse<T>.self, from: data)
         } catch {
+            #if DEBUG
+            print("[APIClient] Decoding failed for type: \(T.self), error: \(error)")
+            print("[APIClient] Data: \(String(data: data, encoding: .utf8) ?? "Unable to decode data")")
+            #endif
+
+            // 如果解码失败且是数组类型，返回空数组
+            if T.self == [Message].self {
+                return [] as! T
+            }
+            if T.self == [Conversation].self {
+                return [] as! T
+            }
+
             throw APIError.decodingError(error)
         }
 
@@ -104,6 +137,15 @@ actor APIClient {
                 if T.self == EmptyResponse.self {
                     return EmptyResponse() as! T
                 }
+
+                // 如果 data 为 nil 且期望的是数组类型，返回空数组
+                if T.self == [Message].self {
+                    return [] as! T
+                }
+                if T.self == [Conversation].self {
+                    return [] as! T
+                }
+
                 throw APIError.invalidResponse
             }
             return responseData

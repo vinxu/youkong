@@ -61,11 +61,11 @@ struct RootView: View {
                 }
             }
         }
-        #if DEBUG
-        .withNetworkOverlay()
-        .withDebugButton()
-        .shakeToDebug()
-        #endif
+        // #if DEBUG
+        // .withNetworkOverlay()
+        // .withDebugButton()
+        // .shakeToDebug()
+        // #endif
     }
 
     private func startDataCollection() {
@@ -74,10 +74,20 @@ struct RootView: View {
             LocationDataCollector.shared.startMonitoring()
         }
 
-        // 启动屏幕使用数据收集
-        if permissionManager.status.screenTime {
-            ScreenDataCollector.shared.startMonitoring()
+        // ⚠️ 屏幕使用数据收集已禁用（方案 C）
+        // if permissionManager.status.screenTime {
+        //     ScreenDataCollector.shared.startMonitoring()
+        // }
+
+        // 启动运动数据收集
+        if permissionManager.status.motion {
+            MovementDataCollector.shared.startMonitoring()
         }
+
+        // 启动设备状态收集（无需权限）
+        DeviceStatusCollector.shared.startMonitoring()
+
+        // 日历数据收集器在查询时自动获取，无需启动监控
 
         // 启动 WebSocket 连接
         WebSocketManager.shared.connect()
@@ -96,21 +106,35 @@ struct RootView: View {
     }
 
     private func reportStatus() async {
-        let screenStatus = ScreenDataCollector.shared.getCurrentStatus()
+        print("=== [STATUS REPORT] Starting ===")
+        // ⚠️ 屏幕数据已禁用（方案 C）
+        // let screenStatus = ScreenDataCollector.shared.getCurrentStatus()
         let locationStatus = LocationDataCollector.shared.getCurrentStatus()
         let deviceStatus = DeviceStatusCollector.shared.getCurrentStatus()
+        let calendarStatus = CalendarDataCollector.shared.getCurrentStatus()
+        let movementStatus = MovementDataCollector.shared.getCurrentStatus()
 
-        let screenData = ScreenRequestData(
-            isActive: screenStatus.isActive,
-            activityType: screenStatus.activityType.rawValue,
-            sessionDurationMinutes: screenStatus.sessionDurationMinutes,
-            lastActiveMinutesAgo: screenStatus.lastActiveMinutesAgo,
-            lastActiveCategory: screenStatus.lastActiveCategory
-        )
+        // print("[STATUS] Screen: active=\(screenStatus.isActive), type=\(screenStatus.activityType.rawValue), duration=\(screenStatus.sessionDurationMinutes)min")
+        print("[STATUS] Location: \(locationStatus.placeName ?? locationStatus.placeType.rawValue), since=\(locationStatus.atPlaceSinceMinutes)min")
+        print("[STATUS] Calendar: hasEvent=\(calendarStatus.hasCurrentEvent), remaining=\(calendarStatus.todayRemainingCount)")
+        print("[STATUS] Movement: moving=\(movementStatus.isMoving), steps=\(movementStatus.stepsToday), type=\(movementStatus.movementType.rawValue)")
+        print("[STATUS] Battery: \(Int(deviceStatus.batteryLevel * 100))%, charging=\(deviceStatus.isCharging)")
+
+        // ⚠️ 不上报屏幕数据（方案 C）
+        let screenData: ScreenRequestData? = nil
 
         let locationData = LocationRequestData(
             placeType: locationStatus.placeType.rawValue,
             atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes
+        )
+
+        // 扩展位置数据（包含地点名称和坐标）
+        let extendedLocationData = ExtendedLocationRequestData(
+            placeType: locationStatus.placeType.rawValue,
+            placeName: locationStatus.placeName,
+            atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes,
+            latitude: locationStatus.latitude,
+            longitude: locationStatus.longitude
         )
 
         let batteryData = BatteryRequestData(
@@ -133,21 +157,57 @@ struct RootView: View {
             screenBrightness: deviceStatus.screenBrightness
         )
 
+        // 日历数据（如果有权限）
+        let calendarData: CalendarRequestData?
+        if calendarStatus.todayRemainingCount >= 0 {
+            calendarData = CalendarRequestData(
+                hasCurrentEvent: calendarStatus.hasCurrentEvent,
+                currentEventTitle: calendarStatus.currentEventTitle,
+                eventEndMinutes: calendarStatus.eventEndMinutes,
+                nextEventInMinutes: calendarStatus.nextEventInMinutes,
+                todayRemainingCount: calendarStatus.todayRemainingCount
+            )
+        } else {
+            calendarData = nil
+        }
+
+        // 运动数据（如果有权限）
+        let movementData: MovementRequestData?
+        if movementStatus.stepsToday >= 0 {
+            movementData = MovementRequestData(
+                isMoving: movementStatus.isMoving,
+                movementType: movementStatus.movementType.rawValue,
+                stepsToday: movementStatus.stepsToday,
+                stepsLastHour: movementStatus.stepsLastHour,
+                stationaryMinutes: movementStatus.stationaryMinutes
+            )
+        } else {
+            movementData = nil
+        }
+
         let request = StatusReportRequest(
             screen: screenData,
             location: locationData,
+            extendedLocation: extendedLocationData,
             battery: batteryData,
             mode: modeData,
             connection: connectionData,
-            display: displayData
+            display: displayData,
+            calendar: calendarData,
+            movement: movementData
         )
 
         do {
             let repository = AgentRepositoryImpl()
-            _ = try await repository.reportStatus(request: request)
+            let response = try await repository.reportStatus(request: request)
+            print("[STATUS] ✓ Report success, nextReportIn: \(response.nextReportIn)s")
+            if let analysis = response.analysis {
+                print("[STATUS] Server analysis: \(analysis.availability.status) (\(analysis.availability.probability)%) - \(analysis.availability.reason)")
+            }
         } catch {
-            print("Failed to report status: \(error)")
+            print("[STATUS] ✗ Report failed: \(error)")
         }
+        print("=== [STATUS REPORT] Completed ===\n")
     }
 }
 

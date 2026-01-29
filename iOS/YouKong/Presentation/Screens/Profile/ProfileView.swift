@@ -4,60 +4,95 @@ struct ProfileView: View {
     @EnvironmentObject private var authManager: AuthManager
     @State private var showEditProfile = false
     @State private var showLogoutConfirm = false
+    @State private var showAgentData = false
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: UIConstants.Spacing.xxl) {
-                if let user = authManager.currentUser {
-                    ProfileHeaderView(user: user)
-                        .onTapGesture {
-                            showEditProfile = true
+        VStack(spacing: 0) {
+            // Terminal Header
+            CLIHeaderView(title: "我的", subtitle: authManager.currentUser?.nickname)
+
+            ScrollView {
+                VStack(spacing: 16) {
+                    if let user = authManager.currentUser {
+                        ProfileHeaderView(user: user)
+                            .onTapGesture {
+                                showEditProfile = true
+                            }
+                    }
+
+                    VStack(spacing: 0) {
+                        ProfileMenuItem(
+                            icon: "person.badge.plus",
+                            title: "邀请好友",
+                            destination: AnyView(MyInviteView())
+                        )
+
+                        CLISeparatorView()
+
+                        ProfileMenuItem(
+                            icon: "person.2",
+                            title: "好友管理",
+                            destination: AnyView(FriendsManagementView())
+                        )
+
+                        CLISeparatorView()
+
+                        Button {
+                            showAgentData = true
+                        } label: {
+                            HStack(spacing: 0) {
+                                Text(ASCII.arrowRight)
+                                    .font(.cliBody)
+                                    .foregroundColor(CLIColors.green)
+                                    .frame(width: 30)
+
+                                Text("Agent 数据分析")
+                                    .font(.cliBody)
+                                    .foregroundColor(CLIColors.textPrimary)
+
+                                Spacer()
+
+                                Text("[" + ASCII.arrowRight + "]")
+                                    .font(.cliCaption)
+                                    .foregroundColor(CLIColors.textSecondary)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            .background(CLIColors.backgroundSecondary)
                         }
-                }
 
-                VStack(spacing: 0) {
-                    ProfileMenuItem(
-                        icon: "person.badge.plus",
-                        title: "邀请好友",
-                        destination: AnyView(MyInviteView())
-                    )
+                        CLISeparatorView()
 
-                    Divider()
-                        .padding(.leading, 56)
+                        ProfileMenuItem(
+                            icon: "gearshape",
+                            title: "设置",
+                            destination: AnyView(SettingsView())
+                        )
+                    }
+                    .background(CLIColors.backgroundSecondary)
 
-                    ProfileMenuItem(
-                        icon: "person.2",
-                        title: "好友管理",
-                        destination: AnyView(FriendsManagementView())
-                    )
-
-                    Divider()
-                        .padding(.leading, 56)
-
-                    ProfileMenuItem(
-                        icon: "gearshape",
-                        title: "设置",
-                        destination: AnyView(SettingsView())
-                    )
-                }
-                .background(Color(.systemBackground))
-                .cornerRadius(UIConstants.CornerRadius.md)
-
-                Button {
-                    showLogoutConfirm = true
-                } label: {
-                    Text("退出登录")
-                        .foregroundColor(.red)
+                    Button {
+                        showLogoutConfirm = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text("[ 退出登录 ]")
+                                .font(.cliButton)
+                        }
+                        .foregroundColor(CLIColors.red)
                         .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color(.systemBackground))
-                        .cornerRadius(UIConstants.CornerRadius.md)
+                        .padding(.vertical, 12)
+                        .background(CLIColors.backgroundSecondary)
+                        .overlay(
+                            Rectangle()
+                                .stroke(CLIColors.red.opacity(0.3), lineWidth: 1)
+                        )
+                    }
                 }
+                .padding(16)
             }
-            .padding(UIConstants.Spacing.lg)
         }
-        .background(Color(.systemGroupedBackground))
-        .navigationTitle("我的")
+        .background(CLIColors.background)
+        .navigationBarHidden(true)
         .sheet(isPresented: $showEditProfile) {
             if let user = authManager.currentUser {
                 EditProfileView(user: user)
@@ -71,6 +106,9 @@ struct ProfileView: View {
         } message: {
             Text("确定要退出登录吗？")
         }
+        .sheet(isPresented: $showAgentData) {
+            MyAgentDataSheet()
+        }
     }
 }
 
@@ -78,27 +116,90 @@ struct ProfileHeaderView: View {
     let user: User
 
     var body: some View {
-        HStack(spacing: UIConstants.Spacing.lg) {
-            AvatarView(url: user.avatar, size: 70)
+        VStack(spacing: 0) {
+            // User Info Box with ASCII borders
+            VStack(alignment: .leading, spacing: 2) {
+                // Top border
+                HStack(spacing: 0) {
+                    Text(ASCII.boxTopLeft)
+                    Text(ASCII.separator + " 用户信息 ")
+                    Text(String(repeating: ASCII.boxHorizontal, count: 25))
+                    Text(ASCII.boxTopRight)
+                }
+                .font(.cliCaption)
+                .foregroundColor(CLIColors.border)
 
-            VStack(alignment: .leading, spacing: UIConstants.Spacing.sm) {
-                Text(user.nickname)
-                    .font(.title2)
-                    .fontWeight(.bold)
+                // Status dot + Name
+                HStack(spacing: 0) {
+                    Text(ASCII.boxVertical)
+                        .foregroundColor(CLIColors.border)
+                    Text(" ")
+                    Text(ASCII.bullet)
+                        .foregroundColor(CLIColors.green)
+                    Text(" \(user.nickname)")
+                        .font(.cliHeadline)
+                        .foregroundColor(CLIColors.textPrimary)
+                    Spacer()
+                    Text(ASCII.boxVertical)
+                        .foregroundColor(CLIColors.border)
+                }
+                .font(.cliCaption)
+                .frame(maxWidth: .infinity)
 
-                Text(user.phone)
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
+                // Phone
+                HStack(spacing: 0) {
+                    Text(ASCII.boxVertical)
+                        .foregroundColor(CLIColors.border)
+                    Text(" 📱 \(maskPhone(user.phone))")
+                        .font(.cliBodySmall)
+                        .foregroundColor(CLIColors.textSecondary)
+                    Spacer()
+                    Text(ASCII.boxVertical)
+                        .foregroundColor(CLIColors.border)
+                }
+                .font(.cliCaption)
+                .frame(maxWidth: .infinity)
+
+                // Created date
+                HStack(spacing: 0) {
+                    Text(ASCII.boxVertical)
+                        .foregroundColor(CLIColors.border)
+                    Text(" 📅 \(formatDate(user.createdAt))")
+                        .font(.cliBodySmall)
+                        .foregroundColor(CLIColors.textSecondary)
+                    Spacer()
+                    Text(ASCII.boxVertical)
+                        .foregroundColor(CLIColors.border)
+                }
+                .font(.cliCaption)
+                .frame(maxWidth: .infinity)
+
+                // Bottom border
+                HStack(spacing: 0) {
+                    Text(ASCII.boxBottomLeft)
+                    Text(String(repeating: ASCII.boxHorizontal, count: 38))
+                    Text(ASCII.boxBottomRight)
+                }
+                .font(.cliCaption)
+                .foregroundColor(CLIColors.border)
             }
-
-            Spacer()
-
-            Image(systemName: "chevron.right")
-                .foregroundColor(.secondary)
+            .padding(.vertical, 16)
+            .padding(.horizontal, 8)
         }
-        .padding()
-        .background(Color(.systemBackground))
-        .cornerRadius(UIConstants.CornerRadius.md)
+        .background(CLIColors.backgroundSecondary)
+    }
+
+    private func maskPhone(_ phone: String) -> String {
+        guard phone.count >= 11 else { return phone }
+        let prefix = phone.prefix(3)
+        let suffix = phone.suffix(4)
+        return "\(prefix)****\(suffix)"
+    }
+
+    private func formatDate(_ date: Date) -> String {
+        let displayFormatter = DateFormatter()
+        displayFormatter.dateFormat = "yyyy-MM-dd"
+        return displayFormatter.string(from: date)
     }
 }
 
@@ -109,21 +210,25 @@ struct ProfileMenuItem: View {
 
     var body: some View {
         NavigationLink(destination: destination) {
-            HStack(spacing: UIConstants.Spacing.md) {
-                Image(systemName: icon)
-                    .font(.title3)
-                    .foregroundColor(.primaryGreen)
-                    .frame(width: 32)
+            HStack(spacing: 0) {
+                Text(ASCII.arrowRight)
+                    .font(.cliBody)
+                    .foregroundColor(CLIColors.green)
+                    .frame(width: 30)
 
                 Text(title)
-                    .foregroundColor(.primary)
+                    .font(.cliBody)
+                    .foregroundColor(CLIColors.textPrimary)
 
                 Spacer()
 
-                Image(systemName: "chevron.right")
-                    .foregroundColor(.secondary)
+                Text("[\(ASCII.arrowRight)]")
+                    .font(.cliCaption)
+                    .foregroundColor(CLIColors.textSecondary)
             }
-            .padding()
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(CLIColors.backgroundSecondary)
         }
     }
 }

@@ -158,3 +158,112 @@ data class FreeProbabilityResponse(
     @SerialName("generated_at")
     val generatedAt: Long, // 毫秒时间戳
 )
+
+// ========== SSE 流式推理数据结构 ==========
+
+/**
+ * SSE 事件类型
+ */
+enum class SseEventType {
+    PHASE,      // 阶段开始
+    CLUE,       // 线索
+    FEATURE,    // 特征
+    THINKING,   // 思考过程
+    CONCLUSION, // 结论
+    DONE,       // 完成
+    ERROR,      // 错误
+}
+
+/**
+ * SSE 阶段
+ */
+enum class SsePhase {
+    COLLECTING,  // 收集线索
+    EXTRACTING,  // 提取特征
+    REASONING,   // LLM 推理
+    DONE,        // 完成
+}
+
+/**
+ * SSE 事件
+ */
+@Serializable
+data class SseEvent(
+    val type: String,
+    val phase: String? = null,
+    val content: String? = null,
+    val result: HolmesFullResult? = null,
+)
+
+/**
+ * Holmes 完整结果（包含所有分析数据）
+ */
+@Serializable
+data class HolmesFullResult(
+    @SerialName("raw_data")
+    val rawData: HolmesRawData? = null,
+    val features: HolmesFeatures? = null,
+    val reasoning: HolmesReasoning? = null,
+    val result: HolmesResult? = null,
+    @SerialName("generated_at")
+    val generatedAt: String? = null,
+)
+
+/**
+ * Holmes 原始数据
+ */
+@Serializable
+data class HolmesRawData(
+    val timestamp: String? = null,
+    val weekday: String? = null,
+    @SerialName("time_period")
+    val timePeriod: String? = null,
+    @SerialName("is_weekend")
+    val isWeekend: Boolean = false,
+    @SerialName("place_type")
+    val placeType: String? = null,
+    @SerialName("screen_active")
+    val screenActive: Boolean = false,
+    @SerialName("activity_type")
+    val activityType: String? = null,
+    @SerialName("battery_level")
+    val batteryLevel: Int = 0,
+)
+
+/**
+ * Holmes 特征
+ */
+@Serializable
+data class HolmesFeatures(
+    @SerialName("location_type")
+    val locationType: String? = null,
+    @SerialName("movement_state")
+    val movementState: String? = null,
+    @SerialName("time_period")
+    val timePeriod: String? = null,
+    val activity: String? = null,
+    val schedule: String? = null,
+    @SerialName("device_state")
+    val deviceState: String? = null,
+)
+
+/**
+ * Holmes 推理过程
+ */
+@Serializable
+data class HolmesReasoning(
+    val model: String? = null,
+    val thinking: String? = null,
+    val conclusion: String? = null,
+)
+
+/**
+ * Holmes 最终结果
+ */
+@Serializable
+data class HolmesResult(
+    val available: Boolean = false,
+    val probability: Int = 0,
+    val confidence: String = "low",
+    val summary: String = "",
+)

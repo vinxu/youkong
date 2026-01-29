@@ -11,8 +11,13 @@ class LocationDataCollector: NSObject, ObservableObject {
     @Published private(set) var isMonitoring = false
 
     private let locationManager = CLLocationManager()
+    private let geocoder = CLGeocoder()
     private(set) var currentLocation: CLLocation?
     private var arrivalTime: Date?
+
+    // 反向地理编码缓存
+    private var lastGeocodedLocation: CLLocation?
+    private var lastGeocodedPlaceName: String?
 
     // 学习到的地点（公开给调试视图）
     private(set) var homeLocation: CLLocation?
@@ -144,9 +149,13 @@ class LocationDataCollector: NSObject, ObservableObject {
 
         let atPlaceSinceMinutes = Int(Date().timeIntervalSince(arrivalTime ?? Date()) / 60)
 
+        // 更新状态（先用缓存的地点名称）
         currentStatus = LocationStatus(
             placeType: placeType,
-            atPlaceSinceMinutes: atPlaceSinceMinutes
+            atPlaceSinceMinutes: atPlaceSinceMinutes,
+            placeName: lastGeocodedPlaceName,
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude
         )
 
         currentLocation = location
@@ -154,6 +163,55 @@ class LocationDataCollector: NSObject, ObservableObject {
         // 尝试学习地点
         learnHomeLocation()
         learnWorkLocation()
+
+        // 异步获取地点名称（避免频繁调用）
+        reverseGeocodeIfNeeded(location)
+    }
+
+    // MARK: - Reverse Geocoding
+
+    private func reverseGeocodeIfNeeded(_ location: CLLocation) {
+        // 如果距离上次地理编码位置超过 200 米，才重新编码
+        if let lastLocation = lastGeocodedLocation {
+            let distance = location.distance(from: lastLocation)
+            if distance < 200 {
+                return
+            }
+        }
+
+        lastGeocodedLocation = location
+
+        geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, error in
+            guard let self = self, let placemark = placemarks?.first else {
+                return
+            }
+
+            // 构建地点名称
+            var placeName = ""
+            if let name = placemark.name {
+                placeName = name
+            } else if let thoroughfare = placemark.thoroughfare {
+                placeName = thoroughfare
+                if let subThoroughfare = placemark.subThoroughfare {
+                    placeName = "\(thoroughfare)\(subThoroughfare)"
+                }
+            } else if let locality = placemark.locality {
+                placeName = locality
+            }
+
+            DispatchQueue.main.async {
+                self.lastGeocodedPlaceName = placeName.isEmpty ? nil : placeName
+
+                // 更新状态包含地点名称
+                self.currentStatus = LocationStatus(
+                    placeType: self.currentStatus.placeType,
+                    atPlaceSinceMinutes: self.currentStatus.atPlaceSinceMinutes,
+                    placeName: self.lastGeocodedPlaceName,
+                    latitude: location.coordinate.latitude,
+                    longitude: location.coordinate.longitude
+                )
+            }
+        }
     }
 }
 

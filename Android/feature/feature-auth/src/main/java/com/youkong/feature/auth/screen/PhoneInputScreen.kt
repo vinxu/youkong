@@ -1,5 +1,6 @@
 package com.youkong.feature.auth.screen
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -8,7 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -16,14 +17,19 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.youkong.core.ui.component.YouKongButton
-import com.youkong.core.ui.component.YouKongPhoneTextField
-import com.youkong.core.ui.theme.Primary
-import com.youkong.core.ui.theme.TextSecondary
+import com.youkong.core.ui.component.cli.LabeledTerminalTextField
+import com.youkong.core.ui.component.cli.TerminalButton
+import com.youkong.core.ui.component.cli.TerminalButtonStyle
+import com.youkong.core.ui.theme.ASCII
+import com.youkong.core.ui.theme.CLIColors
 import com.youkong.core.ui.theme.YouKongTheme
 import com.youkong.feature.auth.viewmodel.PhoneInputViewModel
 
@@ -41,59 +47,85 @@ fun PhoneInputScreen(
         }
     }
 
-    Scaffold { innerPadding ->
+    Scaffold(
+        containerColor = CLIColors.Background
+    ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .background(CLIColors.Background)
                 .padding(innerPadding)
                 .padding(horizontal = YouKongTheme.spacing.xxl)
                 .imePadding(),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            // Logo
+            // ASCII Logo
             Text(
-                text = "有空",
-                style = MaterialTheme.typography.displayMedium,
-                color = Primary,
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "把「我想见你」变成「我有空，你看着办」",
-                style = MaterialTheme.typography.bodyMedium,
-                color = TextSecondary,
+                text = """
+                    ╦ ╦╔═╗╦ ╦╦╔═╔═╗╔╗╔╔═╗
+                    ╚╦╝║ ║║ ║╠╩╗║ ║║║║║ ╦
+                     ╩ ╚═╝╚═╝╩ ╩╚═╝╝╚╝╚═╝
+                """.trimIndent(),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = CLIColors.Green,
+                lineHeight = 16.sp,
                 textAlign = TextAlign.Center,
-            )
-
-            Spacer(modifier = Modifier.height(48.dp))
-
-            YouKongPhoneTextField(
-                value = uiState.phone,
-                onValueChange = viewModel::onPhoneChange,
-                error = uiState.error,
-                enabled = !uiState.isLoading,
-                onImeAction = viewModel::sendSms,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            YouKongButton(
-                text = "获取验证码",
-                onClick = viewModel::sendSms,
-                enabled = uiState.phone.length == 11,
-                loading = uiState.isLoading,
-                modifier = Modifier.fillMaxWidth(),
             )
 
             Spacer(modifier = Modifier.height(16.dp))
 
             Text(
-                text = "登录即表示同意《用户协议》和《隐私政策》",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
+                text = "${ASCII.ARROW_RIGHT} 把「我想见你」变成「我有空，你看着办」",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
+                color = CLIColors.TextSecondary,
+                textAlign = TextAlign.Center,
+            )
+
+            Spacer(modifier = Modifier.height(48.dp))
+
+            // Phone Input
+            LabeledTerminalTextField(
+                label = "PHONE_NUMBER:",
+                value = uiState.phone,
+                onValueChange = viewModel::onPhoneChange,
+                placeholder = "请输入手机号",
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            // Error Message
+            if (uiState.error != null) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "${ASCII.CROSS} ${uiState.error}",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = CLIColors.Red,
+                )
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Send SMS Button
+            TerminalButton(
+                text = if (uiState.isLoading) "[SENDING...]" else "[GET_VERIFICATION_CODE]",
+                onClick = viewModel::sendSms,
+                enabled = uiState.phone.length == 11 && !uiState.isLoading,
+                style = TerminalButtonStyle.PRIMARY,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Text(
+                text = "${ASCII.INFO} 登录即表示同意《用户协议》和《隐私政策》",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                color = CLIColors.TextWeak,
                 textAlign = TextAlign.Center,
             )
         }

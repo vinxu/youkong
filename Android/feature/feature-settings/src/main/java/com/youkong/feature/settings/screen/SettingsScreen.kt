@@ -1,6 +1,7 @@
 package com.youkong.feature.settings.screen
 
 import android.app.Activity
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -10,26 +11,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -40,17 +25,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.dp
-import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import com.youkong.core.ui.theme.Error
-import com.youkong.core.ui.theme.Success
-import com.youkong.core.ui.theme.TextSecondary
+import com.youkong.core.ui.component.cli.TerminalButton
+import com.youkong.core.ui.component.cli.TerminalButtonStyle
+import com.youkong.core.ui.component.cli.TerminalDivider
+import com.youkong.core.ui.component.cli.TerminalHeader
+import com.youkong.core.ui.component.cli.TerminalSectionDivider
+import com.youkong.core.ui.theme.ASCII
+import com.youkong.core.ui.theme.CLIColors
 import com.youkong.feature.settings.viewmodel.SettingsViewModel
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     onBackClick: () -> Unit,
@@ -77,95 +67,122 @@ fun SettingsScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("设置") },
-                navigationIcon = {
-                    IconButton(onClick = onBackClick) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回",
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-            )
-        },
-    ) { paddingValues ->
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(CLIColors.Background)
+            .statusBarsPadding()
+    ) {
+        // Terminal Header
+        TerminalHeader(
+            title = "$ settings --config",
+            showBackButton = true,
+            onBackClick = onBackClick
+        )
+
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .background(CLIColors.Background),
+            verticalArrangement = Arrangement.spacedBy(0.dp),
         ) {
-            // 权限状态卡片
+            // 权限状态
             item {
-                PermissionStatusCard(
+                PermissionStatusItem(
                     allPermissionsGranted = uiState.permissionState.allCorePermissionsGranted,
                     onClick = onPermissionSetupClick,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
             }
 
-            // 邀请好友
+            item { TerminalDivider() }
+
+            // 好友
             item {
-                SettingsSection(title = "好友") {
-                    SettingsClickItem(
-                        title = "邀请好友",
-                        subtitle = "创建邀请链接，分享给朋友",
-                        onClick = onInvitationClick,
-                    )
-                }
+                TerminalSectionDivider(
+                    title = "FRIENDS",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                )
             }
 
-            // 数据收集开关
             item {
-                SettingsSection(title = "隐私") {
-                    SettingsSwitchItem(
-                        title = "数据收集",
-                        subtitle = "允许收集屏幕使用和位置数据以预测有空状态",
-                        checked = uiState.isDataCollectionEnabled,
-                        onCheckedChange = { viewModel.setDataCollectionEnabled(it) },
-                    )
-                    SettingsClickItem(
-                        title = "我的 Agent 数据",
-                        subtitle = "查看当前收集到的数据",
-                        onClick = onAgentDataClick,
-                    )
-                }
+                SettingsClickItem(
+                    title = "邀请好友",
+                    subtitle = "创建邀请链接，分享给朋友",
+                    onClick = onInvitationClick,
+                )
             }
 
-            // 电池优化
+            item { TerminalDivider() }
+
+            // 隐私
             item {
-                SettingsSection(title = "系统") {
-                    SettingsClickItem(
-                        title = "电池优化",
-                        subtitle = "关闭电池优化以保证后台运行",
-                        onClick = {
-                            (context as? Activity)?.let {
-                                viewModel.openBatteryOptimizationSettings(it)
-                            }
-                        },
-                    )
-                }
+                TerminalSectionDivider(
+                    title = "PRIVACY",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                )
             }
 
-            // 退出登录
             item {
-                SettingsSection(title = "账户") {
-                    SettingsClickItem(
-                        title = "退出登录",
-                        subtitle = uiState.nickname,
-                        onClick = { showLogoutDialog = true },
-                        isDestructive = true,
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(32.dp))
+                SettingsSwitchItem(
+                    title = "数据收集",
+                    subtitle = "允许收集屏幕使用和位置数据以预测有空状态",
+                    checked = uiState.isDataCollectionEnabled,
+                    onCheckedChange = { viewModel.setDataCollectionEnabled(it) },
+                )
             }
+
+            item { TerminalDivider() }
+
+            item {
+                SettingsClickItem(
+                    title = "我的 Agent 数据",
+                    subtitle = "查看当前收集到的数据",
+                    onClick = onAgentDataClick,
+                )
+            }
+
+            item { TerminalDivider() }
+
+            // 系统
+            item {
+                TerminalSectionDivider(
+                    title = "SYSTEM",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                )
+            }
+
+            item {
+                SettingsClickItem(
+                    title = "电池优化",
+                    subtitle = "关闭电池优化以保证后台运行",
+                    onClick = {
+                        (context as? Activity)?.let {
+                            viewModel.openBatteryOptimizationSettings(it)
+                        }
+                    },
+                )
+            }
+
+            item { TerminalDivider() }
+
+            // 账户
+            item {
+                TerminalSectionDivider(
+                    title = "ACCOUNT",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                )
+            }
+
+            item {
+                SettingsClickItem(
+                    title = "退出登录",
+                    subtitle = uiState.nickname,
+                    onClick = { showLogoutDialog = true },
+                    isDestructive = true,
+                )
+            }
+
+            item { Spacer(modifier = Modifier.height(32.dp)) }
         }
     }
 
@@ -173,112 +190,96 @@ fun SettingsScreen(
     if (showLogoutDialog) {
         AlertDialog(
             onDismissRequest = { showLogoutDialog = false },
-            title = { Text("退出登录") },
-            text = { Text("确定要退出登录吗？") },
+            title = {
+                Text(
+                    text = "$ logout --confirm",
+                    fontFamily = FontFamily.Monospace,
+                    color = CLIColors.TextPrimary
+                )
+            },
+            text = {
+                Text(
+                    text = "Are you sure? [y/N]",
+                    fontFamily = FontFamily.Monospace,
+                    color = CLIColors.TextSecondary
+                )
+            },
             confirmButton = {
-                TextButton(
+                TerminalButton(
+                    text = "Y",
                     onClick = {
                         viewModel.logout()
                         showLogoutDialog = false
-                    }
-                ) {
-                    Text("退出", color = Error)
-                }
+                    },
+                    style = TerminalButtonStyle.DANGER
+                )
             },
             dismissButton = {
-                TextButton(onClick = { showLogoutDialog = false }) {
-                    Text("取消")
-                }
+                TerminalButton(
+                    text = "N",
+                    onClick = { showLogoutDialog = false },
+                    style = TerminalButtonStyle.GHOST
+                )
             },
+            containerColor = CLIColors.Background
         )
     }
 }
 
 @Composable
-private fun PermissionStatusCard(
+private fun PermissionStatusItem(
     allPermissionsGranted: Boolean,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier,
 ) {
-    Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(
-            containerColor = if (allPermissionsGranted) {
-                Success.copy(alpha = 0.1f)
-            } else {
-                Error.copy(alpha = 0.1f)
-            }
-        ),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                imageVector = if (allPermissionsGranted) {
-                    Icons.Default.CheckCircle
-                } else {
-                    Icons.Default.Warning
-                },
-                contentDescription = null,
-                tint = if (allPermissionsGranted) Success else Error,
-                modifier = Modifier.size(24.dp),
-            )
-
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 12.dp),
-            ) {
-                Text(
-                    text = if (allPermissionsGranted) "权限已就绪" else "需要权限",
-                    style = MaterialTheme.typography.titleMedium,
-                )
-                Text(
-                    text = if (allPermissionsGranted) {
-                        "所有必需权限已授予"
-                    } else {
-                        "点击设置权限以启用完整功能"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
-                )
-            }
-
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = null,
-                tint = TextSecondary,
-            )
-        }
+    val statusIcon = if (allPermissionsGranted) ASCII.CHECKMARK else ASCII.WARNING
+    val statusColor = if (allPermissionsGranted) CLIColors.Green else CLIColors.Red
+    val statusText = if (allPermissionsGranted) "GRANTED" else "REQUIRED"
+    val subtitle = if (allPermissionsGranted) {
+        "所有必需权限已授予"
+    } else {
+        "点击设置权限以启用完整功能"
     }
-}
 
-@Composable
-private fun SettingsSection(
-    title: String,
-    content: @Composable () -> Unit,
-) {
-    Column(
-        modifier = Modifier.padding(horizontal = 16.dp),
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CLIColors.Background)
+            .clickable(onClick = onClick)
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = title,
-            style = MaterialTheme.typography.titleSmall,
-            color = TextSecondary,
-            modifier = Modifier.padding(bottom = 8.dp),
+            text = statusIcon,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 18.sp,
+            color = statusColor,
         )
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface,
-            ),
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 12.dp),
         ) {
-            content()
+            Text(
+                text = "权限状态: $statusText",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 14.sp,
+                color = statusColor,
+            )
+            Text(
+                text = subtitle,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.TextSecondary,
+            )
         }
+
+        Text(
+            text = ASCII.ARROW_RIGHT,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 14.sp,
+            color = CLIColors.TextSecondary,
+        )
     }
 }
 
@@ -292,23 +293,33 @@ private fun SettingsSwitchItem(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(CLIColors.Background)
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.bodyLarge,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 14.sp,
+                color = CLIColors.TextPrimary,
             )
             Text(
                 text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.TextSecondary,
             )
         }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
+
+        Text(
+            text = if (checked) "[ON]" else "[OFF]",
+            fontFamily = FontFamily.Monospace,
+            fontSize = 14.sp,
+            color = if (checked) CLIColors.Green else CLIColors.TextSecondary,
+            modifier = Modifier
+                .padding(end = 8.dp)
+                .clickable { onCheckedChange(!checked) }
         )
     }
 }
@@ -323,6 +334,7 @@ private fun SettingsClickItem(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(CLIColors.Background)
             .clickable(onClick = onClick)
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -330,19 +342,23 @@ private fun SettingsClickItem(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.bodyLarge,
-                color = if (isDestructive) Error else MaterialTheme.colorScheme.onSurface,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 14.sp,
+                color = if (isDestructive) CLIColors.Red else CLIColors.TextPrimary,
             )
             Text(
                 text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.TextSecondary,
             )
         }
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = null,
-            tint = TextSecondary,
+
+        Text(
+            text = ASCII.ARROW_RIGHT,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 14.sp,
+            color = if (isDestructive) CLIColors.Red else CLIColors.TextSecondary,
         )
     }
 }

@@ -2,6 +2,9 @@ import Foundation
 import Combine
 import CoreLocation
 import Contacts
+import EventKit
+import CoreMotion
+import UIKit
 
 // MARK: - Permission Manager
 
@@ -14,6 +17,7 @@ class PermissionManager: NSObject, ObservableObject {
 
     private let locationManager = CLLocationManager()
     private var locationContinuation: CheckedContinuation<Bool, Never>?
+    private let eventStore = EKEventStore()
 
     override private init() {
         super.init()
@@ -26,30 +30,33 @@ class PermissionManager: NSObject, ObservableObject {
         isChecking = true
         defer { isChecking = false }
 
-        // 检查屏幕使用时间权限
-        status.screenTime = await checkScreenTimePermission()
+        // ⚠️ 屏幕使用时间权限已禁用（方案 C）
+        // status.screenTime = await checkScreenTimePermission()
 
         // 检查位置权限
         status.location = checkLocationPermission()
 
         // 检查通讯录权限
         status.contacts = checkContactsPermission()
+
+        // 检查日历权限
+        status.calendar = checkCalendarPermission()
+
+        // 检查运动权限
+        status.motion = checkMotionPermission()
     }
 
-    // MARK: - Screen Time Permission
+    // MARK: - Screen Time Permission (已禁用 - 方案 C)
 
-    /// 检查屏幕使用时间权限
+    /// ⚠️ 屏幕使用时间权限已禁用，始终返回 false
     private func checkScreenTimePermission() async -> Bool {
-        let collector = ScreenDataCollector.shared
-        await collector.checkAuthorization()
-        return collector.isAuthorized
+        return false
     }
 
+    /// ⚠️ 屏幕使用时间权限已禁用，始终返回 false
     func requestScreenTimePermission() async throws -> Bool {
-        let collector = ScreenDataCollector.shared
-        let granted = await collector.requestAuthorization()
-        status.screenTime = granted
-        return granted
+        status.screenTime = false
+        return false
     }
 
     // MARK: - Location Permission
@@ -104,15 +111,117 @@ class PermissionManager: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Calendar Permission
+
+    private func checkCalendarPermission() -> Bool {
+        let authStatus = EKEventStore.authorizationStatus(for: .event)
+        print("[Permission] Calendar status: \(authStatus.rawValue)")
+        if #available(iOS 17.0, *) {
+            return authStatus == .fullAccess || authStatus == .authorized
+        } else {
+            return authStatus == .authorized
+        }
+    }
+
+    func requestCalendarPermission() async throws -> Bool {
+        let currentStatus = EKEventStore.authorizationStatus(for: .event)
+        print("[Permission] Requesting calendar, current status: \(currentStatus.rawValue)")
+
+        // 如果已经被拒绝，需要引导用户去设置
+        if currentStatus == .denied || currentStatus == .restricted {
+            print("[Permission] Calendar denied, need to go to Settings")
+            status.calendar = false
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                await UIApplication.shared.open(url)
+            }
+            return false
+        }
+
+        // 使用 completion handler 版本，因为 async 版本可能有问题
+        return await withCheckedContinuation { continuation in
+            if #available(iOS 17.0, *) {
+                print("[Permission] Using iOS 17+ API with completion handler")
+                eventStore.requestFullAccessToEvents { [weak self] granted, error in
+                    print("[Permission] Calendar callback: granted=\(granted), error=\(String(describing: error))")
+                    Task { @MainActor in
+                        self?.status.calendar = granted
+                        continuation.resume(returning: granted)
+                    }
+                }
+            } else {
+                print("[Permission] Using legacy API with completion handler")
+                eventStore.requestAccess(to: .event) { [weak self] granted, error in
+                    print("[Permission] Calendar callback: granted=\(granted), error=\(String(describing: error))")
+                    Task { @MainActor in
+                        self?.status.calendar = granted
+                        continuation.resume(returning: granted)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Motion Permission
+
+    private func checkMotionPermission() -> Bool {
+        guard CMMotionActivityManager.isActivityAvailable() else {
+            print("[Permission] Motion not available on this device")
+            return false
+        }
+        let authStatus = CMMotionActivityManager.authorizationStatus()
+        print("[Permission] Motion status: \(authStatus.rawValue)")
+        return authStatus == .authorized
+    }
+
+    func requestMotionPermission() async -> Bool {
+        guard CMMotionActivityManager.isActivityAvailable() else {
+            print("[Permission] Motion not available")
+            status.motion = false
+            return false
+        }
+
+        let currentStatus = CMMotionActivityManager.authorizationStatus()
+        print("[Permission] Requesting motion, current status: \(currentStatus.rawValue)")
+
+        // 如果已经被拒绝，需要引导用户去设置
+        if currentStatus == .denied || currentStatus == .restricted {
+            print("[Permission] Motion denied, need to go to Settings")
+            status.motion = false
+            await MainActor.run {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            return false
+        }
+
+        let activityManager = CMMotionActivityManager()
+
+        return await withCheckedContinuation { continuation in
+            let now = Date()
+            let oneHourAgo = now.addingTimeInterval(-3600)
+
+            activityManager.queryActivityStarting(from: oneHourAgo, to: now, to: .main) { [weak self] _, error in
+                Task { @MainActor in
+                    if let error = error as NSError?,
+                       error.code == Int(CMErrorMotionActivityNotAuthorized.rawValue) {
+                        print("[Permission] Motion query denied")
+                        self?.status.motion = false
+                        continuation.resume(returning: false)
+                    } else {
+                        print("[Permission] Motion query succeeded")
+                        self?.status.motion = true
+                        continuation.resume(returning: true)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Request All Permissions
 
     func requestAllPermissions() async {
-        // 依次请求所有权限
-        do {
-            _ = try await requestScreenTimePermission()
-        } catch {
-            print("Screen time permission error: \(error)")
-        }
+        // 依次请求所有权限（已移除屏幕时间权限 - 方案 C）
 
         do {
             _ = try await requestLocationPermission()
@@ -125,6 +234,14 @@ class PermissionManager: NSObject, ObservableObject {
         } catch {
             print("Contacts permission error: \(error)")
         }
+
+        do {
+            _ = try await requestCalendarPermission()
+        } catch {
+            print("Calendar permission error: \(error)")
+        }
+
+        _ = await requestMotionPermission()
     }
 }
 

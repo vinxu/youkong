@@ -12,38 +12,25 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.youkong.core.domain.model.Invitation
 import com.youkong.core.domain.model.InvitationStatus
-import com.youkong.core.ui.component.YouKongEmojiAvatar
 import com.youkong.core.ui.component.YouKongLoading
-import com.youkong.core.ui.component.YouKongTopBar
-import com.youkong.core.ui.theme.CircleColors
-import com.youkong.core.ui.theme.Primary
-import com.youkong.core.ui.theme.TextPrimary
-import com.youkong.core.ui.theme.TextSecondary
-import com.youkong.core.ui.theme.YouKongTheme
+import com.youkong.core.ui.component.cli.TerminalHeader
+import com.youkong.core.ui.theme.ASCII
+import com.youkong.core.ui.theme.CLIColors
 import com.youkong.feature.invitation.viewmodel.InvitationListViewModel
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
@@ -56,40 +43,42 @@ fun InvitationListScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-    Scaffold(
-        topBar = {
-            YouKongTopBar(
-                title = "我的邀请",
-                onBackClick = onBackClick,
-            )
-        },
-    ) { innerPadding ->
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(CLIColors.Background)
+    ) {
+        TerminalHeader(
+            title = "MY_INVITATIONS",
+            showBackButton = true,
+            onBackClick = onBackClick,
+        )
+
         when {
             uiState.isLoading -> {
-                YouKongLoading(message = "加载中...")
+                YouKongLoading(message = "Loading invitations...")
             }
 
             uiState.invitations.isEmpty() -> {
                 Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding),
+                    modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = null,
-                            modifier = Modifier.size(64.dp),
-                            tint = TextSecondary,
+                        Text(
+                            text = ASCII.INFO,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 32.sp,
+                            color = CLIColors.TextSecondary,
                         )
                         Spacer(modifier = Modifier.height(16.dp))
                         Text(
-                            text = "暂无邀请链接",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = TextSecondary,
+                            text = "No invitations found",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 14.sp,
+                            color = CLIColors.TextSecondary,
                         )
                     }
                 }
@@ -97,14 +86,9 @@ fun InvitationListScreen(
 
             else -> {
                 LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(
-                        horizontal = YouKongTheme.spacing.xxl,
-                        vertical = 16.dp,
-                    ),
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    contentPadding = PaddingValues(16.dp),
                 ) {
                     items(uiState.invitations, key = { it.id }) { invitation ->
                         InvitationCard(
@@ -124,99 +108,129 @@ private fun InvitationCard(
     onClick: () -> Unit,
 ) {
     val circle = invitation.circle
+    val statusSymbol = when (invitation.status) {
+        InvitationStatus.ACTIVE -> ASCII.BULLET
+        InvitationStatus.DISABLED -> ASCII.CROSS
+        InvitationStatus.EXPIRED -> ASCII.BULLET_EMPTY
+    }
+    val statusColor = when (invitation.status) {
+        InvitationStatus.ACTIVE -> CLIColors.Green
+        InvitationStatus.DISABLED -> CLIColors.Red
+        InvitationStatus.EXPIRED -> CLIColors.TextSecondary
+    }
+    val statusText = when (invitation.status) {
+        InvitationStatus.ACTIVE -> "ACTIVE"
+        InvitationStatus.DISABLED -> "DISABLED"
+        InvitationStatus.EXPIRED -> "EXPIRED"
+    }
 
-    Card(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface,
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+            .clickable(onClick = onClick)
     ) {
+        // 顶部边框
+        Text(
+            text = ASCII.BOX_TOP_LEFT + ASCII.BOX_HORIZONTAL.repeat(48) + ASCII.BOX_TOP_RIGHT,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            color = CLIColors.Border,
+        )
+
+        // 内容区域
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(vertical = 8.dp),
+            verticalAlignment = Alignment.Top,
         ) {
-            if (circle != null) {
-                YouKongEmojiAvatar(
-                    emoji = circle.emoji,
-                    backgroundColor = CircleColors.fromHex(circle.color ?: "#3B82F6"),
-                    size = 48.dp,
-                )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(Primary.copy(alpha = 0.2f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = null,
-                        tint = Primary,
-                        modifier = Modifier.size(24.dp),
-                    )
-                }
-            }
+            // 左边框
+            Text(
+                text = ASCII.BOX_VERTICAL,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.Border,
+            )
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(8.dp))
 
-            Column(
-                modifier = Modifier.weight(1f),
-            ) {
-                Text(
-                    text = circle?.name ?: "通用邀请",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = TextPrimary,
-                )
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+            Column(modifier = Modifier.weight(1f)) {
+                // 标题行
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = "已使用 ${invitation.useCount}/${invitation.maxUses}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary,
+                        text = statusSymbol,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 14.sp,
+                        color = statusColor,
                     )
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    val statusText = when (invitation.status) {
-                        InvitationStatus.ACTIVE -> "有效"
-                        InvitationStatus.DISABLED -> "已禁用"
-                        InvitationStatus.EXPIRED -> "已过期"
-                    }
-                    val statusColor = when (invitation.status) {
-                        InvitationStatus.ACTIVE -> Primary
-                        InvitationStatus.DISABLED -> MaterialTheme.colorScheme.error
-                        InvitationStatus.EXPIRED -> TextSecondary
-                    }
-
                     Text(
-                        text = statusText,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = statusColor,
+                        text = circle?.name ?: "GENERAL_INVITE",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 14.sp,
+                        color = CLIColors.TextPrimary,
                     )
+
+                    if (circle != null) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = circle.emoji,
+                            fontSize = 14.sp,
+                        )
+                    }
                 }
 
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // 使用信息
+                Text(
+                    text = "Used: ${invitation.useCount}/${invitation.maxUses}  ${ASCII.BULLET}  Status: $statusText",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = CLIColors.TextSecondary,
+                )
+
+                // 有效期
                 val expiresAt = invitation.expiresAt
                 if (expiresAt != null) {
                     Spacer(modifier = Modifier.height(4.dp))
                     val localDateTime = expiresAt.toLocalDateTime(TimeZone.currentSystemDefault())
                     Text(
-                        text = "有效期至 ${localDateTime.monthNumber}/${localDateTime.dayOfMonth}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary,
+                        text = "Expires: ${localDateTime.year}-${localDateTime.monthNumber.toString().padStart(2, '0')}-${localDateTime.dayOfMonth.toString().padStart(2, '0')}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = CLIColors.TextWeak,
                     )
                 }
+
+                // 邀请码
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = ASCII.boxedText(invitation.code, 42),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    color = CLIColors.Green,
+                    lineHeight = 14.sp,
+                )
             }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // 右边框
+            Text(
+                text = ASCII.BOX_VERTICAL,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.Border,
+            )
         }
+
+        // 底部边框
+        Text(
+            text = ASCII.BOX_BOTTOM_LEFT + ASCII.BOX_HORIZONTAL.repeat(48) + ASCII.BOX_BOTTOM_RIGHT,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            color = CLIColors.Border,
+        )
     }
 }

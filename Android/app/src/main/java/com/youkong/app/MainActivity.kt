@@ -1,12 +1,17 @@
 package com.youkong.app
 
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
+import androidx.core.view.WindowCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.work.WorkManager
 import com.youkong.app.navigation.YouKongNavHost
@@ -30,10 +35,34 @@ class MainActivity : ComponentActivity() {
         installSplashScreen()
         super.onCreate(savedInstanceState)
 
-        enableEdgeToEdge()
+        // 设置系统栏为黑色终端风格
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(
+                scrim = Color.parseColor("#FF0D1117")
+            ),
+            navigationBarStyle = SystemBarStyle.dark(
+                scrim = Color.parseColor("#FF0D1117")
+            )
+        )
+
+        // 强制设置窗口颜色（确保生效）
+        window.statusBarColor = Color.parseColor("#0D1117")
+        window.navigationBarColor = Color.parseColor("#0D1117")
 
         setContent {
             YouKongTheme {
+                // 强制设置系统栏颜色（每次重组时执行）
+                SideEffect {
+                    val darkColor = Color.parseColor("#0D1117")
+                    window.statusBarColor = darkColor
+                    window.navigationBarColor = darkColor
+
+                    WindowCompat.getInsetsController(window, window.decorView).apply {
+                        isAppearanceLightStatusBars = false
+                        isAppearanceLightNavigationBars = false
+                    }
+                }
+
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = Background,

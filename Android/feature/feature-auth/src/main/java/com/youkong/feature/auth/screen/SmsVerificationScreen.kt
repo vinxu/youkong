@@ -1,6 +1,9 @@
 package com.youkong.feature.auth.screen
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,9 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -25,20 +26,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.youkong.core.ui.component.YouKongLoading
-import com.youkong.core.ui.component.YouKongTextButton
-import com.youkong.core.ui.component.YouKongTopBar
-import com.youkong.core.ui.theme.Border
-import com.youkong.core.ui.theme.Error
-import com.youkong.core.ui.theme.Primary
-import com.youkong.core.ui.theme.TextPrimary
-import com.youkong.core.ui.theme.TextSecondary
-import com.youkong.core.ui.theme.YouKongShapes
+import com.youkong.core.ui.component.cli.TerminalButton
+import com.youkong.core.ui.component.cli.TerminalButtonStyle
+import com.youkong.core.ui.theme.ASCII
+import com.youkong.core.ui.theme.CLIColors
 import com.youkong.core.ui.theme.YouKongTheme
 import com.youkong.feature.auth.viewmodel.SmsVerificationViewModel
 
@@ -63,85 +63,126 @@ fun SmsVerificationScreen(
     }
 
     Scaffold(
-        topBar = {
-            YouKongTopBar(
-                title = "验证码",
-                onBackClick = onBackClick,
-            )
-        }
+        containerColor = CLIColors.Background
     ) { innerPadding ->
-        if (uiState.isLoading) {
-            YouKongLoading(message = "验证中...")
-        } else {
-            Column(
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(CLIColors.Background)
+                .padding(innerPadding)
+                .padding(horizontal = YouKongTheme.spacing.xxl)
+                .imePadding(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Spacer(modifier = Modifier.height(48.dp))
+
+            // Back Button
+            TerminalButton(
+                text = "${ASCII.ARROW_LEFT} BACK",
+                onClick = onBackClick,
+                style = TerminalButtonStyle.GHOST,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Spacer(modifier = Modifier.height(32.dp))
+
+            // Header
+            Text(
+                text = "${ASCII.INFO} VERIFICATION_CODE_SENT_TO:",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
+                color = CLIColors.TextSecondary,
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = phone.replaceRange(3, 7, "****"),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 18.sp,
+                color = CLIColors.Green,
+            )
+
+            Spacer(modifier = Modifier.height(48.dp))
+
+            // Verification Code Label
+            Text(
+                text = "ENTER_6_DIGIT_CODE:",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
+                color = CLIColors.TextSecondary,
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-                    .padding(horizontal = YouKongTheme.spacing.xxl)
-                    .imePadding(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Spacer(modifier = Modifier.height(48.dp))
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+            )
 
-                Text(
-                    text = "验证码已发送至",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary,
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = phone.replaceRange(3, 7, "****"),
-                    style = MaterialTheme.typography.titleLarge,
-                    color = TextPrimary,
-                )
-
-                Spacer(modifier = Modifier.height(48.dp))
-
-                // 验证码输入框
-                BasicTextField(
-                    value = uiState.code,
-                    onValueChange = viewModel::onCodeChange,
-                    modifier = Modifier.focusRequester(focusRequester),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    decorationBox = {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            repeat(6) { index ->
-                                CodeDigitBox(
-                                    digit = uiState.code.getOrNull(index)?.toString() ?: "",
-                                    isFocused = uiState.code.length == index,
-                                )
-                            }
+            // Verification Code Input
+            BasicTextField(
+                value = uiState.code,
+                onValueChange = viewModel::onCodeChange,
+                modifier = Modifier.focusRequester(focusRequester),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                textStyle = TextStyle(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 20.sp,
+                    color = CLIColors.TextPrimary
+                ),
+                cursorBrush = SolidColor(CLIColors.Green),
+                decorationBox = {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        repeat(6) { index ->
+                            CodeDigitBox(
+                                digit = uiState.code.getOrNull(index)?.toString() ?: "",
+                                isFocused = uiState.code.length == index,
+                                modifier = Modifier.weight(1f)
+                            )
                         }
                     }
+                }
+            )
+
+            // Loading State
+            if (uiState.isLoading) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "${ASCII.ELLIPSIS} VERIFYING${ASCII.ELLIPSIS}",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = CLIColors.Blue,
                 )
+            }
 
-                if (uiState.error != null) {
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = uiState.error!!,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Error,
-                    )
-                }
+            // Error Message
+            if (uiState.error != null) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "${ASCII.CROSS} ${uiState.error}",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = CLIColors.Red,
+                )
+            }
 
-                Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(32.dp))
 
-                if (uiState.canResend) {
-                    YouKongTextButton(
-                        text = "重新发送验证码",
-                        onClick = viewModel::resendCode,
-                    )
-                } else {
-                    Text(
-                        text = "${uiState.countdown}秒后可重新发送",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
-                    )
-                }
+            // Resend Button
+            if (uiState.canResend) {
+                TerminalButton(
+                    text = "${ASCII.ARROW_RIGHT} RESEND_CODE",
+                    onClick = viewModel::resendCode,
+                    style = TerminalButtonStyle.SECONDARY,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                Text(
+                    text = "${ASCII.BULLET} Wait ${uiState.countdown}s to resend",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = CLIColors.TextWeak,
+                )
             }
         }
     }
@@ -151,24 +192,38 @@ fun SmsVerificationScreen(
 private fun CodeDigitBox(
     digit: String,
     isFocused: Boolean,
+    modifier: Modifier = Modifier,
 ) {
-    Surface(
-        modifier = Modifier.size(48.dp),
-        shape = YouKongShapes.medium,
-        color = if (isFocused) Primary.copy(alpha = 0.1f) else MaterialTheme.colorScheme.surface,
-        border = androidx.compose.foundation.BorderStroke(
-            width = if (isFocused) 2.dp else 1.dp,
-            color = if (isFocused) Primary else Border,
-        ),
+    Box(
+        modifier = modifier
+            .height(56.dp)
+            .background(
+                if (isFocused) CLIColors.Green.copy(alpha = 0.1f)
+                else CLIColors.BackgroundSecondary
+            )
+            .border(
+                width = if (isFocused) 2.dp else 1.dp,
+                color = if (isFocused) CLIColors.Green else CLIColors.Border,
+            )
+            .padding(vertical = 12.dp),
+        contentAlignment = Alignment.Center
     ) {
-        Text(
-            text = digit,
-            style = MaterialTheme.typography.headlineMedium,
-            color = TextPrimary,
-            textAlign = TextAlign.Center,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(top = 8.dp),
-        )
+        if (digit.isEmpty() && isFocused) {
+            // Show cursor when focused and empty
+            Text(
+                text = ASCII.CURSOR,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 20.sp,
+                color = CLIColors.Green,
+            )
+        } else {
+            Text(
+                text = digit,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 20.sp,
+                color = CLIColors.TextPrimary,
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }

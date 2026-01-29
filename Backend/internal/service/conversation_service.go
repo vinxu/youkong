@@ -178,23 +178,37 @@ func (s *ConversationService) GetMessages(ctx context.Context, conversationID, u
 	// 标记为已读
 	_ = s.messageRepo.MarkAllAsRead(ctx, conversationID, userID)
 
-	// 收集发送者ID
-	senderIDs := make([]string, 0, len(messages))
+	// 收集发送者ID（去重）
+	senderIDMap := make(map[string]bool)
 	for _, m := range messages {
-		senderIDs = append(senderIDs, m.SenderID)
+		senderIDMap[m.SenderID] = true
+	}
+	senderIDs := make([]string, 0, len(senderIDMap))
+	for id := range senderIDMap {
+		senderIDs = append(senderIDs, id)
 	}
 
-	senders, _ := s.userRepo.GetByIDs(ctx, senderIDs)
+	// 批量查询发送者信息
+	senders, err := s.userRepo.GetByIDs(ctx, senderIDs)
+	if err != nil {
+		return nil, fmt.Errorf("查询发送者信息失败: %w", err)
+	}
+
 	senderMap := make(map[string]*model.User)
 	for _, u := range senders {
 		senderMap[u.ID] = u
 	}
 
+	// 构建响应
 	result := make([]*model.MessageResponse, 0, len(messages))
 	for _, m := range messages {
 		sender := senderMap[m.SenderID]
 		if sender == nil {
-			continue
+			// 如果找不到发送者，使用默认信息（不应该发生）
+			sender = &model.User{
+				ID:       m.SenderID,
+				Nickname: "未知用户",
+			}
 		}
 		result = append(result, m.ToResponse(sender))
 	}

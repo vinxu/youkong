@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - My Invite View
 
-/// 我的邀请海报页面 - 简化版
+/// 我的邀请海报页面 - CLI 终端风格
 /// 直接显示用户固定的邀请海报，可以分享和保存
 struct MyInviteView: View {
     @Environment(\.dismiss) private var dismiss
@@ -17,24 +17,25 @@ struct MyInviteView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 20) {
-                if isLoading {
-                    loadingView
-                } else if let error = errorMessage {
-                    errorView(message: error)
-                } else if let image = posterImage {
-                    posterContentView(image: image)
-                }
-            }
-            .navigationTitle("邀请好友")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") {
-                        dismiss()
+            ZStack {
+                // CLI 背景色
+                CLIColors.background
+                    .ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    // Terminal Header
+                    terminalHeader
+
+                    if isLoading {
+                        loadingView
+                    } else if let error = errorMessage {
+                        errorView(message: error)
+                    } else if let image = posterImage {
+                        posterContentView(image: image)
                     }
                 }
             }
+            .navigationBarHidden(true)
             .sheet(isPresented: $showShareSheet) {
                 if let image = posterImage {
                     ShareSheet(items: [image])
@@ -44,16 +45,62 @@ struct MyInviteView: View {
                 await loadPoster()
             }
         }
+        .preferredColorScheme(.dark)
+    }
+
+    // MARK: - Terminal Header
+
+    private var terminalHeader: some View {
+        VStack(spacing: 0) {
+            HStack {
+                // 窗口按钮
+                HStack(spacing: 8) {
+                    Circle().fill(Color.red).frame(width: 12, height: 12)
+                    Circle().fill(Color.yellow).frame(width: 12, height: 12)
+                    Circle().fill(Color.green).frame(width: 12, height: 12)
+                }
+
+                Spacer()
+
+                Text("邀请好友 — terminal")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(CLIColors.textSecondary)
+
+                Spacer()
+
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption)
+                        .foregroundColor(CLIColors.textSecondary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(CLIColors.backgroundSecondary)
+
+            // 分隔线
+            Text(ASCII.horizontalLine(length: 50, style: ASCII.separator))
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundColor(CLIColors.border)
+        }
     }
 
     // MARK: - Loading View
 
     private var loadingView: some View {
         VStack(spacing: 16) {
+            Text(ASCII.cursor)
+                .font(.system(size: 24, design: .monospaced))
+                .foregroundColor(CLIColors.green)
+
+            Text("$ loading poster...")
+                .font(.system(size: 14, design: .monospaced))
+                .foregroundColor(CLIColors.textSecondary)
+
             ProgressView()
-                .scaleEffect(1.5)
-            Text("加载海报中...")
-                .foregroundColor(.secondary)
+                .tint(CLIColors.green)
         }
         .frame(maxHeight: .infinity)
     }
@@ -61,18 +108,26 @@ struct MyInviteView: View {
     // MARK: - Error View
 
     private func errorView(message: String) -> some View {
-        VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 48))
-                .foregroundColor(.orange)
-            Text(message)
-                .foregroundColor(.secondary)
-            Button("重试") {
+        VStack(spacing: 20) {
+            Text(ASCII.warning)
+                .font(.system(size: 48, design: .monospaced))
+                .foregroundColor(CLIColors.red)
+
+            Text("ERROR: \(message)")
+                .font(.system(size: 14, design: .monospaced))
+                .foregroundColor(CLIColors.red)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+
+            terminalButton(
+                icon: ASCII.arrowRight,
+                title: "retry",
+                color: CLIColors.yellow
+            ) {
                 Task {
                     await loadPoster()
                 }
             }
-            .buttonStyle(.borderedProminent)
         }
         .frame(maxHeight: .infinity)
     }
@@ -81,32 +136,52 @@ struct MyInviteView: View {
 
     private func posterContentView(image: UIImage) -> some View {
         ScrollView {
-            VStack(spacing: 24) {
-                // 海报图片
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .cornerRadius(16)
-                    .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 5)
-                    .padding(.horizontal, 24)
+            VStack(spacing: 20) {
+                // ASCII 边框标题
+                Text(ASCII.boxTopLeft + String(repeating: ASCII.boxHorizontal, count: 20) + " 邀请海报 " + String(repeating: ASCII.boxHorizontal, count: 20) + ASCII.boxTopRight)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(CLIColors.border)
                     .padding(.top, 16)
 
+                // 海报图片（ASCII 边框包围）
+                VStack(spacing: 0) {
+                    // 顶部边框
+                    Text(String(repeating: ASCII.separator, count: 50))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(CLIColors.border)
+
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 8)
+
+                    // 底部边框
+                    Text(String(repeating: ASCII.separator, count: 50))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(CLIColors.border)
+                }
+
+                Text(ASCII.boxBottomLeft + String(repeating: ASCII.boxHorizontal, count: 52) + ASCII.boxBottomRight)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(CLIColors.border)
+
                 // 操作按钮
-                HStack(spacing: 32) {
+                HStack(spacing: 24) {
                     // 分享按钮
-                    actionButton(
-                        icon: "square.and.arrow.up",
-                        title: "分享",
-                        color: .primaryGreen
+                    terminalButton(
+                        icon: ASCII.arrowRightDouble,
+                        title: "share",
+                        color: CLIColors.green
                     ) {
                         showShareSheet = true
                     }
 
                     // 保存按钮
-                    actionButton(
-                        icon: saveSuccess ? "checkmark.circle.fill" : "square.and.arrow.down",
-                        title: saveSuccess ? "已保存" : "保存",
-                        color: saveSuccess ? .green : .blue,
+                    terminalButton(
+                        icon: saveSuccess ? ASCII.checkmark : ASCII.arrowDown,
+                        title: saveSuccess ? "saved" : "save",
+                        color: saveSuccess ? CLIColors.green : CLIColors.blue,
                         isLoading: isSaving
                     ) {
                         saveToPhotos()
@@ -116,17 +191,17 @@ struct MyInviteView: View {
                 .padding(.vertical, 16)
 
                 // 提示文字
-                Text("分享海报给朋友，邀请他们加入")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
+                Text(ASCII.prompt + " " + "分享海报给朋友，邀请他们加入")
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundColor(CLIColors.textSecondary)
                     .padding(.bottom, 24)
             }
         }
     }
 
-    // MARK: - Action Button
+    // MARK: - Terminal Button
 
-    private func actionButton(
+    private func terminalButton(
         icon: String,
         title: String,
         color: Color,
@@ -134,21 +209,27 @@ struct MyInviteView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            VStack(spacing: 10) {
+            HStack(spacing: 8) {
                 if isLoading {
                     ProgressView()
-                        .frame(width: 28, height: 28)
+                        .tint(color)
+                        .scaleEffect(0.8)
                 } else {
-                    Image(systemName: icon)
-                        .font(.title2)
+                    Text(icon)
+                        .font(.system(size: 14, design: .monospaced))
                 }
                 Text(title)
-                    .font(.subheadline)
+                    .font(.system(size: 14, design: .monospaced))
+                    .fontWeight(.medium)
             }
-            .frame(width: 90, height: 80)
-            .background(color.opacity(0.1))
             .foregroundColor(color)
-            .cornerRadius(16)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            .overlay(
+                RoundedRectangle(cornerRadius: 0)
+                    .stroke(color, lineWidth: 1)
+            )
+            .background(color.opacity(0.1))
         }
     }
 

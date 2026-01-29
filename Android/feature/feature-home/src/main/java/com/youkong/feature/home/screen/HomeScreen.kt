@@ -1,8 +1,11 @@
 package com.youkong.feature.home.screen
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -10,41 +13,27 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.youkong.core.ui.component.YouKongEmptyState
 import com.youkong.core.ui.component.YouKongLoading
-import com.youkong.core.ui.theme.Primary
-import com.youkong.core.ui.theme.Surface
-import com.youkong.core.ui.theme.TextOnPrimary
-import com.youkong.core.ui.theme.TextPrimary
+import com.youkong.core.ui.component.cli.TerminalHeader
+import com.youkong.core.ui.theme.CLIColors
 import com.youkong.core.ui.theme.YouKongTheme
 import com.youkong.feature.home.component.AvailabilityCard
 import com.youkong.feature.home.viewmodel.HomeViewModel
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     onNavigateToCreateAvailability: () -> Unit,
@@ -58,66 +47,38 @@ fun HomeScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = "有空",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = Primary,
-                    )
-                },
-                actions = {
-                    IconButton(onClick = onNavigateToCircles) {
-                        Text("圈子", color = TextPrimary)
-                    }
-                    IconButton(onClick = onNavigateToMessages) {
-                        Text("消息", color = TextPrimary)
-                    }
-                    IconButton(onClick = onNavigateToProfile) {
-                        Icon(
-                            imageVector = Icons.Default.Person,
-                            contentDescription = "我的",
-                            tint = TextPrimary,
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Surface,
-                ),
+            TerminalHeader(
+                title = "youkong",
+                trailingIcon = "[新建]",
+                onTrailingClick = onNavigateToCreateAvailability,
             )
         },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = onNavigateToCreateAvailability,
-                containerColor = Primary,
-                contentColor = TextOnPrimary,
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Add,
-                    contentDescription = "发布有空",
-                )
-            }
-        },
+        containerColor = CLIColors.Background,
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .background(CLIColors.Background)
                 .padding(innerPadding),
         ) {
-            // Tab 切换
-            TabRow(
-                selectedTabIndex = selectedTabIndex,
-                containerColor = Surface,
+            // Terminal Tab 切换
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(CLIColors.Background)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
-                Tab(
+                TerminalTab(
+                    text = "[朋友有空]",
                     selected = selectedTabIndex == 0,
                     onClick = { selectedTabIndex = 0 },
-                    text = { Text("朋友有空") },
+                    modifier = Modifier.weight(1f)
                 )
-                Tab(
+                TerminalTab(
+                    text = "[我的有空]",
                     selected = selectedTabIndex == 1,
                     onClick = { selectedTabIndex = 1 },
-                    text = { Text("我的有空") },
+                    modifier = Modifier.weight(1f)
                 )
             }
 
@@ -143,6 +104,24 @@ fun HomeScreen(
             }
         }
     }
+}
+
+@Composable
+private fun TerminalTab(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = text,
+        fontFamily = FontFamily.Monospace,
+        fontSize = 14.sp,
+        color = if (selected) CLIColors.Green else CLIColors.TextSecondary,
+        modifier = modifier
+            .clickable(onClick = onClick)
+            .padding(8.dp)
+    )
 }
 
 @Composable

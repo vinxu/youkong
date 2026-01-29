@@ -1,6 +1,7 @@
 package com.youkong.feature.invitation.screen
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,29 +14,24 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.youkong.core.ui.component.YouKongButton
-import com.youkong.core.ui.component.YouKongEmojiAvatar
 import com.youkong.core.ui.component.YouKongLoading
-import com.youkong.core.ui.component.YouKongTopBar
-import com.youkong.core.ui.theme.CircleColors
-import com.youkong.core.ui.theme.Primary
-import com.youkong.core.ui.theme.TextPrimary
-import com.youkong.core.ui.theme.TextSecondary
-import com.youkong.core.ui.theme.YouKongTheme
+import com.youkong.core.ui.component.cli.TerminalButton
+import com.youkong.core.ui.component.cli.TerminalButtonStyle
+import com.youkong.core.ui.component.cli.TerminalHeader
+import com.youkong.core.ui.theme.ASCII
+import com.youkong.core.ui.theme.CLIColors
 import com.youkong.feature.invitation.viewmodel.CreateInvitationViewModel
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -53,77 +49,90 @@ fun CreateInvitationScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            YouKongTopBar(
-                title = "创建邀请",
-                onBackClick = onBackClick,
-            )
-        },
-    ) { innerPadding ->
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(CLIColors.Background)
+    ) {
+        TerminalHeader(
+            title = "CREATE_INVITATION",
+            showBackButton = true,
+            onBackClick = onBackClick,
+        )
+
         when {
             uiState.isLoading -> {
-                YouKongLoading(message = "加载中...")
+                YouKongLoading(message = "Loading...")
             }
 
             else -> {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(innerPadding)
-                        .padding(horizontal = YouKongTheme.spacing.xxl),
+                        .padding(16.dp),
                 ) {
-                    Spacer(modifier = Modifier.height(24.dp))
-
+                    // 分隔线
                     Text(
-                        text = "邀请好友加入",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TextPrimary,
+                        text = ASCII.titleLine("INVITE_FRIEND", totalLength = 40),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = CLIColors.Border,
                     )
 
                     val circle = uiState.circle
                     if (circle != null) {
                         Spacer(modifier = Modifier.height(16.dp))
 
+                        // 圈子信息
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(MaterialTheme.colorScheme.surfaceVariant)
-                                .padding(16.dp),
+                                .background(CLIColors.BackgroundSecondary)
+                                .border(width = 1.dp, color = CLIColors.Border)
+                                .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            YouKongEmojiAvatar(
-                                emoji = circle.emoji,
-                                backgroundColor = CircleColors.fromHex(circle.color),
-                                size = 48.dp,
+                            Text(
+                                text = ASCII.BULLET,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 14.sp,
+                                color = CLIColors.Green,
                             )
 
-                            Column(
-                                modifier = Modifier
-                                    .padding(start = 12.dp)
-                                    .weight(1f),
-                            ) {
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Text(
+                                text = circle.emoji,
+                                fontSize = 16.sp,
+                            )
+
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = circle.name,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = TextPrimary,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 14.sp,
+                                    color = CLIColors.TextPrimary,
                                 )
                                 Text(
-                                    text = "${circle.memberCount} 位成员",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = TextSecondary,
+                                    text = "${circle.memberCount} members",
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 12.sp,
+                                    color = CLIColors.TextSecondary,
                                 )
                             }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(32.dp))
+                    Spacer(modifier = Modifier.height(24.dp))
 
+                    // 有效期标题
                     Text(
-                        text = "有效期",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TextPrimary,
+                        text = "${ASCII.ARROW_RIGHT} Expiration (days)",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp,
+                        color = CLIColors.TextPrimary,
                     )
 
                     Spacer(modifier = Modifier.height(12.dp))
@@ -139,12 +148,14 @@ fun CreateInvitationScreen(
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(32.dp))
+                    Spacer(modifier = Modifier.height(24.dp))
 
+                    // 最大使用次数标题
                     Text(
-                        text = "最大使用次数",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TextPrimary,
+                        text = "${ASCII.ARROW_RIGHT} Max uses",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp,
+                        color = CLIColors.TextPrimary,
                     )
 
                     Spacer(modifier = Modifier.height(12.dp))
@@ -162,24 +173,40 @@ fun CreateInvitationScreen(
 
                     Spacer(modifier = Modifier.weight(1f))
 
+                    // 错误信息
                     val error = uiState.error
                     if (error != null) {
-                        Text(
-                            text = error,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(bottom = 16.dp),
-                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = ASCII.CROSS,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 14.sp,
+                                color = CLIColors.Red,
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = error,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 13.sp,
+                                color = CLIColors.Red,
+                            )
+                        }
                     }
 
-                    YouKongButton(
-                        text = "生成邀请链接",
+                    // 生成按钮
+                    TerminalButton(
+                        text = if (uiState.isCreating) "GENERATING..." else "GENERATE_INVITATION",
                         onClick = viewModel::createInvitation,
                         enabled = !uiState.isCreating,
-                        loading = uiState.isCreating,
+                        style = TerminalButtonStyle.PRIMARY,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(bottom = 32.dp),
+                            .padding(bottom = 16.dp),
                     )
                 }
             }
@@ -197,17 +224,22 @@ private fun ExpireDaysOption(
         val isSelected = day == selected
         Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
                 .background(
-                    if (isSelected) Primary else MaterialTheme.colorScheme.surfaceVariant
+                    if (isSelected) CLIColors.Green.copy(alpha = 0.15f)
+                    else CLIColors.BackgroundSecondary
+                )
+                .border(
+                    width = 1.dp,
+                    color = if (isSelected) CLIColors.Green else CLIColors.Border
                 )
                 .clickable { onSelect(day) }
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
             Text(
-                text = "${day}天",
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (isSelected) MaterialTheme.colorScheme.onPrimary else TextPrimary,
+                text = if (isSelected) "${ASCII.CHECKMARK} $day" else "$day",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
+                color = if (isSelected) CLIColors.Green else CLIColors.TextPrimary,
             )
         }
     }
@@ -223,17 +255,22 @@ private fun MaxUsesOption(
         val isSelected = use == selected
         Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
                 .background(
-                    if (isSelected) Primary else MaterialTheme.colorScheme.surfaceVariant
+                    if (isSelected) CLIColors.Green.copy(alpha = 0.15f)
+                    else CLIColors.BackgroundSecondary
+                )
+                .border(
+                    width = 1.dp,
+                    color = if (isSelected) CLIColors.Green else CLIColors.Border
                 )
                 .clickable { onSelect(use) }
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
             Text(
-                text = "${use}次",
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (isSelected) MaterialTheme.colorScheme.onPrimary else TextPrimary,
+                text = if (isSelected) "${ASCII.CHECKMARK} $use" else "$use",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
+                color = if (isSelected) CLIColors.Green else CLIColors.TextPrimary,
             )
         }
     }

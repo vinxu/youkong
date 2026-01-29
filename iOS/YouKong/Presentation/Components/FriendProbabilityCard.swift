@@ -1,108 +1,65 @@
 import SwiftUI
 
-// MARK: - Friend Probability Card
+// MARK: - Friend Probability Card (CLI Style)
 
 struct FriendProbabilityCard: View {
     let friend: FriendRecommendation
 
     private var probabilityColor: Color {
-        ProbabilityColors.color(for: friend.probability)
+        CLIConstants.color(for: friend.probability)
     }
 
     var body: some View {
-        HStack(spacing: UIConstants.Spacing.md) {
-            // 头像
-            AvatarView(url: friend.avatar, size: 52)
+        HStack(spacing: 0) {
+            // 状态指示符（纯字符符号）
+            Text(CLIConstants.statusSymbol(for: friend.probability))
+                .font(.system(size: 18, design: .monospaced))
+                .foregroundColor(probabilityColor)
+                .frame(width: 30)
 
-            // 名字和正在做什么
-            VStack(alignment: .leading, spacing: UIConstants.Spacing.xs) {
-                Text(friend.name)
-                    .font(.headline)
-                    .foregroundColor(.primary)
-
-                // Emoji + 活动描述
-                HStack(spacing: 4) {
-                    Text(friend.displayEmoji)
-                        .font(.subheadline)
-                    Text(friend.displayActivity)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                }
-            }
+            // 朋友名字
+            Text(friend.name)
+                .font(.system(size: 16, design: .monospaced))
+                .fontWeight(.medium)
+                .foregroundColor(.primary)
+                .lineLimit(1)
 
             Spacer()
 
-            // 有空程度和百分比
-            VStack(alignment: .trailing, spacing: 4) {
-                // 状态标签（如 "可能有空"）- 使用 reason 字段
-                Text(friend.reason)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .foregroundColor(probabilityColor)
+            // 概率百分比
+            Text(probabilityText)
+                .font(.system(size: 14, design: .monospaced))
+                .foregroundColor(probabilityColor)
+                .frame(width: 50, alignment: .trailing)
 
-                // 百分比数值
-                if friend.hasData {
-                    Text(friend.probabilityText)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            // 箭头
-            Image(systemName: "chevron.right")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            // 状态文字
+            Text(statusText)
+                .font(.system(size: 14, design: .monospaced))
+                .foregroundColor(probabilityColor)
+                .frame(width: 60, alignment: .trailing)
         }
-        .padding(UIConstants.Spacing.md)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .background(Color(.systemBackground))
-        .cornerRadius(UIConstants.CornerRadius.md)
-        .shadow(color: .black.opacity(0.05), radius: 5, y: 2)
-    }
-}
-
-// MARK: - Avatar View
-
-struct AvatarView: View {
-    let url: String?
-    let size: CGFloat
-
-    var body: some View {
-        Group {
-            if let urlString = url, let url = URL(string: urlString) {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    case .failure:
-                        placeholderView
-                    case .empty:
-                        ProgressView()
-                    @unknown default:
-                        placeholderView
-                    }
-                }
-            } else {
-                placeholderView
-            }
-        }
-        .frame(width: size, height: size)
-        .clipShape(Circle())
     }
 
-    private var placeholderView: some View {
-        ZStack {
-            Circle()
-                .fill(Color.gray.opacity(0.2))
+    private var probabilityText: String {
+        friend.probability == -1 ? "--" : "\(friend.probability)%"
+    }
 
-            Image(systemName: "person.fill")
-                .font(.system(size: size * 0.5))
-                .foregroundColor(.gray)
+    private var statusText: String {
+        if friend.probability == -1 { return "未知" }
+        switch friend.probability {
+        case 80...100: return "有空"
+        case 60..<80: return "有空"
+        case 40..<60: return "可能"
+        case 20..<40: return "少空"
+        case 0..<20: return "忙碌"
+        default: return "未知"
         }
     }
 }
+
 
 #Preview {
     VStack(spacing: 12) {

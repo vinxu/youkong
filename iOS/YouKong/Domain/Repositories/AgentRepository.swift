@@ -18,10 +18,25 @@ protocol AgentRepositoryProtocol {
 struct StatusReportRequest: Encodable {
     let screen: ScreenRequestData?
     let location: LocationRequestData?
+    let extendedLocation: ExtendedLocationRequestData?  // 扩展位置数据
     let battery: BatteryRequestData?
     let mode: ModeRequestData?
     let connection: ConnectionRequestData?
     let display: DisplayRequestData?
+    let calendar: CalendarRequestData?      // 日历数据
+    let movement: MovementRequestData?      // 运动数据
+
+    enum CodingKeys: String, CodingKey {
+        case screen
+        case location
+        case extendedLocation = "extended_location"
+        case battery
+        case mode
+        case connection
+        case display
+        case calendar
+        case movement
+    }
 }
 
 struct ScreenRequestData: Encodable {
@@ -47,6 +62,24 @@ struct LocationRequestData: Encodable {
     enum CodingKeys: String, CodingKey {
         case placeType = "place_type"
         case atPlaceSinceMinutes = "at_place_since_minutes"
+    }
+}
+
+// MARK: - 扩展位置数据（包含地点名称和坐标）
+
+struct ExtendedLocationRequestData: Encodable {
+    let placeType: String
+    let placeName: String?          // 地点名称（反向地理编码）
+    let atPlaceSinceMinutes: Int
+    let latitude: Double?
+    let longitude: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case placeType = "place_type"
+        case placeName = "place_name"
+        case atPlaceSinceMinutes = "at_place_since_minutes"
+        case latitude
+        case longitude
     }
 }
 
@@ -87,6 +120,42 @@ struct DisplayRequestData: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case screenBrightness = "screen_brightness"
+    }
+}
+
+// MARK: - 日历请求数据
+
+struct CalendarRequestData: Encodable {
+    let hasCurrentEvent: Bool
+    let currentEventTitle: String?
+    let eventEndMinutes: Int?
+    let nextEventInMinutes: Int?
+    let todayRemainingCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case hasCurrentEvent = "has_current_event"
+        case currentEventTitle = "current_event_title"
+        case eventEndMinutes = "event_end_minutes"
+        case nextEventInMinutes = "next_event_in_minutes"
+        case todayRemainingCount = "today_remaining_count"
+    }
+}
+
+// MARK: - 运动请求数据
+
+struct MovementRequestData: Encodable {
+    let isMoving: Bool
+    let movementType: String
+    let stepsToday: Int
+    let stepsLastHour: Int
+    let stationaryMinutes: Int
+
+    enum CodingKeys: String, CodingKey {
+        case isMoving = "is_moving"
+        case movementType = "movement_type"
+        case stepsToday = "steps_today"
+        case stepsLastHour = "steps_last_hour"
+        case stationaryMinutes = "stationary_minutes"
     }
 }
 

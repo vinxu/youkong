@@ -27,8 +27,14 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>用来判断你是否有日程安排，从而知道你是否有空</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>用来判断你是否有日程安排，从而知道你是否有空</string>
 	<key>NSContactsUsageDescription</key>
 	<string>用来找到你的朋友</string>
+	<key>NSMotionUsageDescription</key>
+	<string>用来判断你是否在移动，从而更准确地知道你是否有空</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>用来判断你在哪里，即使APP在后台</string>
 	<key>NSLocationWhenInUseUsageDescription</key>

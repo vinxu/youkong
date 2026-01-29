@@ -10,6 +10,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,6 +24,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -70,6 +72,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -98,6 +101,9 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
+import com.youkong.core.ui.component.cli.TerminalHeader
+import com.youkong.core.ui.theme.ASCII
+import com.youkong.core.ui.theme.CLIColors
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -134,21 +140,19 @@ fun AddFriendScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("添加好友") },
-                navigationIcon = {
-                    IconButton(onClick = onBackClick) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回",
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+            ) {
+                TerminalHeader(
+                    title = "$ add --friend",
+                    showBackButton = true,
+                    onBackClick = onBackClick
+                )
+            }
         },
+        containerColor = CLIColors.Background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { paddingValues ->
         LazyColumn(
@@ -331,14 +335,12 @@ private fun FeatureCard(
     badgeCount: Int = 0,
     onClick: () -> Unit,
 ) {
-    Card(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface,
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+            .border(1.dp, CLIColors.Border)
+            .background(CLIColors.BackgroundSecondary)
+            .clickable(onClick = onClick)
     ) {
         Row(
             modifier = Modifier
@@ -361,30 +363,34 @@ private fun FeatureCard(
                 ) {
                     Text(
                         text = title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Medium,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 16.sp,
+                        color = CLIColors.TextPrimary,
                     )
                     if (badgeCount > 0) {
                         Spacer(modifier = Modifier.width(8.dp))
-                        Badge {
-                            Text(
-                                text = if (badgeCount > 99) "99+" else badgeCount.toString(),
-                            )
-                        }
+                        Text(
+                            text = "($badgeCount)",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 14.sp,
+                            color = CLIColors.Red,
+                        )
                     }
                 }
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = CLIColors.TextSecondary,
                 )
             }
 
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = null,
-                tint = TextSecondary,
+            Text(
+                text = ASCII.ARROW_RIGHT,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 16.sp,
+                color = CLIColors.TextSecondary,
             )
         }
     }

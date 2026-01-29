@@ -56,18 +56,10 @@ struct AcceptInvitationView: View {
         VStack(spacing: 24) {
             Spacer()
 
-            // 邀请人头像
-            AsyncImage(url: URL(string: info.inviter.avatar ?? "")) { image in
-                image
-                    .resizable()
-                    .scaledToFill()
-            } placeholder: {
-                Image(systemName: "person.circle.fill")
-                    .resizable()
-                    .foregroundColor(.secondary)
-            }
-            .frame(width: 80, height: 80)
-            .clipShape(Circle())
+            // 邀请人头像（CLI 风格）
+            Text(ASCII.bullet)
+                .font(.system(size: 60, design: .monospaced))
+                .foregroundColor(CLIColors.green)
 
             // 邀请人名字
             VStack(spacing: 4) {

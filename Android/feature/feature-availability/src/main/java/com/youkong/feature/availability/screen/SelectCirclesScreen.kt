@@ -1,7 +1,9 @@
 package com.youkong.feature.availability.screen
 
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,34 +15,24 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.youkong.core.domain.model.Circle
-import com.youkong.core.ui.component.YouKongButton
-import com.youkong.core.ui.component.YouKongEmptyState
-import com.youkong.core.ui.component.YouKongEmojiAvatar
-import com.youkong.core.ui.component.YouKongLoading
-import com.youkong.core.ui.component.YouKongTopBar
-import com.youkong.core.ui.theme.Border
-import com.youkong.core.ui.theme.CircleColors
-import com.youkong.core.ui.theme.Primary
-import com.youkong.core.ui.theme.TextPrimary
-import com.youkong.core.ui.theme.TextSecondary
-import com.youkong.core.ui.theme.YouKongShapes
-import com.youkong.core.ui.theme.YouKongTheme
+import com.youkong.core.ui.component.cli.TerminalButton
+import com.youkong.core.ui.component.cli.TerminalButtonStyle
+import com.youkong.core.ui.component.cli.TerminalHeader
+import com.youkong.core.ui.theme.ASCII
+import com.youkong.core.ui.theme.CLIColors
 import com.youkong.feature.availability.viewmodel.CreateAvailabilityViewModel
 
 @Composable
@@ -59,31 +51,59 @@ fun SelectCirclesScreen(
 
     Scaffold(
         topBar = {
-            YouKongTopBar(
-                title = "选择圈子",
-                onBackClick = onBackClick,
+            TerminalHeader(
+                title = "$ select --circles",
+                onBackClick = onBackClick
             )
         },
+        containerColor = CLIColors.Background
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
         ) {
+            // 提示文本
             Text(
-                text = "选择可以看到这条有空的圈子",
-                style = MaterialTheme.typography.bodyMedium,
-                color = TextSecondary,
-                modifier = Modifier.padding(horizontal = YouKongTheme.spacing.xxl, vertical = YouKongTheme.spacing.md),
+                text = "${ASCII.BULLET} 选择可以看到这条有空的圈子",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.TextSecondary,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
             )
 
             when {
                 uiState.circles.isEmpty() -> {
-                    YouKongEmptyState(
-                        emoji = "\uD83D\uDC65",
-                        title = "还没有圈子",
-                        subtitle = "先创建一个圈子，添加你的朋友",
-                    )
+                    // 空状态
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "👥",
+                                fontSize = 48.sp,
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "还没有圈子",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 16.sp,
+                                color = CLIColors.TextPrimary,
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "先创建一个圈子，添加你的朋友",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                                color = CLIColors.TextSecondary,
+                            )
+                        }
+                    }
                 }
 
                 else -> {
@@ -94,7 +114,7 @@ fun SelectCirclesScreen(
                             items = uiState.circles,
                             key = { it.id },
                         ) { circle ->
-                            CircleItem(
+                            TerminalCircleItem(
                                 circle = circle,
                                 selected = circle.id in uiState.selectedCircleIds,
                                 onClick = { viewModel.toggleCircle(circle.id) },
@@ -107,73 +127,102 @@ fun SelectCirclesScreen(
             // 错误提示
             if (uiState.error != null) {
                 Text(
-                    text = uiState.error!!,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(horizontal = YouKongTheme.spacing.xxl),
+                    text = "${ASCII.CROSS} ${uiState.error}",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = CLIColors.Red,
+                    modifier = Modifier.padding(horizontal = 16.dp),
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
             // 发布按钮
-            YouKongButton(
-                text = if (uiState.selectedCircleIds.isEmpty()) {
-                    "请选择至少一个圈子"
-                } else {
-                    "发布有空 (${uiState.selectedCircleIds.size}个圈子可见)"
-                },
-                onClick = { viewModel.createAvailability() },
-                enabled = uiState.selectedCircleIds.isNotEmpty() && !uiState.isLoading,
-                loading = uiState.isLoading,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = YouKongTheme.spacing.xxl)
-                    .padding(bottom = 32.dp),
-            )
+            Column(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp)
+            ) {
+                if (uiState.isLoading) {
+                    Text(
+                        text = "${ASCII.LOADING} 发布中...",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 14.sp,
+                        color = CLIColors.Yellow,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp)
+                    )
+                }
+
+                TerminalButton(
+                    text = if (uiState.selectedCircleIds.isEmpty()) {
+                        "请选择至少一个圈子"
+                    } else {
+                        "${ASCII.ARROW_RIGHT} 发布有空 (${uiState.selectedCircleIds.size}个圈子可见)"
+                    },
+                    onClick = { viewModel.createAvailability() },
+                    enabled = uiState.selectedCircleIds.isNotEmpty() && !uiState.isLoading,
+                    modifier = Modifier.fillMaxWidth(),
+                    style = TerminalButtonStyle.PRIMARY
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun CircleItem(
+private fun TerminalCircleItem(
     circle: Circle,
     selected: Boolean,
     onClick: () -> Unit,
 ) {
-    Surface(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = YouKongTheme.spacing.lg, vertical = YouKongTheme.spacing.sm),
-        shape = YouKongShapes.medium,
-        color = if (selected) Primary.copy(alpha = 0.1f) else androidx.compose.ui.graphics.Color.Transparent,
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .background(
+                if (selected) CLIColors.Green.copy(alpha = 0.1f)
+                else CLIColors.BackgroundSecondary
+            )
+            .border(
+                width = 1.dp,
+                color = if (selected) CLIColors.Green else CLIColors.Border
+            )
+            .padding(12.dp)
     ) {
         Row(
-            modifier = Modifier.padding(YouKongTheme.spacing.md),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            YouKongEmojiAvatar(
-                emoji = circle.emoji,
-                backgroundColor = CircleColors.fromHex(circle.color),
-                size = 44.dp,
+            // Emoji 头像
+            Text(
+                text = circle.emoji,
+                fontSize = 24.sp,
             )
 
-            Spacer(modifier = Modifier.width(16.dp))
+            Spacer(modifier = Modifier.width(12.dp))
 
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = circle.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = TextPrimary,
-                )
-            }
+            // 圈子名称
+            Text(
+                text = circle.name,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 14.sp,
+                color = CLIColors.TextPrimary,
+                modifier = Modifier.weight(1f)
+            )
 
+            // 选择标记
             if (selected) {
-                Icon(
-                    imageVector = Icons.Default.CheckCircle,
-                    contentDescription = null,
-                    tint = Primary,
-                    modifier = Modifier.size(24.dp),
+                Text(
+                    text = "[✓]",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp,
+                    color = CLIColors.Green,
+                )
+            } else {
+                Text(
+                    text = "[ ]",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp,
+                    color = CLIColors.TextWeak,
                 )
             }
         }

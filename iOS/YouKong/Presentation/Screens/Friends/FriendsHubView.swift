@@ -10,114 +10,188 @@ struct FriendsHubView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                // 添加好友
-                Section {
-                    // 通过手机号添加
-                    NavigationLink {
-                        AddFriendView()
-                            .navigationBarBackButtonHidden(false)
-                    } label: {
-                        Label {
-                            Text("通过手机号添加")
-                        } icon: {
-                            Image(systemName: "phone.fill")
-                                .foregroundColor(.blue)
-                        }
-                    }
+            VStack(spacing: 0) {
+                // CLI 标题头部
+                HStack {
+                    Text(ASCII.prompt + " 好友中心")
+                        .font(.cliHeadline)
+                        .foregroundColor(CLIColors.green)
 
-                    // 从通讯录添加
-                    NavigationLink {
-                        ContactFriendsView()
-                    } label: {
-                        Label {
-                            Text("从通讯录添加")
-                        } icon: {
-                            Image(systemName: "person.crop.rectangle.stack.fill")
-                                .foregroundColor(.green)
-                        }
-                    }
-                } header: {
-                    Text("添加好友")
-                }
+                    Spacer()
 
-                // 好友请求
-                Section {
-                    NavigationLink {
-                        FriendRequestsView()
-                    } label: {
-                        HStack {
-                            Label {
-                                Text("好友请求")
-                            } icon: {
-                                Image(systemName: "person.badge.clock.fill")
-                                    .foregroundColor(.orange)
-                            }
-
-                            Spacer()
-
-                            if viewModel.pendingRequestCount > 0 {
-                                Text("\(viewModel.pendingRequestCount)")
-                                    .font(.caption)
-                                    .fontWeight(.semibold)
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 2)
-                                    .background(Color.red)
-                                    .clipShape(Capsule())
-                            }
-                        }
-                    }
-                } header: {
-                    Text("请求")
-                }
-
-                // 邀请好友
-                Section {
-                    NavigationLink {
-                        MyInviteView()
-                            .navigationBarBackButtonHidden(true)
-                    } label: {
-                        Label {
-                            Text("邀请好友")
-                        } icon: {
-                            Image(systemName: "square.and.arrow.up")
-                                .foregroundColor(.purple)
-                        }
-                    }
-                } header: {
-                    Text("邀请")
-                }
-
-                // 好友管理
-                Section {
-                    NavigationLink {
-                        FriendsManagementView()
-                    } label: {
-                        Label {
-                            Text("好友管理")
-                        } icon: {
-                            Image(systemName: "person.2.fill")
-                                .foregroundColor(.teal)
-                        }
-                    }
-                } header: {
-                    Text("管理")
-                }
-            }
-            .navigationTitle("好友")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") {
+                    Button {
                         dismiss()
+                    } label: {
+                        Text("✕")
+                            .font(.cliBody)
+                            .foregroundColor(CLIColors.textSecondary)
                     }
                 }
+                .padding(16)
+                .background(CLIColors.backgroundSecondary)
+                .overlay(
+                    Rectangle()
+                        .fill(CLIColors.border)
+                        .frame(height: 1),
+                    alignment: .bottom
+                )
+
+                ScrollView {
+                    VStack(spacing: 24) {
+                        // 添加好友
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(ASCII.bullet + " 添加好友")
+                                .font(.cliBody)
+                                .foregroundColor(CLIColors.textSecondary)
+                                .padding(.horizontal, 16)
+                                .padding(.bottom, 8)
+
+                            VStack(spacing: 0) {
+                                NavigationLink {
+                                    AddFriendView()
+                                        .navigationBarBackButtonHidden(false)
+                                } label: {
+                                    TerminalHubRow(icon: "📱", title: "通过手机号添加")
+                                }
+
+                                Rectangle()
+                                    .fill(CLIColors.border)
+                                    .frame(height: 1)
+                                    .padding(.leading, 16)
+
+                                NavigationLink {
+                                    ContactFriendsView()
+                                } label: {
+                                    TerminalHubRow(icon: "📇", title: "从通讯录添加")
+                                }
+                            }
+                            .background(CLIColors.backgroundSecondary)
+                            .overlay(
+                                Rectangle()
+                                    .stroke(CLIColors.border, lineWidth: 1)
+                            )
+                        }
+
+                        // 好友请求
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(ASCII.bullet + " 请求")
+                                .font(.cliBody)
+                                .foregroundColor(CLIColors.textSecondary)
+                                .padding(.horizontal, 16)
+                                .padding(.bottom, 8)
+
+                            VStack(spacing: 0) {
+                                NavigationLink {
+                                    FriendRequestsView()
+                                } label: {
+                                    HStack {
+                                        Text("⏰")
+                                            .font(.cliBody)
+                                        Text("好友请求")
+                                            .font(.cliBody)
+                                            .foregroundColor(CLIColors.textPrimary)
+
+                                        Spacer()
+
+                                        if viewModel.pendingRequestCount > 0 {
+                                            Text("[\(viewModel.pendingRequestCount)]")
+                                                .font(.cliBody)
+                                                .foregroundColor(CLIColors.red)
+                                        }
+
+                                        Text(ASCII.arrowRight)
+                                            .font(.cliBody)
+                                            .foregroundColor(CLIColors.textSecondary)
+                                    }
+                                    .padding(16)
+                                }
+                            }
+                            .background(CLIColors.backgroundSecondary)
+                            .overlay(
+                                Rectangle()
+                                    .stroke(CLIColors.border, lineWidth: 1)
+                            )
+                        }
+
+                        // 邀请好友
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(ASCII.bullet + " 邀请")
+                                .font(.cliBody)
+                                .foregroundColor(CLIColors.textSecondary)
+                                .padding(.horizontal, 16)
+                                .padding(.bottom, 8)
+
+                            VStack(spacing: 0) {
+                                NavigationLink {
+                                    MyInviteView()
+                                        .navigationBarBackButtonHidden(true)
+                                } label: {
+                                    TerminalHubRow(icon: "🔗", title: "邀请好友")
+                                }
+                            }
+                            .background(CLIColors.backgroundSecondary)
+                            .overlay(
+                                Rectangle()
+                                    .stroke(CLIColors.border, lineWidth: 1)
+                            )
+                        }
+
+                        // 好友管理
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(ASCII.bullet + " 管理")
+                                .font(.cliBody)
+                                .foregroundColor(CLIColors.textSecondary)
+                                .padding(.horizontal, 16)
+                                .padding(.bottom, 8)
+
+                            VStack(spacing: 0) {
+                                NavigationLink {
+                                    FriendsManagementView()
+                                } label: {
+                                    TerminalHubRow(icon: "👥", title: "好友管理")
+                                }
+                            }
+                            .background(CLIColors.backgroundSecondary)
+                            .overlay(
+                                Rectangle()
+                                    .stroke(CLIColors.border, lineWidth: 1)
+                            )
+                        }
+                    }
+                    .padding(16)
+                }
             }
+            .background(CLIColors.background)
+            .navigationBarHidden(true)
             .task {
                 await viewModel.loadPendingCount()
             }
         }
+    }
+}
+
+// MARK: - Terminal Hub Row
+
+struct TerminalHubRow: View {
+    let icon: String
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(icon)
+                .font(.cliBody)
+            Text(title)
+                .font(.cliBody)
+                .foregroundColor(CLIColors.textPrimary)
+
+            Spacer()
+
+            Text(ASCII.arrowRight)
+                .font(.cliBody)
+                .foregroundColor(CLIColors.textSecondary)
+        }
+        .padding(16)
+        .contentShape(Rectangle())
     }
 }
 

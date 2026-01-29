@@ -112,6 +112,23 @@ class DeviceStatusCollector: ObservableObject {
         networkMonitor.start(queue: networkQueue)
     }
 
+    // MARK: - Public Methods
+
+    /// 开始监控设备状态
+    func startMonitoring() {
+        // DeviceStatusCollector 在 init 时已经设置好所有监听器
+        // 这里只需要确保状态是最新的
+        updateStatus()
+        print("📱 [DeviceStatus] 启动监控")
+    }
+
+    /// 停止监控
+    func stopMonitoring() {
+        // DeviceStatusCollector 的监听器是持久的，不需要停止
+        // 但保留此方法以保持接口一致性
+        print("📱 [DeviceStatus] 停止监控（监听器保持活跃）")
+    }
+
     // MARK: - Notifications
 
     @objc private func batteryStateDidChange() {

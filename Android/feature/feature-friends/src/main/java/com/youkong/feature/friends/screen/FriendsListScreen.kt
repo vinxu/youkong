@@ -12,28 +12,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -41,15 +29,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.youkong.core.network.model.AnalysisResult
-import com.youkong.core.ui.theme.TextSecondary
-import com.youkong.feature.friends.component.FriendCard
+import com.youkong.core.ui.component.cli.TerminalFriendCard
+import com.youkong.core.ui.component.cli.TerminalHeader
+import com.youkong.core.ui.theme.ASCII
+import com.youkong.core.ui.theme.CLIColors
 import com.youkong.feature.friends.viewmodel.FriendsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -74,41 +64,65 @@ fun FriendsListScreen(
     }
 
     Scaffold(
+        containerColor = CLIColors.Background,
         topBar = {
-            TopAppBar(
-                title = {
-                    Text(text = "有空好友")
-                },
-                actions = {
-                    IconButton(onClick = onNavigateToAddFriend) {
-                        Icon(
-                            imageVector = Icons.Default.Add,
-                            contentDescription = "添加好友",
-                        )
-                    }
-                    IconButton(onClick = { viewModel.refresh() }) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "刷新",
-                        )
-                    }
-                    IconButton(onClick = onNavigateToSettings) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "设置",
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+            ) {
+                TerminalHeader(
+                    title = "FRIENDS_LIST",
+                    subtitle = "有空好友"
+                )
+
+                // 工具栏按钮行
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(CLIColors.Background)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "[+] 添加",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp,
+                        color = CLIColors.TextSecondary,
+                        modifier = Modifier.clickable(onClick = onNavigateToAddFriend)
+                    )
+
+                    Text(
+                        text = "[↻] 刷新",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp,
+                        color = CLIColors.TextSecondary,
+                        modifier = Modifier.clickable(onClick = { viewModel.refresh() })
+                    )
+
+                    Text(
+                        text = "[⚙] 设置",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp,
+                        color = CLIColors.TextSecondary,
+                        modifier = Modifier.clickable(onClick = onNavigateToSettings)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(CLIColors.Border)
+                )
+            }
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { paddingValues ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .background(CLIColors.Background)
                 .padding(paddingValues),
         ) {
             when {
@@ -117,15 +131,28 @@ fun FriendsListScreen(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center,
                     ) {
-                        CircularProgressIndicator()
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "LOADING...",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 14.sp,
+                                color = CLIColors.TextSecondary
+                            )
+                            CircularProgressIndicator(color = CLIColors.Green)
+                        }
                     }
                 }
 
                 else -> {
                     LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(CLIColors.Background),
+                        contentPadding = PaddingValues(0.dp),
+                        verticalArrangement = Arrangement.spacedBy(0.dp),
                     ) {
                         // Agent 数据卡片（放在顶部）
                         item {
@@ -149,8 +176,13 @@ fun FriendsListScreen(
                                 items = uiState.friends,
                                 key = { it.user.id },
                             ) { friend ->
-                                FriendCard(
-                                    friend = friend,
+                                TerminalFriendCard(
+                                    friendId = friend.user.id,
+                                    name = friend.user.nickname,
+                                    probability = friend.probability ?: -1,
+                                    reason = friend.reason,
+                                    emoji = friend.emoji,
+                                    activity = friend.activity,
                                     onClick = { onNavigateToChat(friend.user.id) },
                                 )
                             }
@@ -168,24 +200,14 @@ private fun AgentStatusCard(
     screenTimeMinutes: Long?,
     onClick: () -> Unit,
 ) {
-    val probabilityColor = analysisResult?.availability?.probability?.let { prob ->
-        when {
-            prob >= 80 -> Color(0xFF22C55E)
-            prob >= 60 -> Color(0xFF86EFAC)
-            prob >= 40 -> Color(0xFFFBBF24)
-            prob >= 20 -> Color(0xFFF97316)
-            else -> Color(0xFFEF4444)
-        }
-    } ?: Color(0xFF9CA3AF)
+    val probability = analysisResult?.availability?.probability ?: -1
+    val probabilityColor = CLIColors.probabilityColor(probability)
 
-    Card(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface,
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+            .background(CLIColors.BackgroundSecondary)
+            .clickable(onClick = onClick)
     ) {
         Row(
             modifier = Modifier
@@ -196,10 +218,10 @@ private fun AgentStatusCard(
             // Emoji
             Text(
                 text = analysisResult?.lifeStatus?.emoji ?: "🤔",
-                fontSize = 40.sp,
+                fontSize = 32.sp,
             )
 
-            Spacer(modifier = Modifier.width(16.dp))
+            Spacer(modifier = Modifier.width(12.dp))
 
             // 状态信息
             Column(
@@ -209,48 +231,55 @@ private fun AgentStatusCard(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = analysisResult?.lifeStatus?.label ?: "获取中...",
-                        style = MaterialTheme.typography.titleMedium,
+                        text = analysisResult?.lifeStatus?.label ?: "LOADING...",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
+                        color = CLIColors.TextPrimary,
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+
                     // 有空概率标签
-                    analysisResult?.availability?.probability?.let { prob ->
-                        Box(
-                            modifier = Modifier
-                                .background(
-                                    color = probabilityColor,
-                                    shape = RoundedCornerShape(4.dp),
-                                )
-                                .padding(horizontal = 6.dp, vertical = 2.dp),
-                        ) {
-                            Text(
-                                text = "${prob}%",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White,
-                            )
-                        }
+                    if (probability >= 0) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "[${probability}%]",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = probabilityColor,
+                        )
                     }
                 }
+
                 Spacer(modifier = Modifier.height(4.dp))
+
                 Text(
                     text = analysisResult?.availability?.reason
-                        ?: screenTimeMinutes?.let { "今日屏幕使用 ${it}分钟" }
-                        ?: "点击查看详情",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
+                        ?: screenTimeMinutes?.let { "Screen: ${it}min today" }
+                        ?: "Click for details",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = CLIColors.TextSecondary,
                     maxLines = 1,
                 )
             }
 
             // 箭头
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = "查看详情",
-                tint = TextSecondary,
+            Text(
+                text = ASCII.ARROW_RIGHT,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 16.sp,
+                color = CLIColors.TextSecondary,
             )
         }
+
+        // 底部分隔线
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(CLIColors.Border)
+        )
     }
 }
 
@@ -259,19 +288,25 @@ private fun EmptyState(
     modifier: Modifier = Modifier,
 ) {
     Column(
-        modifier = modifier.padding(32.dp),
+        modifier = modifier
+            .background(CLIColors.Background)
+            .padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
         Text(
-            text = "还没有好友",
-            style = MaterialTheme.typography.titleLarge,
+            text = "[ NO FRIENDS ]",
+            fontFamily = FontFamily.Monospace,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+            color = CLIColors.TextSecondary,
         )
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(12.dp))
         Text(
-            text = "邀请朋友使用有空，\n查看他们的有空状态",
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
+            text = "邀请朋友使用有空\n查看他们的有空状态",
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp,
+            color = CLIColors.TextWeak,
             textAlign = TextAlign.Center,
         )
     }

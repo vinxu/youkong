@@ -1,5 +1,6 @@
 package com.youkong.feature.profile.screen
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,33 +9,25 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.youkong.core.ui.component.YouKongAvatar
 import com.youkong.core.ui.component.YouKongLoading
-import com.youkong.core.ui.component.YouKongOutlinedButton
-import com.youkong.core.ui.component.YouKongTopBar
-import com.youkong.core.ui.theme.Error
-import com.youkong.core.ui.theme.TextPrimary
-import com.youkong.core.ui.theme.TextSecondary
-import com.youkong.core.ui.theme.YouKongTheme
+import com.youkong.core.ui.component.cli.TerminalAvatar
+import com.youkong.core.ui.component.cli.TerminalButton
+import com.youkong.core.ui.component.cli.TerminalButtonStyle
+import com.youkong.core.ui.component.cli.TerminalDivider
+import com.youkong.core.ui.component.cli.TerminalHeader
+import com.youkong.core.ui.theme.ASCII
+import com.youkong.core.ui.theme.CLIColors
 import com.youkong.feature.profile.viewmodel.ProfileViewModel
 
 @Composable
@@ -47,17 +40,21 @@ fun ProfileScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-    Scaffold(
-        topBar = {
-            YouKongTopBar(
-                title = "我的",
-                onBackClick = onBackClick,
-            )
-        },
-    ) { innerPadding ->
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(CLIColors.Background)
+    ) {
+        // Terminal Header
+        TerminalHeader(
+            title = "Profile",
+            showBackButton = true,
+            onBackClick = onBackClick
+        )
+
         when {
             uiState.isLoading -> {
-                YouKongLoading(message = "加载中...")
+                YouKongLoading(message = "Loading...")
             }
 
             uiState.user != null -> {
@@ -66,62 +63,64 @@ fun ProfileScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(innerPadding)
-                        .padding(horizontal = YouKongTheme.spacing.xxl),
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                        .padding(horizontal = 16.dp),
                 ) {
-                    Spacer(modifier = Modifier.height(48.dp))
+                    Spacer(modifier = Modifier.height(24.dp))
 
-                    YouKongAvatar(
-                        imageUrl = user.avatar,
-                        name = user.nickname,
-                        size = 80.dp,
-                    )
+                    // User Info Section
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TerminalAvatar(isOnline = true)
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
 
-                    Text(
-                        text = user.nickname,
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = TextPrimary,
-                    )
+                        Column {
+                            Text(
+                                text = user.nickname,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 16.sp,
+                                color = CLIColors.TextPrimary,
+                            )
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(4.dp))
 
-                    Text(
-                        text = user.phone.replaceRange(3, 7, "****"),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
-                    )
+                            Text(
+                                text = user.phone.replaceRange(3, 7, "****"),
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                                color = CLIColors.TextSecondary,
+                            )
+                        }
+                    }
 
-                    Spacer(modifier = Modifier.height(48.dp))
+                    Spacer(modifier = Modifier.height(32.dp))
 
+                    // Menu Items
                     ProfileMenuItem(
-                        icon = Icons.Filled.Person,
-                        title = "我的好友",
+                        title = "My Friends",
                         onClick = onNavigateToFriends,
                     )
 
-                    HorizontalDivider(
-                        modifier = Modifier.padding(horizontal = 16.dp),
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                    TerminalDivider(
+                        modifier = Modifier.padding(vertical = 8.dp)
                     )
 
                     ProfileMenuItem(
-                        icon = Icons.AutoMirrored.Filled.Send,
-                        title = "我的邀请",
+                        title = "My Invitations",
                         onClick = onNavigateToInvitations,
                     )
 
                     Spacer(modifier = Modifier.weight(1f))
 
-                    YouKongOutlinedButton(
-                        text = if (uiState.isLoggingOut) "退出中..." else "退出登录",
+                    // Logout Button
+                    TerminalButton(
+                        text = if (uiState.isLoggingOut) "Logging out..." else "Logout",
                         onClick = { viewModel.logout(onLogout) },
                         enabled = !uiState.isLoggingOut,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 32.dp),
+                        style = TerminalButtonStyle.DANGER,
+                        modifier = Modifier.padding(bottom = 32.dp)
                     )
                 }
             }
@@ -131,7 +130,6 @@ fun ProfileScreen(
 
 @Composable
 private fun ProfileMenuItem(
-    icon: ImageVector,
     title: String,
     onClick: () -> Unit,
 ) {
@@ -139,30 +137,24 @@ private fun ProfileMenuItem(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(vertical = 16.dp),
+            .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            modifier = Modifier.size(24.dp),
-            tint = TextSecondary,
+        Text(
+            text = ASCII.ARROW_RIGHT,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 14.sp,
+            color = CLIColors.TextSecondary,
         )
 
-        Spacer(modifier = Modifier.width(16.dp))
+        Spacer(modifier = Modifier.width(12.dp))
 
         Text(
             text = title,
-            style = MaterialTheme.typography.bodyLarge,
-            color = TextPrimary,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 14.sp,
+            color = CLIColors.TextPrimary,
             modifier = Modifier.weight(1f),
-        )
-
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = null,
-            modifier = Modifier.size(24.dp),
-            tint = TextSecondary,
         )
     }
 }

@@ -206,18 +206,22 @@ struct FriendRow: View {
     let friend: FriendInfo
 
     var body: some View {
-        HStack(spacing: 12) {
-            AvatarView(url: friend.user.avatar, size: 44)
+        HStack(spacing: 0) {
+            Text(CLIConstants.bullet)
+                .font(.system(size: 16, design: .monospaced))
+                .foregroundColor(.green)
+                .frame(width: 30)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(friend.user.nickname)
+                    .font(.system(size: 16, design: .monospaced))
                     .fontWeight(.medium)
 
                 HStack(spacing: 4) {
-                    Image(systemName: sourceIcon)
-                        .font(.caption2)
+                    Text(CLIConstants.dash)
+                        .font(.system(size: 12, design: .monospaced))
                     Text(sourceText)
-                        .font(.caption)
+                        .font(.system(size: 12, design: .monospaced))
                 }
                 .foregroundColor(.secondary)
             }
@@ -225,6 +229,7 @@ struct FriendRow: View {
             Spacer()
         }
         .padding(.vertical, 4)
+        .padding(.horizontal, 16)
     }
 
     private var sourceIcon: String {
@@ -257,19 +262,23 @@ struct FriendWithInvitationRow: View {
     let showCircle: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
-            AvatarView(url: friend.user.avatar, size: 44)
+        HStack(spacing: 0) {
+            Text(CLIConstants.bullet)
+                .font(.system(size: 16, design: .monospaced))
+                .foregroundColor(.green)
+                .frame(width: 30)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(friend.user.nickname)
+                    .font(.system(size: 16, design: .monospaced))
                     .fontWeight(.medium)
 
                 if showCircle, let circleName = friend.circleName {
                     HStack(spacing: 4) {
-                        Image(systemName: "circle.grid.2x2")
-                            .font(.caption2)
+                        Text(CLIConstants.dash)
+                            .font(.system(size: 12, design: .monospaced))
                         Text(circleName)
-                            .font(.caption)
+                            .font(.system(size: 12, design: .monospaced))
                     }
                     .foregroundColor(.secondary)
                 }
@@ -278,10 +287,11 @@ struct FriendWithInvitationRow: View {
             Spacer()
 
             Text(friend.createdAt, style: .date)
-                .font(.caption)
+                .font(.system(size: 12, design: .monospaced))
                 .foregroundColor(.secondary)
         }
         .padding(.vertical, 4)
+        .padding(.horizontal, 16)
     }
 }
 

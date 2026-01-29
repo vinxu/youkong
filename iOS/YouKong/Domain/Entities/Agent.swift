@@ -47,15 +47,24 @@ struct ScreenStatus: Codable, Equatable {
 struct LocationStatus: Codable, Equatable {
     let placeType: PlaceType
     let atPlaceSinceMinutes: Int
+    let placeName: String?          // 反向地理编码获取的地点名称
+    let latitude: Double?           // 纬度
+    let longitude: Double?          // 经度
 
     enum CodingKeys: String, CodingKey {
         case placeType = "place_type"
         case atPlaceSinceMinutes = "at_place_since_minutes"
+        case placeName = "place_name"
+        case latitude
+        case longitude
     }
 
     static let unknown = LocationStatus(
         placeType: .unknown,
-        atPlaceSinceMinutes: 0
+        atPlaceSinceMinutes: 0,
+        placeName: nil,
+        latitude: nil,
+        longitude: nil
     )
 }
 

@@ -132,7 +132,7 @@ struct AddFriendContentView: View {
         VStack(spacing: 12) {
             HStack(spacing: 12) {
                 if let user = result.user {
-                    AvatarView(url: user.avatar, size: 50)
+                    Text(CLIConstants.bullet).font(.system(size: 16, design: .monospaced)).foregroundColor(.green).frame(width: 30)
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text(user.nickname)
@@ -351,7 +351,7 @@ struct ReceivedRequestRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
-                AvatarView(url: request.user.avatar, size: 50)
+                Text(CLIConstants.bullet).font(.system(size: 16, design: .monospaced)).foregroundColor(.green).frame(width: 30)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(request.user.nickname)
@@ -440,7 +440,7 @@ struct SentRequestRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            AvatarView(url: request.user.avatar, size: 50)
+            Text(CLIConstants.bullet).font(.system(size: 16, design: .monospaced)).foregroundColor(.green).frame(width: 30)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(request.user.nickname)
@@ -621,7 +621,7 @@ struct ContactMatchRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            AvatarView(url: match.user.avatar, size: 44)
+            Text(CLIConstants.bullet).font(.system(size: 16, design: .monospaced)).foregroundColor(.green).frame(width: 30)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(match.user.nickname)

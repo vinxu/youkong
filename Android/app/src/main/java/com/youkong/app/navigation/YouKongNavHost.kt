@@ -14,8 +14,8 @@ import com.youkong.app.debug.ApiDebugScreen
 import com.youkong.feature.auth.navigation.AUTH_GRAPH_ROUTE
 import com.youkong.feature.auth.navigation.authGraph
 import com.youkong.feature.auth.navigation.navigateToPhoneInput
-import com.youkong.feature.chat.navigation.chatScreen
-import com.youkong.feature.chat.navigation.navigateToChat
+import com.youkong.feature.message.navigation.navigateToChat
+import com.youkong.feature.message.navigation.navigateToChatWithPartner
 import com.youkong.feature.friends.navigation.FRIENDS_ROUTE
 import com.youkong.feature.friends.navigation.addFriendScreen
 import com.youkong.feature.friends.navigation.friendsScreen
@@ -106,7 +106,7 @@ fun YouKongNavHost(
         // 好友列表 (主页面)
         friendsScreen(
             onNavigateToChat = { userId ->
-                navController.navigateToChat(userId)
+                navController.navigateToChatWithPartner(userId)
             },
             onNavigateToSettings = {
                 navController.navigateToSettings()
@@ -129,8 +129,8 @@ fun YouKongNavHost(
             },
         )
 
-        // 聊天
-        chatScreen(navController = navController)
+        // 聊天和消息
+        messagesGraph(navController = navController)
 
         // 设置
         settingsGraph(navController = navController)

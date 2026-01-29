@@ -66,6 +66,7 @@ class UsageStatsCollector @Inject constructor(
                     currentApp = event.packageName
                     lastActiveTime = event.timeStamp
                     isScreenOn = true
+                    // 如果 session 还没开始，记录开始时间
                     if (sessionStartTime == null) {
                         sessionStartTime = event.timeStamp
                     }
@@ -85,7 +86,7 @@ class UsageStatsCollector @Inject constructor(
                     foregroundStartTimes.remove(event.packageName)
                 }
                 UsageEvents.Event.SCREEN_NON_INTERACTIVE -> {
-                    // 屏幕关闭
+                    // 屏幕关闭 - 重置 session
                     isScreenOn = false
                     sessionStartTime = null
                     // 结算所有正在前台的应用时间
@@ -100,7 +101,7 @@ class UsageStatsCollector @Inject constructor(
                     foregroundStartTimes.clear()
                 }
                 UsageEvents.Event.SCREEN_INTERACTIVE -> {
-                    // 屏幕打开
+                    // 屏幕打开 - 开始新的 session
                     isScreenOn = true
                     sessionStartTime = event.timeStamp
                 }

@@ -16,13 +16,21 @@ struct EditProfileView: View {
             ScrollView {
                 VStack(spacing: UIConstants.Spacing.xxl) {
                     VStack(spacing: UIConstants.Spacing.lg) {
-                        AvatarView(url: viewModel.avatar, size: 100)
+                        // ASCII 头像框
+                        VStack(spacing: 4) {
+                            Text("[ 👤 ]")
+                                .font(.system(size: 48, design: .monospaced))
+                                .foregroundColor(.secondary)
 
-                        Button("更换头像") {
-                            // TODO: 实现头像选择
+                            Text("(头像功能开发中)")
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundColor(.secondary)
                         }
-                        .font(.subheadline)
-                        .foregroundColor(.primaryGreen)
+                        .padding()
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                        )
                     }
                     .padding(.top, UIConstants.Spacing.xxl)
 
