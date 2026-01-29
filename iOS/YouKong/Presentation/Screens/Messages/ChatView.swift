@@ -124,10 +124,9 @@ struct ChatView: View {
                     .foregroundColor(.green)
 
                 // 输入框
-                TextField("输入消息...", text: $viewModel.messageInput, axis: .vertical)
+                TextField("输入消息...", text: $viewModel.messageInput)
                     .font(.system(size: 14, design: .monospaced))
                     .foregroundColor(.white)
-                    .lineLimit(1...4)
                     .textFieldStyle(.plain)
                     .submitLabel(.send)
                     .onSubmit {

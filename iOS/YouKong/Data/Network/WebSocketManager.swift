@@ -179,7 +179,8 @@ private struct WebSocketMessage: Codable {
     let payload: [String: Any]?
 
     enum CodingKeys: String, CodingKey {
-        case type, payload
+        case type
+        case payload = "data"  // 服务器返回的字段名是 "data"
     }
 
     init(type: String, payload: [String: Any]?) {

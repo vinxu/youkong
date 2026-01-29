@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -35,6 +36,7 @@ fun TerminalTextField(
     placeholder: String = "",
     isPassword: Boolean = false,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    onSend: (() -> Unit)? = null,
 ) {
     Row(
         modifier = modifier
@@ -67,6 +69,10 @@ fun TerminalTextField(
             cursorBrush = SolidColor(CLIColors.Green),
             visualTransformation = if (isPassword) PasswordVisualTransformation() else VisualTransformation.None,
             keyboardOptions = keyboardOptions,
+            keyboardActions = KeyboardActions(
+                onSend = { onSend?.invoke() },
+                onDone = { onSend?.invoke() }
+            ),
             decorationBox = { innerTextField ->
                 if (value.isEmpty()) {
                     Text(

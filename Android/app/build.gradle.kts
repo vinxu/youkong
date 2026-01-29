@@ -71,6 +71,7 @@ dependencies {
     implementation(project(":core:core-datastore"))
     implementation(project(":core:core-agent"))
     implementation(project(":core:core-permission"))
+    implementation(project(":core:core-websocket"))
 
     // Feature modules
     implementation(project(":feature:feature-auth"))

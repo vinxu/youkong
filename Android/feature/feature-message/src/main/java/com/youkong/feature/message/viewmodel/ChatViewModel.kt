@@ -42,6 +42,8 @@ class ChatViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
+    private val messageIds = mutableSetOf<String>()
+
     init {
         loadCurrentUser()
         initializeConversation()
@@ -53,9 +55,10 @@ class ChatViewModel @Inject constructor(
             webSocketManager.newMessages.collect { newMessageData ->
                 // 只处理当前会话的消息
                 if (newMessageData.conversationId == conversationId) {
-                    val message = newMessageData.message
+                    val message = convertToMessage(newMessageData.message)
                     // 避免重复添加（发送的消息已经在 sendMessage 中添加了）
-                    if (!_uiState.value.messages.any { it.id == message.id }) {
+                    if (!messageIds.contains(message.id)) {
+                        messageIds.add(message.id)
                         _uiState.update {
                             it.copy(messages = it.messages + message)
                         }
@@ -63,6 +66,22 @@ class ChatViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    private fun convertToMessage(messageData: com.youkong.core.websocket.MessageData): Message {
+        return Message(
+            id = messageData.id,
+            sender = com.youkong.core.domain.model.UserProfile(
+                id = messageData.sender.id,
+                nickname = messageData.sender.nickname,
+                avatar = messageData.sender.avatar
+            ),
+            type = MessageType.valueOf(messageData.type),
+            content = messageData.content,
+            metadata = null,
+            createdAt = messageData.createdAt,
+            isRead = messageData.isRead
+        )
     }
 
     private fun initializeConversation() {
@@ -124,6 +143,8 @@ class ChatViewModel @Inject constructor(
 
             messageRepository.getMessages(convId)
                 .onSuccess { messages ->
+                    // 记录已加载的消息ID
+                    messages.forEach { messageIds.add(it.id) }
                     _uiState.update {
                         it.copy(
                             isLoading = false,
