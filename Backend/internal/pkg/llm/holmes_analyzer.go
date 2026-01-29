@@ -342,12 +342,13 @@ func (h *HolmesAnalyzer) callLLM(ctx context.Context, clue *model.HolmesClue, fe
 		"enable_thinking": true, // 启用思考模式
 	}
 
-	response, err := h.client.chatWithRequestBody(ctx, requestBody)
+	// 使用思考模式 API，获取内容和思考过程
+	thinkingResp, err := h.client.ChatWithThinking(ctx, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("LLM call failed: %w", err)
 	}
 
-	return h.parseResponse(response)
+	return h.parseThinkingResponse(thinkingResp)
 }
 
 // buildPrompt 构建福尔摩斯推理 Prompt
@@ -519,7 +520,46 @@ func (h *HolmesAnalyzer) formatFeatures(features *model.HolmesFeatures) string {
 	)
 }
 
-// parseResponse 解析 LLM 响应
+// parseThinkingResponse 解析通义千问思考模式响应
+func (h *HolmesAnalyzer) parseThinkingResponse(resp *ThinkingResponse) (*HolmesLLMResponse, error) {
+	// 清理响应内容（移除可能的 markdown 代码块）
+	content := strings.TrimSpace(resp.Content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	var result HolmesLLMResponse
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return nil, fmt.Errorf("parse LLM response: %w, content: %s", err, content)
+	}
+
+	// 使用 reasoning_content 作为思考过程
+	if resp.ReasoningContent != "" {
+		result.Reasoning = resp.ReasoningContent
+	}
+
+	// 验证和修正数据
+	if result.Probability < 0 {
+		result.Probability = 0
+	}
+	if result.Probability > 100 {
+		result.Probability = 100
+	}
+	if result.Confidence == "" {
+		result.Confidence = "medium"
+	}
+	if result.Summary == "" {
+		result.Summary = "状态未知"
+	}
+	if result.Emoji == "" {
+		result.Emoji = "🤔"
+	}
+
+	return &result, nil
+}
+
+// parseResponse 解析 LLM 响应（兼容旧格式）
 func (h *HolmesAnalyzer) parseResponse(response string) (*HolmesLLMResponse, error) {
 	// 提取 <think> 标签中的思考内容（如果有）
 	thinkContent := ""

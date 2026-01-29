@@ -68,7 +68,8 @@ type ChatMessage struct {
 type ChatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content,omitempty"` // 通义千问思考模式返回的思考过程
 		} `json:"message"`
 	} `json:"choices"`
 	Error *struct {
@@ -270,6 +271,57 @@ func (c *OpenRouterClient) chatWithRequestBody(ctx context.Context, requestBody 
 	}
 
 	return chatResp.Choices[0].Message.Content, nil
+}
+
+// ThinkingResponse 思考模式响应
+type ThinkingResponse struct {
+	Content          string // 最终回复内容
+	ReasoningContent string // 思考过程
+}
+
+// ChatWithThinking 使用思考模式发送请求，返回内容和思考过程
+func (c *OpenRouterClient) ChatWithThinking(ctx context.Context, requestBody map[string]interface{}) (*ThinkingResponse, error) {
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", qwenAPIURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var chatResp ChatResponse
+	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	if chatResp.Error != nil {
+		return nil, fmt.Errorf("api error: %s (code: %s)", chatResp.Error.Message, chatResp.Error.Code)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, fmt.Errorf("no response choices")
+	}
+
+	return &ThinkingResponse{
+		Content:          chatResp.Choices[0].Message.Content,
+		ReasoningContent: chatResp.Choices[0].Message.ReasoningContent,
+	}, nil
 }
 
 // GenerateFreeReason 生成隐私安全的有空理由
