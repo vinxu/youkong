@@ -9,56 +9,33 @@ struct FriendsListView: View {
     @StateObject private var viewModel = FriendsListViewModel()
     @StateObject private var notificationManager = NotificationManager.shared
     @State private var selectedFriend: FriendRecommendation?
-    @State private var showAgentData = false
+    @State private var showProfile = false
     @State private var showFriendsHub = false
     @State private var navigationPath = NavigationPath()
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
-            Group {
-                if viewModel.isLoading && viewModel.friends.isEmpty {
-                    loadingView
-                } else if viewModel.isEmpty {
-                    emptyView
-                } else {
-                    friendsList
-                }
-            }
-            .navigationTitle("谁有空")
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        showAgentData = true
-                    } label: {
-                        Image(systemName: "chart.bar.doc.horizontal")
-                            .font(.title3)
-                            .foregroundColor(.primary)
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    HStack(spacing: 16) {
-                        // 添加好友入口
-                        Button {
-                            showFriendsHub = true
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.title3)
-                                .foregroundColor(.primary)
-                        }
+            ZStack {
+                // 终端背景
+                Color.black.ignoresSafeArea()
 
-                        // 个人中心
-                        NavigationLink {
-                            ProfileView()
-                        } label: {
-                            Image(systemName: "person.circle")
-                                .font(.title3)
-                                .foregroundColor(.primary)
-                        }
+                VStack(spacing: 0) {
+                    // 终端头部
+                    terminalHeader
+
+                    // 内容区域
+                    if viewModel.isLoading && viewModel.friends.isEmpty {
+                        loadingView
+                    } else if viewModel.isEmpty {
+                        emptyView
+                    } else {
+                        friendsList
                     }
                 }
             }
-            .sheet(isPresented: $showAgentData) {
-                MyAgentDataSheet()
+            .navigationBarHidden(true)
+            .sheet(isPresented: $showProfile) {
+                ProfileView()
             }
             .sheet(isPresented: $showFriendsHub) {
                 FriendsHubView()
@@ -86,83 +63,230 @@ struct FriendsListView: View {
         notificationManager.clearPendingNavigation()
     }
 
-    // MARK: - Friends List
+    // MARK: - Terminal Header
+
+    private var terminalHeader: some View {
+        VStack(spacing: 0) {
+            HStack {
+                // 窗口按钮
+                HStack(spacing: 8) {
+                    Circle().fill(Color.red).frame(width: 12, height: 12)
+                    Circle().fill(Color.yellow).frame(width: 12, height: 12)
+                    Circle().fill(Color.green).frame(width: 12, height: 12)
+                }
+
+                Spacer()
+
+                Text("YouKong — zsh")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.gray)
+
+                Spacer()
+
+                Button {
+                    showProfile = true
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                }
+
+                Button {
+                    showFriendsHub = true
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color(white: 0.15))
+
+            // 分隔线
+            Rectangle()
+                .fill(Color.gray.opacity(0.3))
+                .frame(height: 1)
+        }
+    }
+
+    // MARK: - Friends List (CLI Style)
 
     private var friendsList: some View {
-        ScrollView {
-            LazyVStack(spacing: UIConstants.Spacing.md) {
-                // 更新时间提示
-                if let lastUpdatedText = viewModel.lastUpdatedText {
-                    HStack {
-                        Spacer()
-                        Text("更新于 \(lastUpdatedText)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.horizontal, UIConstants.Spacing.lg)
-                    .padding(.top, UIConstants.Spacing.sm)
-                }
+        VStack(spacing: 0) {
+            // 朋友列表
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(viewModel.friends) { friend in
+                        Button {
+                            navigationPath.append(friend)
+                        } label: {
+                            terminalFriendRow(friend: friend)
+                        }
+                        .buttonStyle(PlainButtonStyle())
 
-                // 朋友列表
-                ForEach(viewModel.friends) { friend in
-                    NavigationLink(value: friend) {
-                        FriendProbabilityCard(friend: friend)
+                        Rectangle()
+                            .fill(Color.gray.opacity(0.2))
+                            .frame(height: 1)
+                            .padding(.leading, 46)
                     }
-                    .buttonStyle(PlainButtonStyle())
                 }
+                .padding(.vertical, 8)
             }
-            .padding(.horizontal, UIConstants.Spacing.lg)
-            .padding(.bottom, UIConstants.Spacing.xxxl)
-        }
-        .refreshable {
-            await viewModel.refresh()
+            .refreshable {
+                await viewModel.refresh()
+            }
+
+            // 底部状态栏
+            terminalFooter
         }
     }
 
-    // MARK: - Loading View
+    private func terminalFriendRow(friend: FriendRecommendation) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 0) {
+                // 状态指示符 + Emoji
+                HStack(spacing: 4) {
+                    Text(CLIConstants.statusSymbol(for: friend.probability))
+                        .font(.system(size: 16, design: .monospaced))
+                        .foregroundColor(CLIConstants.color(for: friend.probability))
+
+                    if let emoji = friend.emoji {
+                        Text(emoji)
+                            .font(.system(size: 14))
+                    }
+                }
+                .frame(width: 40)
+
+                // 朋友名字
+                Text(friend.name)
+                    .font(.system(size: 15, design: .monospaced))
+                    .foregroundColor(Color(white: 0.9))
+
+                Spacer()
+
+                // 概率百分比
+                Text(friend.probability == -1 ? "--" : "\(friend.probability)%")
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundColor(CLIConstants.color(for: friend.probability))
+                    .frame(width: 50, alignment: .trailing)
+            }
+
+            // 自然语言描述
+            if friend.hasData {
+                Text("> \(friend.displayActivity)")
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundColor(.gray)
+                    .lineLimit(2)  // 支持多行
+                    .padding(.leading, 44)  // 对齐状态符号
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+
+    private var terminalFooter: some View {
+        VStack(spacing: 0) {
+            Rectangle()
+                .fill(Color.gray.opacity(0.3))
+                .frame(height: 1)
+
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 6, height: 6)
+
+                Text("\(viewModel.friends.count) friends")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.gray)
+
+                if let lastUpdate = viewModel.lastUpdated {
+                    Text("·")
+                        .foregroundColor(.gray.opacity(0.5))
+
+                    Text("更新于 \(formatTime(lastUpdate))")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(.gray)
+                }
+
+                Spacer()
+
+                Text("ready")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.gray.opacity(0.7))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color(white: 0.1))
+        }
+    }
+
+    private func formatTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+
+    // MARK: - Loading View (CLI Style)
 
     private var loadingView: some View {
-        VStack(spacing: UIConstants.Spacing.lg) {
-            ProgressView()
-                .scaleEffect(1.2)
-            Text("正在分析朋友状态...")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+        VStack(spacing: 0) {
+            Spacer()
+
+            VStack(spacing: 16) {
+                ProgressView()
+                    .scaleEffect(1.2)
+                    .progressViewStyle(CircularProgressViewStyle(tint: .green))
+
+                Text("> 正在分析朋友状态...")
+                    .font(.system(size: 14, design: .monospaced))
+                    .foregroundColor(.green)
+            }
+
+            Spacer()
         }
     }
 
-    // MARK: - Empty View
+    // MARK: - Empty View (CLI Style)
 
     private var emptyView: some View {
-        VStack(spacing: UIConstants.Spacing.xl) {
-            Image(systemName: "person.2.slash")
-                .font(.system(size: 60))
-                .foregroundColor(.secondary)
+        VStack(spacing: 0) {
+            Spacer()
 
-            Text("还没有朋友")
-                .font(.title3)
-                .fontWeight(.medium)
+            VStack(spacing: 20) {
+                // ASCII Art 表情
+                Text("( •_•)")
+                    .font(.system(size: 30, design: .monospaced))
+                    .foregroundColor(.gray)
 
-            Text("授权通讯录权限，找到你的朋友")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
+                Text("/>💌<\\")
+                    .font(.system(size: 24, design: .monospaced))
+                    .foregroundColor(.gray)
 
-            Button {
-                Task {
-                    await viewModel.refresh()
+                Text("还没有朋友哦")
+                    .font(.system(size: 16, design: .monospaced))
+                    .foregroundColor(Color(white: 0.7))
+                    .padding(.top, 8)
+
+                Button {
+                    showFriendsHub = true
+                } label: {
+                    Text("[+] 邀请朋友加入有空")
+                        .font(.system(size: 15, design: .monospaced))
+                        .foregroundColor(.green)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 20)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.green.opacity(0.5), lineWidth: 1)
+                        )
                 }
-            } label: {
-                Text("刷新")
-                    .font(.headline)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, UIConstants.Spacing.xxl)
-                    .padding(.vertical, UIConstants.Spacing.md)
-                    .background(Color.primaryGreen)
-                    .cornerRadius(UIConstants.CornerRadius.md)
+                .padding(.top, 12)
             }
+
+            Spacer()
         }
-        .padding()
     }
 }
 
@@ -172,323 +296,625 @@ struct NotificationDestination: Hashable {
     let conversationId: String
 }
 
-// MARK: - My Agent Data Sheet
+// MARK: - My Agent Data Sheet (Terminal Style with SSE)
 
 struct MyAgentDataSheet: View {
     @Environment(\.dismiss) private var dismiss
 
+    // 终端输出行
+    @State private var terminalLines: [TerminalLine] = []
+    @State private var isRunning = false
+    @State private var showCursor = true
+    @State private var currentThinkingLine: String = ""
+
+    // 数据状态
     @State private var screenStatus: ScreenStatus = .idle
     @State private var locationStatus: LocationStatus = .unknown
     @State private var deviceStatus: DeviceStatus = .unknown
-    @State private var currentCoordinate: (lat: Double, lng: Double)?
-    @State private var homeCoordinate: (lat: Double, lng: Double)?
-    @State private var workCoordinate: (lat: Double, lng: Double)?
-    @State private var extensionMinutes: Int = 0
-    @State private var extensionLastUpdate: Date?
-    @State private var showAppPicker = false
-    @State private var selectedAppCount = 0
-    @State private var selectedCategoryCount = 0
 
-    // LLM 预测结果
-    @State private var analysisResult: AnalysisData?
-    @State private var isUploading = false
-    @State private var uploadError: String?
+    // SSE 客户端
+    private let sseClient = SSEClient()
+
+    // 光标闪烁定时器
+    let cursorTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+            ZStack {
+                // 终端背景
+                Color.black.ignoresSafeArea()
 
-                    // LLM 预测结果（顶部突出显示）
-                    if let analysis = analysisResult {
-                        GroupBox {
-                            VStack(spacing: 16) {
-                                // 生活状态 emoji
-                                Text(analysis.lifeStatus.emoji)
-                                    .font(.system(size: 60))
+                VStack(spacing: 0) {
+                    // 终端头部
+                    terminalHeader
 
-                                // 生活状态标签
-                                Text(analysis.lifeStatus.label)
-                                    .font(.title3)
-                                    .fontWeight(.medium)
-
-                                // 有空概率
-                                HStack(spacing: 8) {
-                                    Text("\(analysis.availability.probability)%")
-                                        .font(.system(size: 32, weight: .bold))
-                                        .foregroundColor(probabilityColor(analysis.availability.probability))
-
-                                    Text(analysis.availability.status)
-                                        .font(.headline)
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 4)
-                                        .background(probabilityColor(analysis.availability.probability).opacity(0.2))
-                                        .cornerRadius(12)
+                    // 终端输出区域
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 1) {
+                                ForEach(terminalLines) { line in
+                                    TerminalLineView(line: line)
+                                        .id(line.id)
                                 }
 
-                                // 理由
-                                Text(analysis.availability.reason)
-                                    .font(.body)
-                                    .foregroundColor(.secondary)
-                                    .multilineTextAlignment(.center)
-
-                                // 置信度
-                                HStack {
-                                    Text("置信度:")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    Text(analysis.availability.confidence)
-                                        .font(.caption)
-                                        .fontWeight(.medium)
+                                // 正在输入的思考内容
+                                if !currentThinkingLine.isEmpty {
+                                    Text("   " + currentThinkingLine)
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .foregroundColor(.cyan.opacity(0.8))
+                                        .id("thinking")
                                 }
+
+                                // 光标行（运行时显示）
+                                if isRunning {
+                                    HStack(spacing: 0) {
+                                        Text("› ")
+                                            .foregroundColor(.green)
+                                        if showCursor {
+                                            Text("▌")
+                                                .foregroundColor(.green)
+                                        }
+                                    }
+                                    .font(.system(.caption, design: .monospaced))
+                                }
+
+                                // 底部锚点（始终存在）
+                                Color.clear
+                                    .frame(height: 1)
+                                    .id("bottom")
                             }
-                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 12)
                             .padding(.vertical, 8)
-                        } label: {
-                            Label("LLM 预测结果", systemImage: "brain.head.profile")
-                                .font(.headline)
                         }
-                    }
-
-                    // 上报按钮
-                    Button {
-                        Task {
-                            await uploadAndPredict()
+                        .onChange(of: terminalLines.count) { _ in
+                            scrollToBottom(proxy: proxy)
                         }
-                    } label: {
-                        HStack {
-                            if isUploading {
-                                ProgressView()
-                                    .tint(.white)
-                            } else {
-                                Image(systemName: "arrow.up.circle.fill")
-                            }
-                            Text(isUploading ? "上报中..." : "上报数据并获取预测")
+                        .onChange(of: currentThinkingLine) { _ in
+                            scrollToBottom(proxy: proxy)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(isUploading ? Color.gray : Color.primaryGreen)
-                        .foregroundColor(.white)
-                        .cornerRadius(12)
-                    }
-                    .disabled(isUploading)
-
-                    if let error = uploadError {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
-
-                    // 屏幕使用数据
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 12) {
-                            row("是否活跃", value: screenStatus.isActive ? "是" : "否")
-                            row("活动类型", value: activityTypeText(screenStatus.activityType))
-                            row("本次使用时长", value: "\(screenStatus.sessionDurationMinutes) 分钟")
-                            row("上次活跃", value: screenStatus.lastActiveMinutesAgo == 0 ? "刚刚" : "\(screenStatus.lastActiveMinutesAgo) 分钟前")
-                            if let category = screenStatus.lastActiveCategory, !category.isEmpty {
-                                row("最近使用分类", value: category)
-                                    .foregroundColor(.blue)
-                            }
-                        }
-                    } label: {
-                        Label("屏幕使用", systemImage: "iphone")
-                            .font(.headline)
-                    }
-
-                    // 位置数据
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 12) {
-                            row("位置类型", value: placeTypeText(locationStatus.placeType))
-                            row("在此位置", value: "\(locationStatus.atPlaceSinceMinutes) 分钟")
-
-                            if let coord = currentCoordinate {
-                                row("坐标", value: String(format: "%.4f, %.4f", coord.lat, coord.lng))
-                            }
-
-                            Divider()
-
-                            if let home = homeCoordinate {
-                                row("🏠 家", value: String(format: "%.4f, %.4f", home.lat, home.lng))
-                            } else {
-                                row("🏠 家", value: "未学习")
-                            }
-
-                            if let work = workCoordinate {
-                                row("🏢 公司", value: String(format: "%.4f, %.4f", work.lat, work.lng))
-                            } else {
-                                row("🏢 公司", value: "未学习")
-                            }
-                        }
-                    } label: {
-                        Label("地理位置", systemImage: "location")
-                            .font(.headline)
-                    }
-
-                    // 设备状态
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 12) {
-                            row("电池电量", value: "\(Int(deviceStatus.batteryLevel * 100))%")
-                            row("充电状态", value: batteryStateText(deviceStatus.batteryState))
-                            row("低电量模式", value: deviceStatus.isLowPowerMode ? "开启" : "关闭")
-                            row("专注模式", value: deviceStatus.isFocusModeOn ? "开启" : "关闭")
-                            row("耳机连接", value: deviceStatus.isHeadphonesConnected ? "已连接" : "未连接")
-                            row("网络类型", value: networkTypeText(deviceStatus.networkType))
-                            row("屏幕亮度", value: "\(Int(deviceStatus.screenBrightness * 100))%")
-                        }
-                    } label: {
-                        Label("设备状态", systemImage: "battery.100.bolt")
-                            .font(.headline)
-                    }
-
-                    // 屏幕时间监控设置
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 12) {
-                            row("已选应用", value: "\(selectedAppCount) 个")
-                            row("已选分类", value: "\(selectedCategoryCount) 个")
-                            row("屏幕时间", value: "\(extensionMinutes) 分钟")
-                            row("更新时间", value: extensionLastUpdate?.formatted(.dateTime.hour().minute().second()) ?? "无")
-
-                            Divider()
-
-                            // 选择要监控的应用按钮
-                            Button {
-                                showAppPicker = true
-                            } label: {
-                                HStack {
-                                    Image(systemName: "apps.iphone")
-                                    Text("选择要监控的应用")
-                                    Spacer()
-                                    Image(systemName: "chevron.right")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
+                        .onChange(of: isRunning) { running in
+                            if !running {
+                                // 分析结束时确保滚动到底部
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    scrollToBottom(proxy: proxy)
                                 }
                             }
-
-                            if selectedAppCount == 0 && selectedCategoryCount == 0 {
-                                Text("⚠️ 请选择要监控的应用或分类，否则无法获取屏幕使用时间")
-                                    .font(.caption)
-                                    .foregroundColor(.orange)
-                            }
-
-                            Button("清除测试数据") {
-                                clearTestData()
-                            }
-                            .font(.caption)
-                            .foregroundColor(.red)
                         }
-                    } label: {
-                        Label("屏幕时间监控", systemImage: "app.badge")
-                            .font(.headline)
                     }
 
-                    // 刷新本地数据按钮
-                    Button {
-                        loadData()
-                    } label: {
-                        HStack {
-                            Image(systemName: "arrow.clockwise")
-                            Text("刷新本地数据")
-                        }
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    }
-                }
-                .padding()
-            }
-            .navigationTitle("我的 Agent 数据")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("关闭") {
-                        dismiss()
-                    }
+                    // 底部操作栏
+                    bottomBar
                 }
             }
+            .navigationBarHidden(true)
             .task {
-                await uploadAndPredict()
+                await runStreamAnalysis()
             }
-            .sheet(isPresented: $showAppPicker) {
-                appPickerSheet
-            }
-        }
-    }
-
-    // MARK: - App Picker Sheet
-
-    @ViewBuilder
-    private var appPickerSheet: some View {
-        #if canImport(FamilyControls)
-        if #available(iOS 16.0, *) {
-            NavigationStack {
-                FamilyActivityPickerView(
-                    selection: Binding(
-                        get: { ScreenDataCollector.shared.activitySelection },
-                        set: { ScreenDataCollector.shared.activitySelection = $0 }
-                    )
-                ) {
-                    // 保存选择并重新启动监控
-                    ScreenDataCollector.shared.saveSelection()
-                    ScreenDataCollector.shared.startMonitoring()
-                    loadData()
-                    showAppPicker = false
+            .onReceive(cursorTimer) { _ in
+                if isRunning {
+                    showCursor.toggle()
                 }
             }
-        } else {
-            Text("需要 iOS 16 或更高版本")
         }
-        #else
-        Text("当前设备不支持屏幕时间监控")
-        #endif
+        .preferredColorScheme(.dark)
     }
 
-    private func loadData() {
-        // 屏幕数据
-        let screen = ScreenDataCollector.shared
-        screenStatus = screen.currentStatus
+    // MARK: - Terminal Header
 
-        // 选择的应用数量
-        #if canImport(FamilyControls)
-        if #available(iOS 16.0, *) {
-            selectedAppCount = screen.activitySelection.applicationTokens.count
-            selectedCategoryCount = screen.activitySelection.categoryTokens.count
+    private var terminalHeader: some View {
+        HStack {
+            // 窗口按钮
+            HStack(spacing: 8) {
+                Circle().fill(Color.red).frame(width: 12, height: 12)
+                Circle().fill(Color.yellow).frame(width: 12, height: 12)
+                Circle().fill(Color.green).frame(width: 12, height: 12)
+            }
+
+            Spacer()
+
+            Text("Holmes Agent — zsh")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.gray)
+
+            Spacer()
+
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
         }
-        #endif
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color(white: 0.15))
+    }
+
+    // MARK: - Bottom Bar
+
+    private var bottomBar: some View {
+        HStack(spacing: 12) {
+            Button {
+                Task {
+                    await runStreamAnalysis()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: isRunning ? "stop.fill" : "play.fill")
+                        .font(.caption)
+                    Text(isRunning ? "分析中..." : "运行")
+                }
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(isRunning ? .gray : .black)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(isRunning ? Color.gray.opacity(0.3) : Color.green)
+                .cornerRadius(4)
+            }
+            .disabled(isRunning)
+
+            Button {
+                terminalLines.removeAll()
+                currentThinkingLine = ""
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "trash")
+                        .font(.caption)
+                    Text("清屏")
+                }
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.green)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.green.opacity(0.5), lineWidth: 1)
+                )
+            }
+            .disabled(isRunning)
+
+            Spacer()
+
+            // 状态指示
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(isRunning ? Color.yellow : Color.green)
+                    .frame(width: 6, height: 6)
+                Text(isRunning ? "streaming" : "ready")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundColor(.gray)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color(white: 0.1))
+    }
+
+    // MARK: - Terminal Operations
+
+    private func appendLine(_ text: String, type: TerminalLine.LineType = .output) {
+        terminalLines.append(TerminalLine(text: text, type: type))
+    }
+
+    private func appendCommand(_ command: String) {
+        terminalLines.append(TerminalLine(text: command, type: .command))
+    }
+
+    private func scrollToBottom(proxy: ScrollViewProxy) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            withAnimation(.easeOut(duration: 0.15)) {
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
+        }
+    }
+
+    // MARK: - Stream Analysis
+
+    private func runStreamAnalysis() async {
+        guard !isRunning else { return }
+
+        isRunning = true
+        terminalLines.removeAll()
+        currentThinkingLine = ""
+
+        // 显示启动信息
+        appendLine("", type: .output)
+        appendLine("┌─────────────────────────────────────────┐", type: .separator)
+        appendLine("│     🔍 Holmes Agent v2.0 (Stream)       │", type: .header)
+        appendLine("│     福尔摩斯推理框架                    │", type: .header)
+        appendLine("└─────────────────────────────────────────┘", type: .separator)
+        appendLine("", type: .output)
+
+        // 采集本地数据
+        appendCommand("$ holmes collect --local")
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        loadData()
+        let calendarStatus = CalendarDataCollector.shared.getCurrentStatus()
+        let movementStatus = MovementDataCollector.shared.getCurrentStatus()
+
+        // 显示本地采集的数据摘要
+        appendLine("", type: .output)
+        appendLine("📱 本地数据采集完成:", type: .section)
+        appendLine("├─ 屏幕: \(screenStatus.isActive ? "活跃" : "空闲") (\(screenStatus.activityType.rawValue), \(screenStatus.sessionDurationMinutes)分钟)", type: .output)
+        appendLine("├─ 位置: \(locationStatus.placeName ?? locationStatus.placeType.rawValue) (停留\(locationStatus.atPlaceSinceMinutes)分钟)", type: .output)
+        appendLine("├─ 日历: \(calendarStatus.hasCurrentEvent ? "有日程" : "无日程") (剩余\(calendarStatus.todayRemainingCount)个)", type: .output)
+        appendLine("├─ 运动: \(movementStatus.movementType.displayName) (今日\(movementStatus.stepsToday)步)", type: .output)
+        appendLine("└─ 电量: \(Int(deviceStatus.batteryLevel * 100))% (\(deviceStatus.isCharging ? "充电中" : "未充电"))", type: .output)
+        appendLine("", type: .output)
+
+        // 添加数据时间戳
+        let collectionTime = Date().formatted(.dateTime.hour().minute().second())
+        appendLine("⏰ 采集时间: \(collectionTime)", type: .info)
+        appendLine("", type: .output)
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        // 发起流式请求
+        appendCommand("$ holmes analyze --stream --model qwen3-max")
+        appendLine("", type: .output)
+
+        let request = buildRequest(calendarStatus: calendarStatus, movementStatus: movementStatus)
+
+        do {
+            try await sseClient.streamHolmesAnalysis(request: request) { [self] event in
+                self.handleStreamEvent(event)
+            }
+        } catch {
+            // 流式 API 失败，回退到普通 API
+            print("[Holmes] SSE failed: \(error.localizedDescription), falling back to normal API")
+            appendLine("", type: .output)
+            appendLine("[WARN] 流式连接失败: \(error.localizedDescription)", type: .warning)
+            appendLine("[INFO] 切换到普通模式...", type: .info)
+            appendLine("", type: .output)
+
+            await fallbackToNonStreamingAPI(request: request)
+        }
+
+        // 完成
+        appendLine("", type: .output)
+        appendLine("─────────────────────────────────────────", type: .separator)
+        let timestamp = Date().formatted(.dateTime.hour().minute().second())
+        appendLine("分析完成 @ \(timestamp)", type: .info)
+        appendLine("", type: .output)
+
+        isRunning = false
+    }
+
+    // MARK: - Diagnostics
+
+    private func runDiagnostics() async {
+        guard !isRunning else { return }
+
+        isRunning = true
+        terminalLines.removeAll()
+
+        appendLine("", type: .output)
+        appendLine("┌─────────────────────────────────────────┐", type: .separator)
+        appendLine("│        🔍 数据采集诊断工具              │", type: .header)
+        appendLine("└─────────────────────────────────────────┘", type: .separator)
+        appendLine("", type: .output)
+
+        appendCommand("$ holmes diagnose --all")
+        appendLine("", type: .output)
+
+        // 1. 权限检查
+        appendLine("═══════════════════════════════════════", type: .separator)
+        appendLine("1️⃣  权限状态检查", type: .section)
+        appendLine("═══════════════════════════════════════", type: .separator)
+        appendLine("", type: .output)
+
+        let permissionManager = PermissionManager.shared
+        appendLine("📍 位置权限: \(permissionManager.status.location ? "✅ 已授权" : "❌ 未授权")", type: .output)
+        appendLine("📅 日历权限: \(permissionManager.status.calendar ? "✅ 已授权" : "❌ 未授权")", type: .output)
+        appendLine("🏃 运动权限: \(permissionManager.status.motion ? "✅ 已授权" : "❌ 未授权")", type: .output)
+        appendLine("📱 屏幕时间: \(permissionManager.status.screenTime ? "✅ 已授权" : "❌ 未授权")", type: .output)
+        appendLine("👥 通讯录权限: \(permissionManager.status.contacts ? "✅ 已授权" : "❌ 未授权")", type: .output)
+        appendLine("", type: .output)
+
+        // 2. 数据采集器状态
+        appendLine("═══════════════════════════════════════", type: .separator)
+        appendLine("2️⃣  数据采集器状态", type: .section)
+        appendLine("═══════════════════════════════════════", type: .separator)
+        appendLine("", type: .output)
+
+        // 屏幕数据
+        let screenCollector = ScreenDataCollector.shared
+        appendLine("📱 屏幕数据采集器:", type: .section)
+        appendLine("   - 监控状态: \(screenCollector.isMonitoring ? "✅ 运行中" : "❌ 未启动")", type: .output)
+        let screenStatus = screenCollector.currentStatus
+        appendLine("   - 当前状态: \(screenStatus.isActive ? "活跃" : "空闲")", type: .output)
+        appendLine("   - 活动类型: \(screenStatus.activityType.rawValue)", type: .output)
+        appendLine("", type: .output)
 
         // 位置数据
-        let location = LocationDataCollector.shared
-        locationStatus = location.currentStatus
-
-        if let loc = location.currentLocation {
-            currentCoordinate = (loc.coordinate.latitude, loc.coordinate.longitude)
+        let locationCollector = LocationDataCollector.shared
+        appendLine("📍 位置数据采集器:", type: .section)
+        appendLine("   - 监控状态: \(locationCollector.isMonitoring ? "✅ 运行中" : "❌ 未启动")", type: .output)
+        let locationStatus = locationCollector.currentStatus
+        appendLine("   - 地点类型: \(locationStatus.placeType.rawValue)", type: .output)
+        appendLine("   - 地点名称: \(locationStatus.placeName ?? "未知")", type: .output)
+        if let lat = locationStatus.latitude, let lng = locationStatus.longitude {
+            appendLine("   - 坐标: (\(String(format: "%.4f", lat)), \(String(format: "%.4f", lng)))", type: .output)
         }
-        if let home = location.homeLocation {
-            homeCoordinate = (home.coordinate.latitude, home.coordinate.longitude)
+        appendLine("", type: .output)
+
+        // 运动数据
+        let movementCollector = MovementDataCollector.shared
+        appendLine("🏃 运动数据采集器:", type: .section)
+        appendLine("   - 权限状态: \(movementCollector.isAuthorized ? "✅ 已授权" : "❌ 未授权")", type: .output)
+        appendLine("   - 监控状态: \(movementCollector.isMonitoring ? "✅ 运行中" : "❌ 未启动")", type: .output)
+
+        if movementCollector.isAuthorized {
+            appendLine("   - 正在获取实时数据...", type: .info)
+            let movementStatus = await movementCollector.fetchCurrentStatus()
+            appendLine("   - 移动状态: \(movementStatus.isMoving ? "移动中" : "静止")", type: .output)
+            appendLine("   - 移动类型: \(movementStatus.movementType.rawValue)", type: .output)
+            appendLine("   - 今日步数: \(movementStatus.stepsToday)", type: .output)
+            appendLine("   - 最近一小时步数: \(movementStatus.stepsLastHour)", type: .output)
+        } else {
+            appendLine("   - ⚠️  需要授权运动与健身权限", type: .warning)
         }
-        if let work = location.workLocation {
-            workCoordinate = (work.coordinate.latitude, work.coordinate.longitude)
+        appendLine("", type: .output)
+
+        // 日历数据
+        let calendarCollector = CalendarDataCollector.shared
+        appendLine("📅 日历数据采集器:", type: .section)
+        appendLine("   - 权限状态: \(calendarCollector.isAuthorized ? "✅ 已授权" : "❌ 未授权")", type: .output)
+
+        if calendarCollector.isAuthorized {
+            let calendarStatus = calendarCollector.getCurrentStatus()
+            appendLine("   - 当前日程: \(calendarStatus.hasCurrentEvent ? "有" : "无")", type: .output)
+            if let title = calendarStatus.currentEventTitle {
+                appendLine("   - 日程标题: \(title)", type: .output)
+            }
+            appendLine("   - 今日剩余: \(calendarStatus.todayRemainingCount) 个", type: .output)
+        } else {
+            appendLine("   - ⚠️  需要授权日历权限", type: .warning)
+        }
+        appendLine("", type: .output)
+
+        // 3. 设备状态
+        appendLine("═══════════════════════════════════════", type: .separator)
+        appendLine("3️⃣  设备状态", type: .section)
+        appendLine("═══════════════════════════════════════", type: .separator)
+        appendLine("", type: .output)
+
+        let deviceStatus = DeviceStatusCollector.shared.getCurrentStatus()
+        appendLine("🔋 电量: \(Int(deviceStatus.batteryLevel * 100))%", type: .output)
+        appendLine("⚡ 充电: \(deviceStatus.isCharging ? "是" : "否")", type: .output)
+        appendLine("🔅 亮度: \(Int(deviceStatus.screenBrightness * 100))%", type: .output)
+        appendLine("📶 网络: \(deviceStatus.networkType.rawValue)", type: .output)
+        appendLine("🎧 耳机: \(deviceStatus.isHeadphonesConnected ? "已连接" : "未连接")", type: .output)
+        appendLine("🔕 专注: \(deviceStatus.isFocusModeOn ? "开启" : "关闭")", type: .output)
+        appendLine("🪫 低电量: \(deviceStatus.isLowPowerMode ? "开启" : "关闭")", type: .output)
+        appendLine("", type: .output)
+
+        // 4. 建议
+        appendLine("═══════════════════════════════════════", type: .separator)
+        appendLine("4️⃣  问题诊断与建议", type: .section)
+        appendLine("═══════════════════════════════════════", type: .separator)
+        appendLine("", type: .output)
+
+        var issues: [String] = []
+
+        if !movementCollector.isAuthorized {
+            issues.append("⚠️  运动数据未授权 → 无法获取步数和运动状态")
+        } else if !movementCollector.isMonitoring {
+            issues.append("⚠️  运动数据采集器未启动 → 重启 App 后应自动启动")
         }
 
-        // 设备状态数据
-        let device = DeviceStatusCollector.shared
-        deviceStatus = device.getCurrentStatus()
+        if !calendarCollector.isAuthorized {
+            issues.append("⚠️  日历未授权 → 无法判断日程安排")
+        }
 
-        // Extension 数据
-        if let defaults = UserDefaults(suiteName: "group.com.youkong.app") {
-            extensionMinutes = defaults.integer(forKey: "screenTimeMinutes")
-            extensionLastUpdate = defaults.object(forKey: "screenTimeLastUpdate") as? Date
+        if !locationCollector.isMonitoring {
+            issues.append("⚠️  位置采集器未启动 → 重启 App 后应自动启动")
+        }
+
+        if !screenCollector.isMonitoring {
+            issues.append("⚠️  屏幕数据采集器未启动 → 重启 App 后应自动启动")
+        }
+
+        if issues.isEmpty {
+            appendLine("✅ 所有数据采集器工作正常！", type: .success)
+        } else {
+            for issue in issues {
+                appendLine(issue, type: .warning)
+                appendLine("", type: .output)
+            }
+
+            appendLine("💡 建议操作:", type: .info)
+            appendLine("   1. 前往「设置」→「重新授权权限」", type: .output)
+            appendLine("   2. 重启 App 以启动所有数据采集器", type: .output)
+        }
+
+        appendLine("", type: .output)
+        appendLine("─────────────────────────────────────────", type: .separator)
+        appendLine("诊断完成", type: .info)
+        appendLine("", type: .output)
+
+        isRunning = false
+    }
+
+    // MARK: - Fallback to Non-Streaming API
+
+    private func fallbackToNonStreamingAPI(request: StatusReportRequest) async {
+        print("[Holmes] Starting fallback to non-streaming API...")
+        appendCommand("$ holmes analyze --no-stream")
+        appendLine("", type: .output)
+
+        do {
+            let repo = AgentRepositoryImpl()
+            print("[Holmes] Calling reportStatus...")
+            let response = try await repo.reportStatus(request: request)
+            print("[Holmes] Got response, analysis: \(response.analysis != nil)")
+
+            if let analysis = response.analysis {
+                print("[Holmes] Showing analysis results...")
+                // 显示分析结果
+                appendLine("📡 收集线索...", type: .phase)
+                appendLine("├─ 时间: \(formatCurrentTime())", type: .clue)
+                appendLine("├─ 位置: \(locationStatus.placeName ?? locationStatus.placeType.rawValue)", type: .clue)
+                appendLine("└─ 屏幕: \(screenStatus.isActive ? "活跃" : "空闲")", type: .clue)
+                appendLine("", type: .output)
+
+                appendLine("🧠 分析特征...", type: .phase)
+                appendLine("├─ 状态类型: \(analysis.lifeStatus.label)", type: .feature)
+                appendLine("└─ 置信度: \(analysis.availability.confidence)", type: .feature)
+                appendLine("", type: .output)
+
+                appendLine("💭 推理完成", type: .phase)
+                appendLine("", type: .output)
+
+                // 显示结论
+                appendLine("═══════════════════════════════════════", type: .separator)
+                appendLine("           📊 最终判断结果", type: .header)
+                appendLine("═══════════════════════════════════════", type: .separator)
+                appendLine("", type: .output)
+
+                let statusEmoji = analysis.availability.probability >= 50 ? "🟢" : "🔴"
+                let statusText = analysis.availability.probability >= 50 ? "有空" : "忙碌"
+                appendLine("   \(statusEmoji) 状态: \(statusText) \(analysis.lifeStatus.emoji)", type: .result)
+                appendLine("   📈 概率: \(analysis.availability.probability)%", type: .result)
+                appendLine("   🎯 置信度: \(analysis.availability.confidence)", type: .result)
+                appendLine("   💬 \(analysis.lifeStatus.label)", type: .result)
+                appendLine("", type: .output)
+                appendLine("   \(analysis.availability.reason)", type: .info)
+                appendLine("", type: .output)
+                appendLine("═══════════════════════════════════════", type: .separator)
+            } else {
+                appendLine("[WARN] 服务器未返回分析结果", type: .warning)
+            }
+        } catch {
+            appendLine("[ERROR] \(error.localizedDescription)", type: .error)
         }
     }
 
-    private func uploadAndPredict() async {
-        loadData()  // 先刷新本地数据
+    private func formatCurrentTime() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE HH:mm"
+        formatter.locale = Locale(identifier: "zh_CN")
+        return formatter.string(from: Date())
+    }
 
-        isUploading = true
-        uploadError = nil
+    // MARK: - Handle Stream Events
 
-        print("📤 [Agent] 开始上报数据...")
+    private func handleStreamEvent(_ event: HolmesStreamEvent) {
+        // 处理最终结果（无 type 但有 result）
+        if event.isFinalResult, let fullResult = event.result {
+            flushThinkingLine()
+            displaySSEFinalResult(fullResult)
+            return
+        }
 
-        // 构建请求数据（按 API 规范分组）
+        guard let eventType = event.type else { return }
+
+        switch eventType {
+        case .phase:
+            flushThinkingLine()
+            if let content = event.content {
+                appendLine("", type: .output)
+                appendLine(content, type: .phase)
+            }
+
+        case .clue:
+            if let content = event.content {
+                appendLine(content, type: .clue)
+            }
+
+        case .feature:
+            if let content = event.content {
+                appendLine(content, type: .feature)
+            }
+
+        case .thinking:
+            // 流式显示思考过程，遇到换行符时提交当前行
+            if let content = event.content {
+                // 处理内容中的换行符
+                let parts = content.components(separatedBy: "\n")
+                for (index, part) in parts.enumerated() {
+                    currentThinkingLine += part
+                    // 如果不是最后一部分，说明有换行，提交当前行
+                    if index < parts.count - 1 {
+                        if !currentThinkingLine.isEmpty {
+                            appendLine("   " + currentThinkingLine, type: .thinking)
+                        }
+                        currentThinkingLine = ""
+                    }
+                }
+            }
+
+        case .conclusion:
+            flushThinkingLine()
+            if let content = event.content {
+                appendLine(content, type: .conclusion)
+            }
+
+        case .done:
+            flushThinkingLine()
+            if let fullResult = event.result {
+                displaySSEFinalResult(fullResult)
+            }
+
+        case .error:
+            if let content = event.content {
+                appendLine("[ERROR] \(content)", type: .error)
+            }
+        }
+    }
+
+    // MARK: - Helper Methods
+
+    private func flushThinkingLine() {
+        if !currentThinkingLine.isEmpty {
+            appendLine("   " + currentThinkingLine, type: .thinking)
+            currentThinkingLine = ""
+        }
+    }
+
+    private func displaySSEFinalResult(_ fullResult: SSEFullResult) {
+        appendLine("", type: .output)
+        appendLine("═══════════════════════════════════════", type: .separator)
+        appendLine("           📊 最终判断结果", type: .header)
+        appendLine("═══════════════════════════════════════", type: .separator)
+        appendLine("", type: .output)
+
+        if let result = fullResult.result {
+            let available = result.available ?? false
+            let statusEmoji = available ? "🟢" : "🔴"
+            let statusText = available ? "有空" : "忙碌"
+            appendLine("   \(statusEmoji) 状态: \(statusText) \(result.emoji ?? "")", type: .result)
+            appendLine("   📈 概率: \(result.probability ?? 0)%", type: .result)
+            appendLine("   🎯 置信度: \(result.confidence ?? "unknown")", type: .result)
+            appendLine("   💬 \(result.summary ?? "")", type: .result)
+
+            if let reason = result.reason, !reason.isEmpty {
+                appendLine("", type: .output)
+                appendLine("   \(reason)", type: .info)
+            }
+        }
+
+        // 显示推理结论（如果有）
+        if let reasoning = fullResult.reasoning, let conclusion = reasoning.conclusion, !conclusion.isEmpty {
+            appendLine("", type: .output)
+            appendLine("   📝 \(conclusion)", type: .info)
+        }
+
+        appendLine("", type: .output)
+        appendLine("═══════════════════════════════════════", type: .separator)
+    }
+
+    // MARK: - Data Loading
+
+    private func loadData() {
+        screenStatus = ScreenDataCollector.shared.currentStatus
+        locationStatus = LocationDataCollector.shared.currentStatus
+        deviceStatus = DeviceStatusCollector.shared.getCurrentStatus()
+    }
+
+    private func buildRequest(calendarStatus: CalendarStatus, movementStatus: MovementStatus) -> StatusReportRequest {
         let screenData = ScreenRequestData(
             isActive: screenStatus.isActive,
             activityType: screenStatus.activityType.rawValue,
@@ -500,6 +926,14 @@ struct MyAgentDataSheet: View {
         let locationData = LocationRequestData(
             placeType: locationStatus.placeType.rawValue,
             atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes
+        )
+
+        let extendedLocationData = ExtendedLocationRequestData(
+            placeType: locationStatus.placeType.rawValue,
+            placeName: locationStatus.placeName,
+            atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes,
+            latitude: locationStatus.latitude,
+            longitude: locationStatus.longitude
         )
 
         let batteryData = BatteryRequestData(
@@ -522,100 +956,127 @@ struct MyAgentDataSheet: View {
             screenBrightness: deviceStatus.screenBrightness
         )
 
-        let request = StatusReportRequest(
+        let calendarData: CalendarRequestData? = calendarStatus.todayRemainingCount >= 0 ?
+            CalendarRequestData(
+                hasCurrentEvent: calendarStatus.hasCurrentEvent,
+                currentEventTitle: calendarStatus.currentEventTitle,
+                eventEndMinutes: calendarStatus.eventEndMinutes,
+                nextEventInMinutes: calendarStatus.nextEventInMinutes,
+                todayRemainingCount: calendarStatus.todayRemainingCount
+            ) : nil
+
+        let movementData: MovementRequestData? = movementStatus.stepsToday >= 0 ?
+            MovementRequestData(
+                isMoving: movementStatus.isMoving,
+                movementType: movementStatus.movementType.rawValue,
+                stepsToday: movementStatus.stepsToday,
+                stepsLastHour: movementStatus.stepsLastHour,
+                stationaryMinutes: movementStatus.stationaryMinutes
+            ) : nil
+
+        return StatusReportRequest(
             screen: screenData,
             location: locationData,
+            extendedLocation: extendedLocationData,
             battery: batteryData,
             mode: modeData,
             connection: connectionData,
-            display: displayData
+            display: displayData,
+            calendar: calendarData,
+            movement: movementData
         )
+    }
+}
 
-        do {
-            let repo = AgentRepositoryImpl()
-            print("📤 [Agent] 发送请求到服务器...")
-            let response = try await repo.reportStatus(request: request)
-            print("✅ [Agent] 收到响应: success=\(response.success)")
-            if let analysis = response.analysis {
-                print("✅ [Agent] 预测结果: \(analysis.lifeStatus.emoji) \(analysis.lifeStatus.label)")
-                print("✅ [Agent] 有空概率: \(analysis.availability.probability)% - \(analysis.availability.reason)")
-            } else {
-                print("⚠️ [Agent] 响应中没有 analysis 数据")
+// MARK: - Terminal Line Model
+
+struct TerminalLine: Identifiable {
+    let id = UUID()
+    let text: String
+    let type: LineType
+    let timestamp = Date()
+
+    enum LineType {
+        // 基础类型
+        case command        // 命令行 (绿色 $)
+        case output         // 普通输出 (灰白)
+        case info           // 信息 (青色)
+        case success        // 成功 (绿色)
+        case warning        // 警告 (黄色)
+        case error          // 错误 (红色)
+        case section        // 段落标题 (黄色加粗)
+        case header         // 大标题 (白色加粗)
+        case separator      // 分隔线 (灰色)
+        case result         // 结果 (白色加粗)
+
+        // SSE 流式类型
+        case phase          // 阶段提示 (紫色)
+        case clue           // 线索 (绿色)
+        case feature        // 特征 (蓝色)
+        case thinking       // 思考过程 (青色斜体)
+        case conclusion     // 结论 (绿色)
+    }
+}
+
+// MARK: - Terminal Line View
+
+struct TerminalLineView: View {
+    let line: TerminalLine
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            // 命令行前缀
+            if line.type == .command {
+                Text("$ ")
+                    .foregroundColor(.green)
+                    .fontWeight(.bold)
             }
-            analysisResult = response.analysis
-        } catch {
-            uploadError = "上报失败: \(error.localizedDescription)"
-            print("❌ [Agent] 上报失败: \(error)")
-        }
 
-        isUploading = false
+            // 内容
+            Text(line.text)
+                .foregroundColor(textColor)
+                .fontWeight(fontWeight)
+                .italic(line.type == .thinking)
+        }
+        .font(.system(size: fontSize, design: .monospaced))
     }
 
-    private func probabilityColor(_ probability: Int) -> Color {
-        switch probability {
-        case 80...100: return Color(hex: "#22C55E") ?? .green
-        case 60..<80: return Color(hex: "#86EFAC") ?? .green.opacity(0.7)
-        case 40..<60: return Color(hex: "#FACC15") ?? .yellow
-        case 20..<40: return Color(hex: "#FB923C") ?? .orange
-        case 0..<20: return Color(hex: "#EF4444") ?? .red
-        default: return .gray
-        }
-    }
+    private var textColor: Color {
+        switch line.type {
+        case .command: return .green
+        case .output: return Color(white: 0.75)
+        case .info: return .cyan
+        case .success: return .green
+        case .warning: return .yellow
+        case .error: return .red
+        case .section: return .yellow
+        case .header: return .white
+        case .separator: return Color(white: 0.4)
+        case .result: return .white
 
-    private func row(_ label: String, value: String) -> some View {
-        HStack {
-            Text(label)
-                .foregroundColor(.secondary)
-            Spacer()
-            Text(value)
-                .fontWeight(.medium)
-        }
-    }
-
-    private func activityTypeText(_ type: ActivityType) -> String {
-        switch type {
-        case .entertainment: return "娱乐"
-        case .productivity: return "工作"
-        case .communication: return "聊天"
-        case .idle: return "空闲"
+        // SSE 流式类型
+        case .phase: return .purple
+        case .clue: return Color(red: 0.4, green: 0.8, blue: 0.4)
+        case .feature: return Color(red: 0.4, green: 0.6, blue: 1.0)
+        case .thinking: return .cyan.opacity(0.85)
+        case .conclusion: return .green
         }
     }
 
-    private func placeTypeText(_ type: PlaceType) -> String {
-        switch type {
-        case .home: return "在家"
-        case .work: return "在公司"
-        case .leisure: return "休闲场所"
-        case .transit: return "在路上"
-        case .unknown: return "未知"
+    private var fontWeight: Font.Weight {
+        switch line.type {
+        case .header, .result: return .bold
+        case .section, .phase, .command: return .semibold
+        case .conclusion: return .medium
+        default: return .regular
         }
     }
 
-    private func batteryStateText(_ state: BatteryState) -> String {
-        switch state {
-        case .unknown: return "未知"
-        case .unplugged: return "未充电"
-        case .charging: return "充电中"
-        case .full: return "已充满"
-        }
-    }
-
-    private func networkTypeText(_ type: NetworkType) -> String {
-        switch type {
-        case .wifi: return "WiFi"
-        case .cellular: return "蜂窝网络"
-        case .none: return "无网络"
-        case .unknown: return "未知"
-        }
-    }
-
-    private func clearTestData() {
-        if let defaults = UserDefaults(suiteName: "group.com.youkong.app") {
-            defaults.removeObject(forKey: "screenTimeMinutes")
-            defaults.removeObject(forKey: "screenTimeLastUpdate")
-            defaults.synchronize()
-            print("🗑️ [Agent] 测试数据已清除")
-            loadData()
+    private var fontSize: CGFloat {
+        switch line.type {
+        case .header: return 13
+        case .separator: return 11
+        default: return 12
         }
     }
 }

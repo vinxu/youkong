@@ -328,7 +328,7 @@ func (c *OpenRouterClient) ChatWithThinking(ctx context.Context, requestBody map
 func (c *OpenRouterClient) GenerateFreeReason(ctx context.Context, state SanitizedUserState) (string, error) {
 	prompt := fmt.Sprintf(`你是一个帮助用户判断朋友是否有空的助手。
 
-根据以下脱敏后的状态信息，生成一句简短的推测性描述（10字以内），说明这个人可能是否有空。
+根据以下状态信息，生成一句自然的口语化描述，说明这个人可能在做什么。
 
 状态信息：
 - 手机活跃度: %s
@@ -338,20 +338,19 @@ func (c *OpenRouterClient) GenerateFreeReason(ctx context.Context, state Sanitiz
 - 系统预估有空概率: %d%%
 
 要求：
-1. 只输出一句话，不要有任何解释
-2. 使用模糊推测性语言，如"可能"、"应该"、"看起来"
-3. 绝对不能提及具体APP名称或具体行为
-4. 不能说"刷手机"、"玩手机"等暴露隐私的表述
-5. 语气轻松自然，像朋友间的口头表达
+1. 使用自然口语化表达，像朋友间聊天
+2. 可以使用"在摸鱼"、"在刷手机"、"在看剧"等真实描述
+3. 不限制长度，表达清楚即可（建议20-30字）
+4. 语气轻松自然，带点推测性
 
 好的示例：
-- "可能有空"
-- "应该在忙"
-- "看起来挺闲"
-- "估计在休息"
-- "好像不太方便"
+- "看起来在公司摸鱼刷手机"
+- "可能在家躺着追剧"
+- "应该在咖啡厅工作"
+- "深夜了还在赶项目，估计没空"
+- "周末在外面逛街购物"
 
-直接输出结果，不要任何前缀或解释：`,
+直接输出结果：`,
 		state.ActivityLevel,
 		state.ActivityCategory,
 		state.LocationCategory,
