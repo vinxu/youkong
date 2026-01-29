@@ -17,8 +17,13 @@ fun NavController.navigateToMessages() {
     navigate(MESSAGES_GRAPH_ROUTE)
 }
 
-fun NavController.navigateToChat(conversationId: String) {
-    navigate("chat?conversationId=$conversationId")
+fun NavController.navigateToChat(conversationId: String, partnerId: String? = null) {
+    val route = if (partnerId != null) {
+        "chat?conversationId=$conversationId&partnerId=$partnerId"
+    } else {
+        "chat?conversationId=$conversationId"
+    }
+    navigate(route)
 }
 
 fun NavController.navigateToChatWithPartner(partnerId: String) {
@@ -35,8 +40,8 @@ fun NavGraphBuilder.messagesGraph(
         composable(CONVERSATION_LIST_ROUTE) {
             ConversationListScreen(
                 onBackClick = { navController.popBackStack() },
-                onConversationClick = { conversationId ->
-                    navController.navigateToChat(conversationId)
+                onConversationClick = { conversationId, partnerId ->
+                    navController.navigateToChat(conversationId, partnerId)
                 },
             )
         }

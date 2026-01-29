@@ -112,10 +112,46 @@ class ChatViewModel @Inject constructor(
                     }
                 }
                 .onFailure { e ->
+                    // 如果会话不存在（可能被删除），尝试重新创建
+                    if (e.message?.contains("会话不存在") == true || e.message?.contains("403") == true) {
+                        if (partnerIdParam != null) {
+                            // 如果有 partnerId，重新创建会话
+                            recreateConversation()
+                        } else {
+                            _uiState.update {
+                                it.copy(
+                                    isLoading = false,
+                                    error = "会话已失效，请从好友列表重新发起聊天"
+                                )
+                            }
+                        }
+                    } else {
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                error = e.message ?: "加载失败"
+                            )
+                        }
+                    }
+                }
+        }
+    }
+
+    private fun recreateConversation() {
+        val partnerId = partnerIdParam ?: return
+
+        viewModelScope.launch {
+            messageRepository.getOrCreateConversation(partnerId)
+                .onSuccess { conversation ->
+                    conversationId = conversation.id
+                    _uiState.update { it.copy(partnerName = conversation.partner.nickname) }
+                    loadMessages()
+                }
+                .onFailure { e ->
                     _uiState.update {
                         it.copy(
                             isLoading = false,
-                            error = e.message ?: "加载失败"
+                            error = "重新创建会话失败: ${e.message}"
                         )
                     }
                 }
