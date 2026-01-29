@@ -18,8 +18,18 @@ func (n *NullRawMessage) Scan(value interface{}) error {
 	}
 	switch v := value.(type) {
 	case []byte:
+		// 如果是字符串 "null"，视为 nil
+		if string(v) == "null" {
+			*n = nil
+			return nil
+		}
 		*n = NullRawMessage(v)
 	case string:
+		// 如果是字符串 "null"，视为 nil
+		if v == "null" {
+			*n = nil
+			return nil
+		}
 		*n = NullRawMessage(v)
 	}
 	return nil
@@ -35,7 +45,12 @@ func (n NullRawMessage) Value() (driver.Value, error) {
 
 // MarshalJSON 实现 json.Marshaler
 func (n NullRawMessage) MarshalJSON() ([]byte, error) {
-	if n == nil {
+	if n == nil || len(n) == 0 {
+		return []byte("null"), nil
+	}
+	// 验证是否为有效 JSON
+	if !json.Valid(n) {
+		// 如果不是有效 JSON，返回 null
 		return []byte("null"), nil
 	}
 	return json.RawMessage(n).MarshalJSON()
