@@ -143,7 +143,9 @@ struct FriendsListView: View {
     }
 
     private func terminalFriendRow(friend: FriendRecommendation) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let unreadCount = viewModel.getUnreadCount(for: friend.friendId)
+
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 0) {
                 // 状态指示符 + Emoji
                 HStack(spacing: 4) {
@@ -164,6 +166,20 @@ struct FriendsListView: View {
                     .foregroundColor(Color(white: 0.9))
 
                 Spacer()
+
+                // 未读红点（如果有未读消息）
+                if unreadCount > 0 {
+                    ZStack {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 18, height: 18)
+
+                        Text("\(unreadCount)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.white)
+                            .fontWeight(.semibold)
+                    }
+                }
 
                 // 概率百分比
                 Text(friend.probability == -1 ? "--" : "\(friend.probability)%")

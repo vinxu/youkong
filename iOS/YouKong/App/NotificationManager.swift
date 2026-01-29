@@ -48,7 +48,15 @@ final class NotificationManager: ObservableObject {
 
     /// 首次收到消息时请求通知权限
     func requestPermissionIfNeeded() async {
-        guard !hasRequestedPermission else { return }
+        print("🔐🔐🔐 [Notification] requestPermissionIfNeeded 被调用")
+        print("🔐 已请求过权限: \(hasRequestedPermission)")
+
+        guard !hasRequestedPermission else {
+            print("🔐 ⏭️ 已经请求过，跳过")
+            return
+        }
+
+        print("🔐 ⚠️ 正在请求通知权限...")
 
         do {
             let granted = try await UNUserNotificationCenter.current().requestAuthorization(
@@ -59,13 +67,16 @@ final class NotificationManager: ObservableObject {
             userDefaults.set(true, forKey: hasRequestedPermissionKey)
 
             if granted {
+                print("🔐 ✅ 用户授予了通知权限！")
                 // 注册远程推送
                 await registerForRemoteNotifications()
+            } else {
+                print("🔐 ❌ 用户拒绝了通知权限！")
             }
 
-            print("[Notification] Permission granted: \(granted)")
+            print("🔐 最终权限状态: \(granted)")
         } catch {
-            print("[Notification] Permission request error: \(error)")
+            print("🔐 ❌ 权限请求错误: \(error)")
         }
     }
 
@@ -114,48 +125,78 @@ final class NotificationManager: ObservableObject {
 
     // MARK: - Local Notification
 
-    /// 发送本地通知（App 后台时收到 WebSocket 消息）
+    /// 发送本地通知（收到 WebSocket 消息时）
     func scheduleLocalNotification(for message: Message, from sender: UserProfile, conversationId: String) {
+        print("📢📢📢 [Notification] scheduleLocalNotification 被调用")
+        print("📢 发送者: \(sender.nickname) (\(sender.id))")
+        print("📢 当前会话ID: \(currentConversationId ?? "nil")")
+        print("📢 消息会话ID: \(conversationId)")
+
+        // ✅ 过滤自己发送的消息
+        let currentUserId = AuthManager.shared.currentUser?.id ?? ""
+        if sender.id == currentUserId {
+            print("📢 ❌ 跳过：这是自己发送的消息")
+            return
+        }
+
         // 如果当前正在这个聊天页面，不发送通知
         if currentConversationId == conversationId {
+            print("📢 ❌ 跳过：正在此聊天页面")
             return
         }
 
-        // 检查 App 状态
-        let state = UIApplication.shared.applicationState
-        guard state == .background || state == .inactive else {
-            // App 在前台，不需要本地通知（会通过 AppDelegate 的 willPresent 处理）
-            return
-        }
+        print("📢 ✅ 开始发送通知流程...")
 
-        // 请求权限（如果未请求过）
+        // ✅ 移除 App 状态检查，让 AppDelegate 的 willPresent 来决定是否显示
+        // 前台时会显示 banner 通知，后台时会显示系统通知
+
         Task {
+            print("📢 [Task] 开始异步任务...")
+
+            // 请求权限（如果未请求过）
             await requestPermissionIfNeeded()
-        }
 
-        // 构建通知内容
-        let content = UNMutableNotificationContent()
-        content.title = sender.nickname
-        content.body = formatMessageContent(message)
-        content.sound = .default
-        content.userInfo = [
-            "conversationId": conversationId,
-            "messageId": message.id,
-            "senderId": sender.id
-        ]
+            // 再次检查权限状态
+            await checkAuthorizationStatus()
 
-        // 立即发送
-        let request = UNNotificationRequest(
-            identifier: "message_\(message.id)",
-            content: content,
-            trigger: nil
-        )
+            print("📢 当前授权状态: \(isAuthorized)")
 
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error = error {
-                print("[Notification] Failed to schedule: \(error)")
-            } else {
-                print("[Notification] Scheduled for message: \(message.id)")
+            guard isAuthorized else {
+                print("📢 ❌ 未授权，无法发送通知")
+                return
+            }
+
+            print("📢 ✅ 已授权，构建通知内容...")
+
+            // 构建通知内容
+            let content = UNMutableNotificationContent()
+            content.title = sender.nickname
+            content.body = formatMessageContent(message)
+            content.sound = .default
+            content.userInfo = [
+                "conversationId": conversationId,
+                "messageId": message.id,
+                "senderId": sender.id
+            ]
+
+            print("📢 通知标题: \(content.title)")
+            print("📢 通知内容: \(content.body)")
+
+            // 立即发送
+            let request = UNNotificationRequest(
+                identifier: "message_\(message.id)",
+                content: content,
+                trigger: nil
+            )
+
+            print("📢 正在添加通知到通知中心...")
+
+            UNUserNotificationCenter.current().add(request) { error in
+                if let error = error {
+                    print("📢 ❌❌❌ 通知添加失败: \(error)")
+                } else {
+                    print("📢 ✅✅✅ 通知添加成功！ID: \(message.id)")
+                }
             }
         }
     }

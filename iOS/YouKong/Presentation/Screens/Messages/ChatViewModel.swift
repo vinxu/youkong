@@ -66,6 +66,13 @@ final class ChatViewModel: ObservableObject {
 
         guard let conversationId = conversationId else { return }
 
+        // ✅ 会话 ID 获取成功后，更新当前会话 ID（防止收到消息时增加未读）
+        updateCurrentConversation()
+
+        // ✅ 清除未读计数
+        print("💬 [ChatViewModel] 清除会话 \(conversationId) 的未读计数")
+        UnreadMessageManager.shared.clearUnread(for: conversationId)
+
         isLoading = true
         defer { isLoading = false }
 

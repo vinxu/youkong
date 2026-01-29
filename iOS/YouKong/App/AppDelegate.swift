@@ -7,6 +7,24 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // 设置通知中心代理
         UNUserNotificationCenter.current().delegate = self
+
+        // 监听 App 状态变化
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            print("🔄🔄🔄 App 进入后台")
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            print("🔄🔄🔄 App 即将进入前台")
+        }
+
         return true
     }
 
@@ -33,21 +51,14 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        let userInfo = notification.request.content.userInfo
+        print("🎯🎯🎯 [AppDelegate] willPresent 被调用！")
+        print("🎯 标题: \(notification.request.content.title)")
+        print("🎯 内容: \(notification.request.content.body)")
 
-        // 检查是否是当前聊天的消息，如果是则不显示通知
-        if let conversationId = userInfo["conversationId"] as? String {
-            Task { @MainActor in
-                if NotificationManager.shared.currentConversationId == conversationId {
-                    // 当前正在这个聊天页面，不显示通知
-                    completionHandler([])
-                    return
-                }
-                completionHandler([.banner, .sound, .badge])
-            }
-        } else {
-            completionHandler([.banner, .sound, .badge])
-        }
+        // ✅ App 在前台时不显示横幅，只更新 badge
+        // UI 提示由 App 内部的未读红点系统处理
+        print("🎯 ✅ App 在前台，不显示横幅，只更新 badge")
+        completionHandler([.badge])
     }
 
     /// 点击通知时调用

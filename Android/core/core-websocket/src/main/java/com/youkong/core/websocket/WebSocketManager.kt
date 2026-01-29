@@ -32,53 +32,86 @@ class WebSocketManager @Inject constructor(
         private const val WS_URL = "ws://49.232.13.41:8080/ws"
         private const val RECONNECT_DELAY_MS = 5000L
         private const val PING_INTERVAL_MS = 30000L
+
+        @Volatile
+        private var instanceCount = 0
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val json = Json { ignoreUnknownKeys = true }
 
     private var webSocket: WebSocket? = null
+
+    @Volatile
     private var isConnected = false
+
+    @Volatile
     private var isConnecting = false
+
     private var shouldReconnect = true
     private var pingJob: Job? = null
+
+    init {
+        instanceCount++
+        Log.d(TAG, "WebSocketManager instance created, total instances: $instanceCount")
+    }
 
     private val _newMessages = MutableSharedFlow<NewMessageData>(extraBufferCapacity = 64)
     val newMessages: SharedFlow<NewMessageData> = _newMessages.asSharedFlow()
 
     private val client = OkHttpClient.Builder()
-        .pingInterval(PING_INTERVAL_MS, TimeUnit.MILLISECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)  // 禁用读取超时，让 WebSocket 保持连接
         .build()
 
     fun connect() {
-        if (isConnected || isConnecting) return
+        Log.d(TAG, "connect() called, isConnected=$isConnected, isConnecting=$isConnecting")
+        if (isConnected || isConnecting) {
+            Log.d(TAG, "Skipping connect - already connected or connecting")
+            return
+        }
 
         scope.launch {
             val token = tokenManager.accessToken.first()
             if (token.isNullOrEmpty()) {
+                Log.w(TAG, "No token available, skipping connect")
                 return@launch
             }
 
+            Log.d(TAG, "Token available (length=${token.length}), proceeding to connect")
             shouldReconnect = true
             connectInternal(token)
         }
     }
 
     private fun connectInternal(token: String) {
-        if (isConnecting) return
-        isConnecting = true
+        synchronized(this) {
+            if (isConnecting) {
+                Log.w(TAG, "Already connecting, skipping")
+                return
+            }
+            isConnecting = true
+        }
+
+        Log.d(TAG, "Starting WebSocket connection... [instance #$instanceCount]")
 
         // 关闭旧连接
-        webSocket?.close(1000, null)
+        webSocket?.let {
+            Log.d(TAG, "Closing old WebSocket connection")
+            it.close(1000, "New connection")
+        }
         webSocket = null
 
+        val url = "$WS_URL?token=$token"
+        Log.d(TAG, "Connecting to: ${WS_URL}?token=<${token.take(10)}...>")
+
         val request = Request.Builder()
-            .url("$WS_URL?token=$token")
+            .url(url)
+            .addHeader("User-Agent", "YouKong-Android")
             .build()
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "WebSocket connected")
+                Log.d(TAG, "WebSocket connected successfully, response code: ${response.code}")
                 isConnecting = false
                 isConnected = true
                 startPingLoop()
@@ -101,7 +134,7 @@ class WebSocketManager @Inject constructor(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket failure", t)
+                Log.e(TAG, "WebSocket failure: ${t.message}, response code: ${response?.code}, body: ${response?.body?.string()}", t)
                 pingJob?.cancel()
                 isConnecting = false
                 isConnected = false

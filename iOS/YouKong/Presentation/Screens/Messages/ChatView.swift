@@ -9,6 +9,9 @@ struct ChatView: View {
     // 键盘高度状态
     @State private var keyboardHeight: CGFloat = 0
 
+    // 输入框焦点状态
+    @FocusState private var isInputFocused: Bool
+
     init(partner: UserProfile, conversationId: String? = nil) {
         self.partner = partner
         self.conversationId = conversationId
@@ -96,6 +99,23 @@ struct ChatView: View {
         .task {
             await viewModel.loadMessages()
         }
+        .onAppear {
+            print("💬💬💬 [ChatView] onAppear 被调用")
+            // ✅ 设置当前会话 ID，避免显示当前聊天的通知
+            if let conversationId = conversationId {
+                print("💬 会话ID: \(conversationId)")
+                NotificationManager.shared.currentConversationId = conversationId
+                // ✅ 清除未读计数
+                print("💬 正在清除未读计数...")
+                UnreadMessageManager.shared.clearUnread(for: conversationId)
+            } else {
+                print("💬 ⚠️ 会话ID为空")
+            }
+        }
+        .onDisappear {
+            // ✅ 离开聊天页面时清除
+            NotificationManager.shared.currentConversationId = nil
+        }
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 Button {
@@ -129,9 +149,12 @@ struct ChatView: View {
                     .foregroundColor(.white)
                     .textFieldStyle(.plain)
                     .submitLabel(.send)
+                    .focused($isInputFocused)
                     .onSubmit {
                         Task {
                             await viewModel.sendMessage()
+                            // ✅ 发送后保持焦点，不收起键盘
+                            isInputFocused = true
                         }
                     }
 
@@ -139,6 +162,8 @@ struct ChatView: View {
                 Button {
                     Task {
                         await viewModel.sendMessage()
+                        // ✅ 发送后保持焦点，不收起键盘
+                        isInputFocused = true
                     }
                 } label: {
                     Text(CLIConstants.rightArrow)

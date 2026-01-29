@@ -30,6 +30,7 @@ include(":core:core-database")
 include(":core:core-datastore")
 include(":core:core-agent")
 include(":core:core-permission")
+include(":core:core-websocket")
 
 // Feature modules
 include(":feature:feature-auth")

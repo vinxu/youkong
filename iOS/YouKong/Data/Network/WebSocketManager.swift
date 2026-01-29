@@ -94,6 +94,8 @@ final class WebSocketManager: ObservableObject {
 
             if wsMessage.type == "NEW_MESSAGE", let payload = wsMessage.payload {
                 let decoder = JSONDecoder()
+                // 转换 snake_case 到 camelCase (conversation_id -> conversationId)
+                decoder.keyDecodingStrategy = .convertFromSnakeCase
                 decoder.dateDecodingStrategy = .custom { decoder in
                     let container = try decoder.singleValueContainer()
                     let dateString = try container.decode(String.self)
@@ -106,17 +108,36 @@ final class WebSocketManager: ObservableObject {
                 let payloadData = try JSONSerialization.data(withJSONObject: payload)
                 let messagePayload = try decoder.decode(NewMessagePayload.self, from: payloadData)
 
-                // 触发本地通知（App 后台时）
+                print("🔔🔔🔔 [WebSocket] 收到新消息，准备发送通知...")
+                print("🔔 发送者: \(messagePayload.message.sender.nickname) (\(messagePayload.message.sender.id))")
+                print("🔔 内容: \(messagePayload.message.content ?? "无内容")")
+                print("🔔 会话ID: \(messagePayload.conversationId)")
+
+                // ✅ 增加未读计数（如果不是自己发的消息 且 不在当前聊天页面）
+                let currentUserId = AuthManager.shared.currentUser?.id ?? ""
+                print("🔔 当前用户ID: \(currentUserId)")
+                print("🔔 发送者ID: \(messagePayload.message.sender.id)")
+                print("🔔 会话ID: \(messagePayload.conversationId)")
+                print("🔔 当前聊天页面会话ID: \(NotificationManager.shared.currentConversationId ?? "nil")")
+
+                if messagePayload.message.sender.id != currentUserId {
+                    // 检查是否在当前聊天页面
+                    if NotificationManager.shared.currentConversationId == messagePayload.conversationId {
+                        print("🔔 ⚠️ 当前正在此聊天页面，跳过未读计数")
+                    } else {
+                        print("🔔 ✅ 不在此聊天页面，增加未读计数...")
+                        UnreadMessageManager.shared.incrementUnread(for: messagePayload.conversationId)
+                    }
+                } else {
+                    print("🔔 ❌ 是自己的消息，跳过未读计数")
+                }
+
+                // 触发本地通知
                 NotificationManager.shared.scheduleLocalNotification(
                     for: messagePayload.message,
                     from: messagePayload.message.sender,
                     conversationId: messagePayload.conversationId
                 )
-
-                // 首次收到消息时请求通知权限
-                Task {
-                    await NotificationManager.shared.requestPermissionIfNeeded()
-                }
 
                 onMessage?(messagePayload.conversationId, messagePayload.message)
             }

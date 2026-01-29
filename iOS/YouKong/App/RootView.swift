@@ -16,6 +16,13 @@ struct RootView: View {
                     // 已完成引导，直接进入主页面
                     MainTabView()
                         .task {
+                            // 🔔 请求通知权限
+                            await notificationManager.requestPermissionIfNeeded()
+                            // 🔔 如果已授权，注册远程推送
+                            await notificationManager.checkAuthorizationStatus()
+                            if notificationManager.isAuthorized {
+                                await notificationManager.registerForRemoteNotifications()
+                            }
                             // 检查权限状态（用于数据收集）
                             await permissionManager.checkAllPermissions()
                             // 启动数据收集
