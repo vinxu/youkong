@@ -78,7 +78,6 @@ dependencies {
     implementation(project(":feature:feature-message"))
     implementation(project(":feature:feature-profile"))
     implementation(project(":feature:feature-friends"))
-    implementation(project(":feature:feature-chat"))
     implementation(project(":feature:feature-settings"))
 
     // WorkManager

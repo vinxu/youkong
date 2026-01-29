@@ -109,13 +109,6 @@ extension APIEndpoint {
         )
     }
 
-    static func agentReply(conversationId: String) -> APIEndpoint {
-        APIEndpoint(
-            path: "/api/v1/conversations/\(conversationId)/agent-reply",
-            method: .post
-        )
-    }
-
     // MARK: - Agent
 
     static func reportAgentStatus(request: StatusReportRequest) -> APIEndpoint {
@@ -135,6 +128,15 @@ extension APIEndpoint {
             path: "/api/v1/agent/query",
             method: .post,
             body: ["to_agent": agentId]
+        )
+    }
+
+    /// 流式 Holmes 推理 API
+    static func reportAgentStatusStream(request: StatusReportRequest) -> APIEndpoint {
+        return APIEndpoint(
+            path: "/api/v1/agent/status/stream",
+            method: .post,
+            body: request
         )
     }
 

@@ -5,5 +5,4 @@ protocol MessageRepositoryProtocol {
     func createConversation(partnerId: String) async throws -> Conversation
     func getMessages(conversationId: String) async throws -> [Message]
     func sendMessage(conversationId: String, request: SendMessageRequest) async throws -> Message
-    func agentReply(conversationId: String) async throws -> Message
 }

@@ -6,9 +6,13 @@ import Factory
 final class ChatViewModel: ObservableObject {
     @Published var messages: [Message] = []
     @Published var isLoading = false
-    @Published var isAgentThinking = false
-    @Published var errorMessage: String?
+    @Published var messageInput = ""
+    @Published var isSending = false
     @Published private(set) var partnerName: String = "加载中..."
+
+    var canSendMessage: Bool {
+        !messageInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSending
+    }
 
     @Injected(\.messageRepository) private var repository
 
@@ -89,44 +93,55 @@ final class ChatViewModel: ObservableObject {
                 }
             }
         } catch {
-            errorMessage = error.localizedDescription
+            print("[ChatViewModel] Load messages error: \(error)")
         }
     }
 
-    func agentReply() async {
+    func sendMessage() async {
+        let content = messageInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return }
+
         if conversationId == nil {
             await createConversation()
         }
 
         guard let conversationId = conversationId else {
-            errorMessage = "会话创建失败"
+            print("[ChatViewModel] Failed to create conversation")
             return
         }
 
-        isAgentThinking = true
-        errorMessage = nil
+        isSending = true
+        messageInput = "" // 立即清空输入框
 
         do {
-            let message = try await repository.agentReply(conversationId: conversationId)
+            let request = SendMessageRequest(
+                type: .text,
+                content: content,
+                metadata: nil
+            )
+            let message = try await repository.sendMessage(
+                conversationId: conversationId,
+                request: request
+            )
             addMessageIfNew(message)
         } catch {
-            errorMessage = "你的元婴罢工了"
-            print("[ChatViewModel] Agent reply error: \(error)")
+            // 发送失败，恢复输入内容
+            messageInput = content
+            print("[ChatViewModel] Send message error: \(error)")
         }
 
-        isAgentThinking = false
+        isSending = false
     }
 
     private func createConversation() async {
         guard let partnerId = partner?.id else {
-            errorMessage = "缺少对方信息"
+            print("[ChatViewModel] Missing partner information")
             return
         }
         do {
             let conversation = try await repository.createConversation(partnerId: partnerId)
             self.conversationId = conversation.id
         } catch {
-            errorMessage = "创建会话失败"
             print("[ChatViewModel] Create conversation error: \(error)")
         }
     }

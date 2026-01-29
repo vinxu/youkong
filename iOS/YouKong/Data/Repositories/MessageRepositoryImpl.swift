@@ -22,8 +22,4 @@ final class MessageRepositoryImpl: MessageRepositoryProtocol {
     func sendMessage(conversationId: String, request: SendMessageRequest) async throws -> Message {
         try await apiClient.request(.sendMessage(conversationId: conversationId, request: request))
     }
-
-    func agentReply(conversationId: String) async throws -> Message {
-        try await apiClient.request(.agentReply(conversationId: conversationId))
-    }
 }

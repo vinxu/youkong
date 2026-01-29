@@ -11,13 +11,11 @@ import (
 
 type ConversationHandler struct {
 	conversationService *service.ConversationService
-	agentChatService    *service.AgentChatService
 }
 
-func NewConversationHandler(conversationService *service.ConversationService, agentChatService *service.AgentChatService) *ConversationHandler {
+func NewConversationHandler(conversationService *service.ConversationService) *ConversationHandler {
 	return &ConversationHandler{
 		conversationService: conversationService,
-		agentChatService:    agentChatService,
 	}
 }
 
@@ -94,28 +92,4 @@ func (h *ConversationHandler) SendMessage(c *gin.Context) {
 	}
 
 	response.Success(c, message)
-}
-
-// AgentReply 让 Agent 生成回复
-// POST /api/v1/conversations/:id/agent-reply
-func (h *ConversationHandler) AgentReply(c *gin.Context) {
-	conversationID := c.Param("id")
-	if conversationID == "" {
-		response.ParamError(c, "会话ID不能为空")
-		return
-	}
-
-	if h.agentChatService == nil {
-		response.InternalError(c, "你的元婴罢工了")
-		return
-	}
-
-	userID := middleware.GetUserID(c)
-	reply, err := h.agentChatService.GenerateReply(c.Request.Context(), conversationID, userID)
-	if err != nil {
-		response.InternalError(c, err.Error())
-		return
-	}
-
-	response.Success(c, reply)
 }

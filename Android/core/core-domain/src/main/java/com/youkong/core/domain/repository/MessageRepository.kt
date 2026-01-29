@@ -23,7 +23,4 @@ interface MessageRepository {
 
     // 获取或创建与指定用户的会话
     suspend fun getOrCreateConversation(userId: String): Result<Conversation>
-
-    // Agent 自动回复
-    suspend fun agentReply(conversationId: String): Result<Message>
 }

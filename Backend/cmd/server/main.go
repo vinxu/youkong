@@ -93,9 +93,6 @@ func main() {
 	friendshipRepo := repository.NewFriendshipRepository(db)
 	friendRequestRepo := repository.NewFriendRequestRepository(db)
 	memoryRepo := repository.NewMemoryRepository(db)
-	personaRepo := repository.NewPersonaRepository(db)
-	relationshipRepo := repository.NewRelationshipRepository(db)
-	contextRepo := repository.NewContextRepository(db)
 	deviceTokenRepo := repository.NewDeviceTokenRepository(db)
 
 	// 初始化微信客户端
@@ -159,29 +156,12 @@ func main() {
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 
-	// 初始化 Agent 聊天相关服务
-	relationshipService := service.NewRelationshipService(relationshipRepo, messageRepo, llmClient)
-	agentChatService := service.NewAgentChatService(
-		contextRepo,
-		messageRepo,
-		personaRepo,
-		relationshipRepo,
-		userRepo,
-		memoryRepo,
-		llmClient,
-		wsManager,
-		relationshipService,
-		notificationService,
-	)
-	personaService := service.NewPersonaService(personaRepo, memoryRepo, llmClient)
-	_ = personaService // 备用，后续可在状态上报时调用
-
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
 	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL, messageRepo)
 	circleHandler := handler.NewCircleHandler(circleService)
 	availabilityHandler := handler.NewAvailabilityHandler(availabilityService)
-	conversationHandler := handler.NewConversationHandler(conversationService, agentChatService)
+	conversationHandler := handler.NewConversationHandler(conversationService)
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
 	friendshipHandler := handler.NewFriendshipHandler(friendshipService)
 	agentHandler := handler.NewAgentHandler(agentService, memoryService)
@@ -274,7 +254,6 @@ func main() {
 				conversations.POST("", conversationHandler.CreateConversation)
 				conversations.GET("/:id/messages", conversationHandler.GetMessages)
 				conversations.POST("/:id/messages", conversationHandler.SendMessage)
-				conversations.POST("/:id/agent-reply", conversationHandler.AgentReply)
 			}
 
 			// 邀请模块

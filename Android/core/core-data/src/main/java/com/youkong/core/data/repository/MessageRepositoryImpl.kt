@@ -158,20 +158,4 @@ class MessageRepositoryImpl @Inject constructor(
             Result.failure(e)
         }
     }
-
-    override suspend fun agentReply(conversationId: String): Result<Message> {
-        return try {
-            val response = messageApi.agentReply(conversationId)
-            val msgData = response.data
-            if (response.isSuccess && msgData != null) {
-                val message = msgData.toModel()
-                messageDao.insert(message.toEntity(conversationId))
-                Result.success(message)
-            } else {
-                Result.failure(Exception(response.message ?: "你的元婴罢工了"))
-            }
-        } catch (e: Exception) {
-            Result.failure(Exception("你的元婴罢工了"))
-        }
-    }
 }

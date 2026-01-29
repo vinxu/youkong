@@ -56,7 +56,7 @@ struct ChatView: View {
                 }
             }
 
-            agentReplyButton
+            messageInputBar
         }
         .navigationTitle(viewModel.partnerName)
         .navigationBarTitleDisplayMode(.inline)
@@ -65,41 +65,25 @@ struct ChatView: View {
         }
     }
 
-    private var agentReplyButton: some View {
-        VStack(spacing: UIConstants.Spacing.sm) {
+    private var messageInputBar: some View {
+        HStack(spacing: UIConstants.Spacing.md) {
+            TextField("输入消息...", text: $viewModel.messageInput, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...4)
+
             Button {
                 Task {
-                    await viewModel.agentReply()
+                    await viewModel.sendMessage()
                 }
             } label: {
-                HStack(spacing: UIConstants.Spacing.sm) {
-                    if viewModel.isAgentThinking {
-                        ProgressView()
-                            .tint(.white)
-                        Text("元婴思考中...")
-                    } else {
-                        Image(systemName: "brain.head.profile")
-                        Text("让我的元婴说话")
-                    }
-                }
-                .font(.headline)
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, UIConstants.Spacing.lg)
-                .background(viewModel.isAgentThinking ? Color.gray : Color.primaryGreen)
-                .cornerRadius(UIConstants.CornerRadius.md)
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 32))
+                    .foregroundColor(viewModel.canSendMessage ? .primaryGreen : .gray)
             }
-            .disabled(viewModel.isAgentThinking)
-            .padding(.horizontal)
-
-            if let error = viewModel.errorMessage {
-                Text(error)
-                    .font(.caption)
-                    .foregroundColor(.red)
-                    .padding(.horizontal)
-            }
+            .disabled(!viewModel.canSendMessage)
         }
-        .padding(.vertical, UIConstants.Spacing.md)
+        .padding(.horizontal)
+        .padding(.vertical, UIConstants.Spacing.sm)
         .background(Color(.systemBackground))
     }
 }
