@@ -10,26 +10,41 @@ import (
 	"time"
 )
 
+import "strings"
+
 const (
+	// OpenRouter API
+	openRouterAPIURL = "https://openrouter.ai/api/v1/chat/completions"
 	// 阿里云通义千问 API
 	qwenAPIURL   = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 	defaultModel = "qwen-max"
 )
 
-// OpenRouterClient LLM API 客户端（保持名称兼容，实际使用阿里云通义千问）
+// OpenRouterClient LLM API 客户端（支持 OpenRouter 和阿里云通义千问）
 type OpenRouterClient struct {
 	apiKey     string
+	apiURL     string // API 地址
 	model      string
 	httpClient *http.Client
 }
 
 // NewOpenRouterClient 创建 LLM 客户端
 func NewOpenRouterClient(apiKey string, model string) *OpenRouterClient {
-	if model == "" {
+	// 根据 API Key 前缀判断使用哪个 API
+	apiURL := qwenAPIURL
+	if strings.HasPrefix(apiKey, "sk-or-") {
+		// OpenRouter API Key 以 sk-or- 开头
+		apiURL = openRouterAPIURL
+		if model == "" {
+			model = "google/gemini-2.5-pro-preview-06-05" // OpenRouter 默认模型
+		}
+	} else if model == "" {
 		model = defaultModel
 	}
+
 	return &OpenRouterClient{
 		apiKey: apiKey,
+		apiURL: apiURL,
 		model:  model,
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second, // 增加超时时间
@@ -76,7 +91,7 @@ func (c *OpenRouterClient) Chat(ctx context.Context, prompt string) (string, err
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", qwenAPIURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.apiURL, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
@@ -180,7 +195,7 @@ func (c *OpenRouterClient) ChatWithMessages(ctx context.Context, messages []Chat
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", qwenAPIURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.apiURL, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
@@ -222,7 +237,7 @@ func (c *OpenRouterClient) chatWithRequestBody(ctx context.Context, requestBody 
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", qwenAPIURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.apiURL, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
