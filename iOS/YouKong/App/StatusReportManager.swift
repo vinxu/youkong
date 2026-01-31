@@ -103,7 +103,7 @@ class StatusReportManager: ObservableObject {
             let response = try await repository.reportStatus(request: request)
             lastReportTime = Date()
             print("=== [STATUS REPORT] Success ===")
-            print("[RESPONSE] Next report in: \(response.nextReportIn) seconds")
+            print("[RESPONSE] \(response.message ?? "分析已触发")")
             if let analysis = response.analysis {
                 print("[ANALYSIS] Available: \(analysis.availability.status)")
                 print("[ANALYSIS] Probability: \(analysis.availability.probability)%")

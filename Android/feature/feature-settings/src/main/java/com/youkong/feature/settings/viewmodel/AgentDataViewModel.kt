@@ -55,6 +55,10 @@ data class AgentDataUiState(
     val isRunning: Boolean = false,
     val lastResult: HolmesFullResult? = null,  // 保存最后的分析结果
     val isUploading: Boolean = false,          // 是否正在上报
+    // 保存收集的原始数据，用于上报
+    val lastScreenData: LocalScreenData? = null,
+    val lastLocationData: LocalLocationData? = null,
+    val lastDeviceStateData: DeviceStateData? = null,
 )
 
 @HiltViewModel
@@ -137,8 +141,17 @@ class AgentDataViewModel @Inject constructor(
 
             delay(200)
 
-            // Step 2: 构建请求
+            // Step 2: 构建请求并保存收集的数据
             val request = buildRequest(screenData, locationData, deviceStateData)
+
+            // 保存收集的数据，供后续上报使用
+            _uiState.update {
+                it.copy(
+                    lastScreenData = screenData,
+                    lastLocationData = locationData,
+                    lastDeviceStateData = deviceStateData
+                )
+            }
 
             appendLine(CliLine.Divider)
             appendLine(CliLine.Phase("📡", "连接 Holmes 推理服务..."))
@@ -270,7 +283,8 @@ class AgentDataViewModel @Inject constructor(
      * 上报状态到服务器
      */
     fun uploadStatus() {
-        val result = _uiState.value.lastResult
+        val currentState = _uiState.value
+        val result = currentState.lastResult
         if (result == null) {
             appendLine(CliLine.Error("没有分析结果，无法上报"))
             return
@@ -282,10 +296,10 @@ class AgentDataViewModel @Inject constructor(
             appendLine(CliLine.Output("[${dateFormat.format(Date())}] 上报状态到服务器..."))
 
             try {
-                // 重新收集设备数据
-                val screenData = usageStatsCollector.collect()
-                val locationData = locationCollector.collect()
-                val deviceStateData = deviceStateCollector.collect()
+                // ✅ 使用已收集的数据，不重新收集（避免耗时）
+                val screenData = currentState.lastScreenData
+                val locationData = currentState.lastLocationData
+                val deviceStateData = currentState.lastDeviceStateData
 
                 // 构建请求
                 val request = buildRequest(screenData, locationData, deviceStateData)

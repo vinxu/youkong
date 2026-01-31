@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -102,13 +103,31 @@ fun AgentDataScreen(
                     }
                 },
                 actions = {
+                    // 上报按钮
+                    IconButton(
+                        onClick = { viewModel.uploadStatus() },
+                        enabled = !uiState.isUploading && uiState.lastResult != null && !uiState.isRunning,
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "上报状态",
+                            tint = if (uiState.lastResult != null && !uiState.isUploading && !uiState.isRunning) {
+                                TerminalYellow
+                            } else {
+                                TerminalDimGray
+                            },
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
+
+                    // 运行分析按钮
                     IconButton(
                         onClick = { viewModel.refresh() },
                         enabled = !uiState.isRunning,
                     ) {
                         Icon(
                             imageVector = Icons.Default.PlayArrow,
-                            contentDescription = "运行",
+                            contentDescription = "运行分析",
                             tint = if (uiState.isRunning) TerminalDimGray else TerminalGreen,
                             modifier = Modifier.size(28.dp),
                         )

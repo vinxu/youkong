@@ -163,11 +163,13 @@ struct MovementRequestData: Encodable {
 
 struct StatusReportResponse: Codable {
     let success: Bool
-    let nextReportIn: Int
+    let message: String?
+    let nextReportIn: Int?  // 已废弃，手动分析模式不再需要
     let analysis: AnalysisData?
 
     enum CodingKeys: String, CodingKey {
         case success
+        case message
         case nextReportIn = "next_report_in"
         case analysis
     }
