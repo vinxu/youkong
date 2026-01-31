@@ -108,13 +108,9 @@ func (s *MemoryService) AnalyzeAndUpdateMemory(ctx context.Context, userID strin
 	// 7. 保存当前状态（用于下次对比）
 	s.saveLastStatus(ctx, userID, status)
 
-	// 8. 保存状态历史
-	if err := s.memoryRepo.SaveStatusHistory(ctx, userID, status); err != nil {
-		// 记录错误但不影响返回
-		fmt.Printf("save status history error: %v\n", err)
-	}
+	// ✅ 不再保存状态历史（原始数据只用于分析，不持久化）
 
-	// 9. 更新核心记忆（如果需要）
+	// 8. 更新核心记忆（如果需要）
 	if result.MemoryUpdate != nil && result.MemoryUpdate.ShouldUpdate {
 		if err := s.updateCoreMemory(ctx, userID, memory, result.MemoryUpdate); err != nil {
 			fmt.Printf("update core memory error: %v\n", err)
@@ -133,7 +129,7 @@ func (s *MemoryService) AnalyzeAndUpdateMemory(ctx context.Context, userID strin
 		}
 	}
 
-	// 10. 缓存分析结果（Redis + MySQL）
+	// 9. 缓存分析结果（Redis + MySQL）
 	if err := s.cacheAnalysisResult(ctx, userID, result); err != nil {
 		fmt.Printf("cache analysis result error: %v\n", err)
 	}

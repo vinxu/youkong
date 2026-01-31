@@ -3,12 +3,9 @@ package com.youkong.app
 import android.app.Application
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
-import androidx.work.WorkManager
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import com.youkong.app.push.TPNSHelper
-import com.youkong.core.agent.worker.DataCollectWorker
-import com.youkong.core.agent.worker.StatusSyncWorker
 import com.youkong.core.datastore.TokenManager
 import com.youkong.core.domain.manager.AppNotificationManager
 import com.youkong.core.domain.manager.UnreadMessageManager
@@ -84,8 +81,7 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
             // 监听登录状态，连接 WebSocket
             observeAuthState()
 
-            // 监听权限状态变化，自动调度后台任务
-            observePermissionState()
+            // ✅ 已删除自动 Worker 调度（改为手动触发）
 
             // 监听 WebSocket 消息，处理未读计数
             observeWebSocketMessages()
@@ -132,27 +128,8 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
         }
     }
 
-    private fun observePermissionState() {
-        applicationScope.launch {
-            permissionManager.permissionState
-                .map { it.allCorePermissionsGranted }
-                .distinctUntilChanged()
-                .collect { hasPermissions ->
-                    val workManager = WorkManager.getInstance(this@YouKongApplication)
-                    if (hasPermissions) {
-                        // 权限已授予，启动数据收集任务
-                        DataCollectWorker.schedule(workManager)
-                        StatusSyncWorker.schedule(workManager)
-                        // 立即执行一次数据收集
-                        DataCollectWorker.runOnce(workManager)
-                    } else {
-                        // 权限被撤销，取消任务
-                        DataCollectWorker.cancel(workManager)
-                        StatusSyncWorker.cancel(workManager)
-                    }
-                }
-        }
-    }
+    // ✅ 移除自动 Worker 调度逻辑
+    // 数据收集改为手动触发（在 AgentDataScreen 点击分析按钮时）
 
     /**
      * 监听 WebSocket 消息，处理未读计数

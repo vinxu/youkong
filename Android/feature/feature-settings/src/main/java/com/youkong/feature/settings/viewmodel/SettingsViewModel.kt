@@ -3,9 +3,6 @@ package com.youkong.feature.settings.viewmodel
 import android.app.Activity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.work.WorkManager
-import com.youkong.core.agent.worker.DataCollectWorker
-import com.youkong.core.agent.worker.StatusSyncWorker
 import com.youkong.core.datastore.TokenManager
 import com.youkong.core.datastore.UserPreferences
 import com.youkong.core.permission.PermissionManager
@@ -30,7 +27,6 @@ class SettingsViewModel @Inject constructor(
     private val permissionManager: PermissionManager,
     private val userPreferences: UserPreferences,
     private val tokenManager: TokenManager,
-    private val workManager: WorkManager,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -75,21 +71,15 @@ class SettingsViewModel @Inject constructor(
 
     fun setDataCollectionEnabled(enabled: Boolean) {
         _uiState.update { it.copy(isDataCollectionEnabled = enabled) }
-        if (enabled) {
-            DataCollectWorker.schedule(workManager)
-            StatusSyncWorker.schedule(workManager)
-        } else {
-            DataCollectWorker.cancel(workManager)
-            StatusSyncWorker.cancel(workManager)
-        }
+        // ✅ 数据收集改为手动触发（在 AgentDataScreen 点击分析按钮时）
+        // 不再自动调度 Worker
     }
 
     fun logout() {
         viewModelScope.launch {
             tokenManager.clearTokens()
             userPreferences.clear()
-            DataCollectWorker.cancel(workManager)
-            StatusSyncWorker.cancel(workManager)
+            // ✅ 不再需要取消 Worker（已移除自动调度）
         }
     }
 }

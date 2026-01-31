@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -28,7 +29,7 @@ func NewAgentHandler(agentService *service.AgentService, memoryService *service.
 	}
 }
 
-// ReportStatus 上报状态（增强版，支持完整数据和实时分析）
+// ReportStatus 上报状态（简化版，仅用于手动触发分析）
 // POST /api/agent/status
 func (h *AgentHandler) ReportStatus(c *gin.Context) {
 	userID := middleware.GetUserID(c)
@@ -37,50 +38,26 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 		return
 	}
 
-	// 支持扩展的状态上报请求
 	var req model.ExtendedStatusReportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.ParamError(c, "参数错误")
 		return
 	}
 
-	// 1. 使用福尔摩斯推理框架进行分析
-	holmesResult, err := h.agentService.ReportExtendedStatus(c.Request.Context(), userID, &req)
-	if err != nil {
-		// 福尔摩斯分析失败，降级到旧逻辑
-		legacyReq := &model.StatusReportRequest{
-			Screen:   req.Screen,
-			Location: req.Location,
+	// ✅ 只做内存分析，不保存原始数据
+	// 异步触发分析
+	go func() {
+		ctx := context.Background()
+		if h.memoryService != nil {
+			h.memoryService.AnalyzeAndUpdateMemory(ctx, userID, &req)
 		}
-		if err := h.agentService.ReportStatus(c.Request.Context(), userID, legacyReq); err != nil {
-			response.InternalError(c, "上报失败")
-			return
-		}
-	}
+	}()
 
-	// 2. 同时更新核心记忆（保持向后兼容）
-	var analysisResult *model.AnalysisResult
-	if h.memoryService != nil {
-		result, err := h.memoryService.AnalyzeAndUpdateMemory(c.Request.Context(), userID, &req)
-		if err == nil {
-			analysisResult = result
-		}
-	}
-
-	// 3. 构建响应
-	resp := struct {
-		Success      bool                  `json:"success"`
-		NextReportIn int                   `json:"next_report_in"`
-		Analysis     *model.AnalysisResult `json:"analysis,omitempty"`
-		Holmes       *model.HolmesResult   `json:"holmes,omitempty"` // 福尔摩斯分析结果
-	}{
-		Success:      true,
-		NextReportIn: 60,
-		Analysis:     analysisResult,
-		Holmes:       holmesResult,
-	}
-
-	response.Success(c, resp)
+	// 快速响应
+	response.Success(c, gin.H{
+		"success": true,
+		"message": "分析已触发",
+	})
 }
 
 // GetFreeProbability 获取好友有空概率列表（增强版，带生活状态）
