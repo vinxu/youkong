@@ -125,8 +125,9 @@ data class AnalysisResult(
 @Serializable
 data class StatusReportResponse(
     val success: Boolean,
+    val message: String? = null,
     @SerialName("next_report_in")
-    val nextReportIn: Int,
+    val nextReportIn: Int? = null,  // 已废弃，手动分析模式不再需要
     val analysis: AnalysisResult? = null,
 )
 

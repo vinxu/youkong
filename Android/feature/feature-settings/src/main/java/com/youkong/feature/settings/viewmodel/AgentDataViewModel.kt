@@ -19,6 +19,7 @@ import com.youkong.core.network.model.HolmesFullResult
 import com.youkong.core.network.model.LocationDataRequest
 import com.youkong.core.network.model.ModeDataRequest
 import com.youkong.core.network.model.ScreenDataRequest
+import com.youkong.core.network.api.AgentApi
 import com.youkong.core.network.sse.AgentSseClient
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
@@ -52,6 +53,8 @@ sealed class CliLine {
 data class AgentDataUiState(
     val cliLines: List<CliLine> = emptyList(),
     val isRunning: Boolean = false,
+    val lastResult: HolmesFullResult? = null,  // 保存最后的分析结果
+    val isUploading: Boolean = false,          // 是否正在上报
 )
 
 @HiltViewModel
@@ -59,6 +62,7 @@ class AgentDataViewModel @Inject constructor(
     private val usageStatsCollector: UsageStatsCollector,
     private val locationCollector: LocationCollector,
     private val deviceStateCollector: DeviceStateCollector,
+    private val agentApi: AgentApi,
     private val agentSseClient: AgentSseClient,
     private val tokenManager: TokenManager,
 ) : ViewModel() {
@@ -86,7 +90,8 @@ class AgentDataViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     isRunning = true,
-                    cliLines = listOf(CliLine.Command("holmes analyze --stream"))
+                    cliLines = listOf(CliLine.Command("holmes analyze --stream")),
+                    lastResult = null  // 清空上次的分析结果
                 )
             }
             delay(100)
@@ -228,9 +233,11 @@ class AgentDataViewModel @Inject constructor(
             }
             "done" -> {
                 flushThinkingBuffer()
-                event.result?.let {
+                event.result?.let { result ->
                     appendLine(CliLine.Divider)
-                    appendLine(CliLine.Result(it))
+                    appendLine(CliLine.Result(result))
+                    // 保存分析结果，供后续上报使用
+                    _uiState.update { it.copy(lastResult = result) }
                 }
             }
             "error" -> {
@@ -257,6 +264,48 @@ class AgentDataViewModel @Inject constructor(
         appendLine(CliLine.Divider)
         appendLine(CliLine.Output("[${dateFormat.format(Date())}] Done."))
         _uiState.update { it.copy(isRunning = false) }
+    }
+
+    /**
+     * 上报状态到服务器
+     */
+    fun uploadStatus() {
+        val result = _uiState.value.lastResult
+        if (result == null) {
+            appendLine(CliLine.Error("没有分析结果，无法上报"))
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isUploading = true) }
+            appendLine(CliLine.Divider)
+            appendLine(CliLine.Output("[${dateFormat.format(Date())}] 上报状态到服务器..."))
+
+            try {
+                // 重新收集设备数据
+                val screenData = usageStatsCollector.collect()
+                val locationData = locationCollector.collect()
+                val deviceStateData = deviceStateCollector.collect()
+
+                // 构建请求
+                val request = buildRequest(screenData, locationData, deviceStateData)
+
+                appendLine(CliLine.Output("POST /api/v1/agent/status"))
+                val response = agentApi.reportStatus(request)
+
+                if (response.code == 0) {
+                    val msg = response.data?.message ?: "分析已触发"
+                    appendLine(CliLine.Success("✓ 上报成功: $msg"))
+                    appendLine(CliLine.Output("概率: ${result.result?.probability}%, 状态: ${result.result?.summary}"))
+                } else {
+                    appendLine(CliLine.Error("上报失败: ${response.message}"))
+                }
+            } catch (e: Exception) {
+                appendLine(CliLine.Error("上报失败: ${e.message}"))
+            } finally {
+                _uiState.update { it.copy(isUploading = false) }
+            }
+        }
     }
 
     private fun appendLine(line: CliLine) {
