@@ -18,7 +18,7 @@ const (
 	keyLastStatus    = "agent:last:%s"     // 上一次状态数据
 
 	// 缓存过期时间
-	analysisTTL     = 2 * time.Minute  // 分析结果缓存 2 分钟（从 10 分钟缩短，确保数据及时更新）
+	analysisTTL     = 10 * time.Minute  // 分析结果缓存 10 分钟
 	lastStatusTTL   = 30 * time.Minute // 上次状态缓存 30 分钟
 
 	// 变化检测阈值
@@ -411,11 +411,20 @@ func (s *MemoryService) cacheAnalysisResult(ctx context.Context, userID string, 
 	key := fmt.Sprintf(keyUserAnalysis, userID)
 	if err := s.redisClient.Set(ctx, key, data, analysisTTL); err != nil {
 		// Redis 失败不影响 MySQL
-		fmt.Printf("cache to redis error: %v\n", err)
+		fmt.Printf("[缓存] Redis 写入失败 user=%s error=%v\n", userID, err)
+	} else {
+		fmt.Printf("[缓存] Redis 写入成功 user=%s status=%s probability=%d\n",
+			userID, result.Availability.Status, result.Availability.Probability)
 	}
 
 	// 2. 持久化到 MySQL
-	return s.memoryRepo.SaveAnalysisCache(ctx, userID, result)
+	err = s.memoryRepo.SaveAnalysisCache(ctx, userID, result)
+	if err != nil {
+		fmt.Printf("[缓存] MySQL 写入失败 user=%s error=%v\n", userID, err)
+	} else {
+		fmt.Printf("[缓存] MySQL 写入成功 user=%s\n", userID)
+	}
+	return err
 }
 
 // getDefaultAnalysisResult 获取默认分析结果

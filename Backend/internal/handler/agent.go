@@ -49,7 +49,13 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 	go func() {
 		ctx := context.Background()
 		if h.memoryService != nil {
-			h.memoryService.AnalyzeAndUpdateMemory(ctx, userID, &req)
+			fmt.Printf("[上报] 开始异步分析 user=%s\n", userID)
+			result, err := h.memoryService.AnalyzeAndUpdateMemory(ctx, userID, &req)
+			if err != nil {
+				fmt.Printf("[上报] 分析失败 user=%s error=%v\n", userID, err)
+			} else {
+				fmt.Printf("[上报] 分析完成 user=%s status=%s\n", userID, result.Availability.Status)
+			}
 		}
 	}()
 
