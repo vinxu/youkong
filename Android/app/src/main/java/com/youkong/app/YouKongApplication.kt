@@ -49,6 +49,9 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
     @Inject
     lateinit var userPreferences: com.youkong.core.datastore.UserPreferences
 
+    @Inject
+    lateinit var unreadPreferences: com.youkong.core.datastore.UnreadPreferences
+
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     override val workManagerConfiguration: Configuration
@@ -72,6 +75,12 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
         // 只在主进程中初始化 WebSocket 和后台任务
         if (isMainProcess()) {
             android.util.Log.d("YouKongApplication", "Main process, initializing WebSocket and workers")
+
+            // 初始化未读消息管理器（必须在主进程中初始化，支持持久化）
+            applicationScope.launch {
+                UnreadMessageManager.initialize(this@YouKongApplication, unreadPreferences)
+            }
+
             // 监听登录状态，连接 WebSocket
             observeAuthState()
 

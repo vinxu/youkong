@@ -69,8 +69,8 @@ class AgentDataViewModel @Inject constructor(
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
     init {
-        // 进入页面自动开始分析
-        refresh()
+        // 🔧 调试模式：手动点击按钮才上报，不自动运行
+        // refresh()
     }
 
     fun refresh() {

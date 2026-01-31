@@ -328,6 +328,9 @@ struct MyAgentDataSheet: View {
     @State private var locationStatus: LocationStatus = .unknown
     @State private var deviceStatus: DeviceStatus = .unknown
 
+    // 状态上报管理器
+    @StateObject private var statusReportManager = StatusReportManager.shared
+
     // SSE 客户端
     private let sseClient = SSEClient()
 
@@ -490,16 +493,51 @@ struct MyAgentDataSheet: View {
             }
             .disabled(isRunning)
 
+            // 上报状态按钮
+            Button {
+                Task {
+                    await statusReportManager.reportStatus()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: statusReportManager.isReporting ? "arrow.up.circle.fill" : "arrow.up.circle")
+                        .font(.caption)
+                    Text(statusReportManager.isReporting ? "上报中..." : "上报")
+                }
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(statusReportManager.isReporting ? .gray : .cyan)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke((statusReportManager.isReporting ? Color.gray : Color.cyan).opacity(0.5), lineWidth: 1)
+                )
+            }
+            .disabled(isRunning || statusReportManager.isReporting)
+
             Spacer()
 
             // 状态指示
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(isRunning ? Color.yellow : Color.green)
-                    .frame(width: 6, height: 6)
-                Text(isRunning ? "streaming" : "ready")
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundColor(.gray)
+            VStack(alignment: .trailing, spacing: 2) {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(isRunning ? Color.yellow : Color.green)
+                        .frame(width: 6, height: 6)
+                    Text(isRunning ? "streaming" : "ready")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(.gray)
+                }
+
+                // 上次上报时间
+                if let lastReportTime = statusReportManager.lastReportTime {
+                    Text("上报于 \(formatTime(lastReportTime))")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.gray.opacity(0.7))
+                } else if statusReportManager.lastReportError != nil {
+                    Text("上报失败")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.red.opacity(0.7))
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -813,6 +851,12 @@ struct MyAgentDataSheet: View {
         formatter.dateFormat = "EEEE HH:mm"
         formatter.locale = Locale(identifier: "zh_CN")
         return formatter.string(from: Date())
+    }
+
+    private func formatTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter.string(from: date)
     }
 
     // MARK: - Handle Stream Events

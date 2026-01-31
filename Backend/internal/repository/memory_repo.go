@@ -257,6 +257,7 @@ func (r *MemoryRepository) GetAnalysisCache(ctx context.Context, userID string) 
 			Emoji: cache.LifeStatusEmoji,
 			Label: cache.LifeStatusLabel,
 		},
+		UpdatedAt: cache.UpdatedAt, // 包含更新时间用于时效检查
 	}, nil
 }
 
@@ -291,6 +292,7 @@ func (r *MemoryRepository) GetAnalysisCacheByUserIDs(ctx context.Context, userID
 				Emoji: cache.LifeStatusEmoji,
 				Label: cache.LifeStatusLabel,
 			},
+			UpdatedAt: cache.UpdatedAt, // 包含更新时间用于时效检查
 		}
 	}
 	return result, nil

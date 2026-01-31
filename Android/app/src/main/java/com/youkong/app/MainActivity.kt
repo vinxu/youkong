@@ -1,7 +1,10 @@
 package com.youkong.app
 
+import android.content.pm.PackageManager
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -16,6 +19,7 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.work.WorkManager
 import com.youkong.app.navigation.YouKongNavHost
 import com.youkong.core.agent.worker.DataCollectWorker
+import com.youkong.core.permission.NotificationPermissionManager
 import com.youkong.core.permission.PermissionManager
 import com.youkong.core.ui.theme.Background
 import com.youkong.core.ui.theme.YouKongTheme
@@ -30,6 +34,11 @@ class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var permissionManager: PermissionManager
+
+    @Inject
+    lateinit var notificationPermissionManager: NotificationPermissionManager
+
+    private var hasRequestedNotificationPermission = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
@@ -77,6 +86,41 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // 每次应用回到前台时收集数据
         collectDataIfPermitted()
+
+        // 首次请求通知权限（延迟执行，避免打扰用户）
+        if (!hasRequestedNotificationPermission) {
+            hasRequestedNotificationPermission = true
+            window.decorView.postDelayed({
+                requestNotificationPermissionIfNeeded()
+            }, 2000) // 延迟 2 秒
+        }
+    }
+
+    /**
+     * 请求通知权限（如果需要）
+     */
+    private fun requestNotificationPermissionIfNeeded() {
+        if (!NotificationPermissionManager.hasNotificationPermission(this)) {
+            Log.d("MainActivity", "📱 请求通知权限")
+            notificationPermissionManager.requestNotificationPermission(this)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (requestCode == NotificationPermissionManager.REQUEST_CODE_POST_NOTIFICATIONS) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                Log.d("MainActivity", "📱 通知权限已授予")
+            } else {
+                Log.d("MainActivity", "📱 通知权限被拒绝")
+                // 可以在这里提示用户去设置中开启
+            }
+        }
     }
 
     private fun collectDataIfPermitted() {

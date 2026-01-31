@@ -183,6 +183,7 @@ fun FriendsListScreen(
                                     reason = friend.reason,
                                     emoji = friend.emoji,
                                     activity = friend.activity,
+                                    unreadCount = viewModel.getUnreadCount(friend.user.id),
                                     onClick = { onNavigateToChat(friend.user.id) },
                                 )
                             }
@@ -203,6 +204,19 @@ private fun AgentStatusCard(
     val probability = analysisResult?.availability?.probability ?: -1
     val probabilityColor = CLIColors.probabilityColor(probability)
 
+    // 计算显示的标签和 emoji
+    val displayLabel = analysisResult?.lifeStatus?.label ?: run {
+        // 没有 LLM 分析结果时，显示简单状态
+        if (screenTimeMinutes != null && screenTimeMinutes > 0) {
+            "ACTIVE"
+        } else {
+            "NO DATA"
+        }
+    }
+    val displayEmoji = analysisResult?.lifeStatus?.emoji ?: run {
+        if (screenTimeMinutes != null && screenTimeMinutes > 0) "📱" else "💤"
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -217,7 +231,7 @@ private fun AgentStatusCard(
         ) {
             // Emoji
             Text(
-                text = analysisResult?.lifeStatus?.emoji ?: "🤔",
+                text = displayEmoji,
                 fontSize = 32.sp,
             )
 
@@ -231,7 +245,7 @@ private fun AgentStatusCard(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = analysisResult?.lifeStatus?.label ?: "LOADING...",
+                        text = displayLabel,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
@@ -256,7 +270,7 @@ private fun AgentStatusCard(
                 Text(
                     text = analysisResult?.availability?.reason
                         ?: screenTimeMinutes?.let { "Screen: ${it}min today" }
-                        ?: "Click for details",
+                        ?: "Click to view Agent data",
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,
                     color = CLIColors.TextSecondary,

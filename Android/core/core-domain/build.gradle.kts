@@ -17,4 +17,7 @@ dependencies {
 
     // DateTime
     api(libs.kotlinx.datetime)
+
+    // DataStore (for UnreadMessageManager persistence)
+    implementation(project(":core:core-datastore"))
 }

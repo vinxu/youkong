@@ -18,11 +18,11 @@ const (
 	keyLastStatus    = "agent:last:%s"     // 上一次状态数据
 
 	// 缓存过期时间
-	analysisTTL     = 10 * time.Minute // 分析结果缓存 10 分钟
+	analysisTTL     = 2 * time.Minute  // 分析结果缓存 2 分钟（从 10 分钟缩短，确保数据及时更新）
 	lastStatusTTL   = 30 * time.Minute // 上次状态缓存 30 分钟
 
 	// 变化检测阈值
-	significantTimeGap = 30 * time.Minute // 超过 30 分钟视为显著变化
+	significantTimeGap = 10 * time.Minute // 超过 10 分钟视为显著变化（从 30 分钟缩短）
 )
 
 // MemoryService 记忆服务
@@ -225,8 +225,51 @@ func (s *MemoryService) detectSignificantChange(current, last *model.ExtendedSta
 		}
 	}
 
+	// 5. 运动状态变化
+	if current.Movement != nil && last.Movement != nil {
+		// 运动状态改变（静止 <-> 移动）
+		if current.Movement.IsMoving != last.Movement.IsMoving {
+			return true
+		}
+		// 运动类型改变（walking -> stationary 等）
+		if current.Movement.MovementType != last.Movement.MovementType {
+			return true
+		}
+	} else if (current.Movement == nil) != (last.Movement == nil) {
+		return true
+	}
+
+	// 6. 日历事件状态变化
+	if current.Calendar != nil && last.Calendar != nil {
+		// 从无日程到有日程，或反之
+		if current.Calendar.HasCurrentEvent != last.Calendar.HasCurrentEvent {
+			return true
+		}
+		// 今日剩余日程数量显著变化（变化超过 1 个）
+		if abs(current.Calendar.TodayRemainingCount - last.Calendar.TodayRemainingCount) > 1 {
+			return true
+		}
+	} else if (current.Calendar == nil) != (last.Calendar == nil) {
+		return true
+	}
+
+	// 7. 充电状态变化
+	if current.Battery != nil && last.Battery != nil {
+		if current.Battery.IsCharging != last.Battery.IsCharging {
+			return true
+		}
+	}
+
 	// 没有显著变化
 	return false
+}
+
+// abs 返回整数的绝对值
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // GetCoreMemory 获取用户核心记忆
@@ -250,7 +293,7 @@ func (s *MemoryService) GetCoreMemory(ctx context.Context, userID string) (*mode
 	}, nil
 }
 
-// GetCachedAnalysis 获取缓存的分析结果
+// GetCachedAnalysis 获取缓存的分析结果（带时效检查）
 func (s *MemoryService) GetCachedAnalysis(ctx context.Context, userID string) (*model.AnalysisResult, error) {
 	// 先从 Redis 获取
 	key := fmt.Sprintf(keyUserAnalysis, userID)
@@ -262,11 +305,23 @@ func (s *MemoryService) GetCachedAnalysis(ctx context.Context, userID string) (*
 		}
 	}
 
-	// Redis 没有，从 MySQL 获取
-	return s.memoryRepo.GetAnalysisCache(ctx, userID)
+	// Redis 没有，从 MySQL 获取（但需要检查时效）
+	cached, err := s.memoryRepo.GetAnalysisCache(ctx, userID)
+	if err != nil || cached == nil {
+		return nil, err
+	}
+
+	// 检查MySQL缓存是否过期（使用与Redis相同的TTL）
+	cacheAge := time.Since(cached.UpdatedAt)
+	if cacheAge > analysisTTL {
+		// 缓存已过期，返回 nil 触发重新分析
+		return nil, nil
+	}
+
+	return cached, nil
 }
 
-// GetCachedAnalysisByUserIDs 批量获取缓存的分析结果
+// GetCachedAnalysisByUserIDs 批量获取缓存的分析结果（带时效检查）
 func (s *MemoryService) GetCachedAnalysisByUserIDs(ctx context.Context, userIDs []string) (map[string]*model.AnalysisResult, error) {
 	result := make(map[string]*model.AnalysisResult)
 
@@ -290,12 +345,19 @@ func (s *MemoryService) GetCachedAnalysisByUserIDs(ctx context.Context, userIDs 
 		}
 	}
 
-	// 从 MySQL 批量获取缺失的
+	// 从 MySQL 批量获取缺失的（带时效检查）
 	if len(missingIDs) > 0 {
 		dbResults, err := s.memoryRepo.GetAnalysisCacheByUserIDs(ctx, missingIDs)
 		if err == nil {
+			now := time.Now()
 			for userID, analysis := range dbResults {
-				result[userID] = analysis
+				// 检查MySQL缓存是否过期
+				cacheAge := now.Sub(analysis.UpdatedAt)
+				if cacheAge <= analysisTTL {
+					// 未过期，使用缓存
+					result[userID] = analysis
+				}
+				// 过期的不加入结果，让调用方触发重新分析
 			}
 		}
 	}

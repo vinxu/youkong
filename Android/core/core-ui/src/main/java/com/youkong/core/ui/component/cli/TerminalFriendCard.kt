@@ -23,7 +23,7 @@ import com.youkong.core.ui.theme.CLIColors
 
 /**
  * Terminal Friend Card - 极简单行好友列表项
- * 格式：● 张三              🎮 在玩游戏  ▇▇▇▇▇▇▇▇▇░ 95% →
+ * 格式：● 张三 [3]         🎮 在玩游戏  ▇▇▇▇▇▇▇▇▇░ 95% →
  *
  * @param friendId 好友 ID
  * @param name 好友名字
@@ -31,6 +31,7 @@ import com.youkong.core.ui.theme.CLIColors
  * @param reason 原因描述
  * @param emoji 活动 emoji（可选）
  * @param activity 活动描述（可选）
+ * @param unreadCount 未读消息数（可选）
  * @param onClick 点击回调
  */
 @Composable
@@ -41,6 +42,7 @@ fun TerminalFriendCard(
     reason: String,
     emoji: String? = null,
     activity: String? = null,
+    unreadCount: Int = 0,
     onClick: () -> Unit,
 ) {
     val hasData = probability >= 0
@@ -63,8 +65,11 @@ fun TerminalFriendCard(
 
             Spacer(modifier = Modifier.width(8.dp))
 
-            // 名字（固定宽度）
-            Box(modifier = Modifier.width(100.dp)) {
+            // 名字 + 未读红点
+            Row(
+                modifier = Modifier.width(120.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
                     text = name,
                     fontFamily = FontFamily.Monospace,
@@ -73,6 +78,18 @@ fun TerminalFriendCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+
+                // 未读红点 + 数字
+                if (unreadCount > 0) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "[$unreadCount]",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = CLIColors.Red,
+                        modifier = Modifier.padding(horizontal = 2.dp)
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.weight(1f))

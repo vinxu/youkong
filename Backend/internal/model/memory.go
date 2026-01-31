@@ -149,6 +149,7 @@ type AnalysisResult struct {
 	Availability AvailabilityAnalysis `json:"availability"`
 	LifeStatus   LifeStatus           `json:"life_status"`
 	MemoryUpdate *MemoryUpdate        `json:"memory_update,omitempty"`
+	UpdatedAt    time.Time            `json:"updated_at,omitempty"` // 缓存更新时间（用于时效检查）
 }
 
 // MemoryUpdate 记忆更新内容

@@ -99,18 +99,19 @@ struct RootView: View {
         // 启动 WebSocket 连接
         WebSocketManager.shared.connect()
 
-        // 定时上报状态
-        startStatusReporting()
+        // ⚠️ 禁用自动上报（调试模式）
+        // startStatusReporting()
     }
 
-    private func startStatusReporting() {
-        // 每30秒上报一次状态
-        Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
-            Task {
-                await reportStatus()
-            }
-        }
-    }
+    // ⚠️ 已禁用自动上报，改为手动上报（在 Holmes Agent 页面点击按钮）
+    // private func startStatusReporting() {
+    //     // 每30秒上报一次状态
+    //     Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+    //         Task {
+    //             await reportStatus()
+    //         }
+    //     }
+    // }
 
     private func reportStatus() async {
         print("=== [STATUS REPORT] Starting ===")

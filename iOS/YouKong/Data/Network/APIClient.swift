@@ -173,6 +173,11 @@ actor APIClient {
         request.httpMethod = endpoint.method.rawValue
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        // ✅ 禁用好友有空概率接口的缓存（确保获取最新数据）
+        if endpoint.path.contains("/friends/free-probability") {
+            request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        }
+
         if endpoint.requiresAuth {
             if let token = KeychainManager.shared.getAccessToken() {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
