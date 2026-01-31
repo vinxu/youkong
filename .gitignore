@@ -30,6 +30,7 @@ Backend/.env
 # Keys & Secrets
 Backend/config/keys/
 *.p8
+*.pem
 *.json
 !package.json
 !package-lock.json
