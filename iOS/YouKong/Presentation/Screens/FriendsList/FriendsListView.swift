@@ -318,7 +318,21 @@ struct MyAgentDataSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     // 终端输出行
-    @State private var terminalLines: [TerminalLine] = []
+    @State private var terminalLines: [TerminalLine] = [
+        TerminalLine(text: "", type: .output),
+        TerminalLine(text: "┌─────────────────────────────────────────┐", type: .separator),
+        TerminalLine(text: "│     🔍 Holmes Agent v2.0 (Debug)        │", type: .header),
+        TerminalLine(text: "│     福尔摩斯推理框架 - 调试模式        │", type: .header),
+        TerminalLine(text: "└─────────────────────────────────────────┘", type: .separator),
+        TerminalLine(text: "", type: .output),
+        TerminalLine(text: "💡 调试模式说明:", type: .info),
+        TerminalLine(text: "   • 点击 [上报] 按钮手动上报状态", type: .output),
+        TerminalLine(text: "   • 点击 [运行] 按钮开始福尔摩斯分析", type: .output),
+        TerminalLine(text: "   • 点击 [清屏] 按钮清空终端输出", type: .output),
+        TerminalLine(text: "", type: .output),
+        TerminalLine(text: "⏳ 等待操作...", type: .info),
+        TerminalLine(text: "", type: .output)
+    ]
     @State private var isRunning = false
     @State private var showCursor = true
     @State private var currentThinkingLine: String = ""
@@ -406,9 +420,10 @@ struct MyAgentDataSheet: View {
                 }
             }
             .navigationBarHidden(true)
-            .task {
-                await runStreamAnalysis()
-            }
+            // ⚠️ 禁用自动分析（调试模式）- 需要手动点击"运行"按钮
+            // .task {
+            //     await runStreamAnalysis()
+            // }
             .onReceive(cursorTimer) { _ in
                 if isRunning {
                     showCursor.toggle()

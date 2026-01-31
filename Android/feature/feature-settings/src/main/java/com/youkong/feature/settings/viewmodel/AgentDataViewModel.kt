@@ -68,6 +68,9 @@ class AgentDataViewModel @Inject constructor(
 
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
+    // 用于累积 thinking 内容的缓冲区
+    private val thinkingBuffer = StringBuilder()
+
     init {
         // 🔧 调试模式：手动点击按钮才上报，不自动运行
         // refresh()
@@ -77,6 +80,9 @@ class AgentDataViewModel @Inject constructor(
         if (_uiState.value.isRunning) return
 
         viewModelScope.launch {
+            // 清空缓冲区
+            thinkingBuffer.clear()
+
             _uiState.update {
                 it.copy(
                     isRunning = true,
@@ -162,6 +168,9 @@ class AgentDataViewModel @Inject constructor(
     private fun handleSseEvent(event: com.youkong.core.network.model.SseEvent) {
         when (event.type) {
             "phase" -> {
+                // 切换到新阶段前，先输出缓冲区中的 thinking 内容
+                flushThinkingBuffer()
+
                 val emoji = when (event.phase) {
                     "collecting" -> "📡"
                     "extracting" -> "🧠"
@@ -174,35 +183,58 @@ class AgentDataViewModel @Inject constructor(
                 }
             }
             "clue" -> {
+                flushThinkingBuffer()
                 event.content?.let {
                     val isLast = it.startsWith("└")
                     appendLine(CliLine.Clue(it.removePrefix("├─ ").removePrefix("└─ "), isLast))
                 }
             }
             "feature" -> {
+                flushThinkingBuffer()
                 event.content?.let {
                     val isLast = it.startsWith("└")
                     appendLine(CliLine.Feature(it.removePrefix("├─ ").removePrefix("└─ "), isLast))
                 }
             }
             "thinking" -> {
-                event.content?.let {
-                    appendLine(CliLine.Thinking(it))
+                event.content?.let { content ->
+                    // 累积 thinking 内容到缓冲区
+                    thinkingBuffer.append(content)
+
+                    // 检查是否包含换行符，如果有就输出完整的行
+                    if (content.contains("\n")) {
+                        val text = thinkingBuffer.toString()
+                        val lines = text.split("\n")
+
+                        // 输出除最后一行外的所有行（完整的行）
+                        for (i in 0 until lines.size - 1) {
+                            if (lines[i].isNotEmpty()) {
+                                appendLine(CliLine.Thinking(lines[i]))
+                            }
+                        }
+
+                        // 将最后一行（可能是不完整的）保留在缓冲区
+                        thinkingBuffer.clear()
+                        thinkingBuffer.append(lines.last())
+                    }
                 }
             }
             "conclusion" -> {
+                flushThinkingBuffer()
                 event.content?.let {
                     val isLast = it.startsWith("└")
                     appendLine(CliLine.Conclusion(it.removePrefix("├─ ").removePrefix("└─ "), isLast))
                 }
             }
             "done" -> {
+                flushThinkingBuffer()
                 event.result?.let {
                     appendLine(CliLine.Divider)
                     appendLine(CliLine.Result(it))
                 }
             }
             "error" -> {
+                flushThinkingBuffer()
                 event.content?.let {
                     appendLine(CliLine.Error(it))
                 }
@@ -210,7 +242,18 @@ class AgentDataViewModel @Inject constructor(
         }
     }
 
+    /**
+     * 输出缓冲区中剩余的 thinking 内容
+     */
+    private fun flushThinkingBuffer() {
+        if (thinkingBuffer.isNotEmpty()) {
+            appendLine(CliLine.Thinking(thinkingBuffer.toString()))
+            thinkingBuffer.clear()
+        }
+    }
+
     private fun finishRun() {
+        flushThinkingBuffer()
         appendLine(CliLine.Divider)
         appendLine(CliLine.Output("[${dateFormat.format(Date())}] Done."))
         _uiState.update { it.copy(isRunning = false) }

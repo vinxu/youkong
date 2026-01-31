@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -58,10 +59,13 @@ func (h *HolmesAnalyzer) AnalyzeStream(ctx context.Context, input *HolmesInput, 
 
 	reasoning, err := h.callLLMStream(ctx, clue, features, input.CoreMemory, callback)
 	if err != nil {
+		// 记录详细错误日志
+		log.Printf("[福尔摩斯] LLM 调用失败，降级到规则引擎: %v", err)
+
 		// LLM 调用失败，使用规则引擎降级
 		callback(&HolmesStreamEvent{
 			Type:    "thinking",
-			Content: "⚠️ 大模型暂时不可用，使用规则引擎分析...",
+			Content: fmt.Sprintf("⚠️ 大模型暂时不可用，使用规则引擎分析... (原因: %v)", err),
 		})
 		return h.analyzeWithRules(clue, features), nil
 	}
@@ -230,7 +234,7 @@ func (h *HolmesAnalyzer) callLLMStream(ctx context.Context, clue *model.HolmesCl
 
 	// 构建流式请求
 	requestBody := map[string]interface{}{
-		"model": holmesModel,
+		"model": holmesModel, // 固定使用 qwen3-max-2026-01-23
 		"messages": []ChatMessage{
 			{Role: "user", Content: prompt},
 		},
@@ -243,7 +247,13 @@ func (h *HolmesAnalyzer) callLLMStream(ctx context.Context, clue *model.HolmesCl
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", qwenAPIURL, bytes.NewReader(body))
+	// 使用客户端配置的API URL，而不是硬编码千问API
+	apiURL := h.client.apiURL
+	if apiURL == "" {
+		apiURL = qwenAPIURL // 兜底使用千问API
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}

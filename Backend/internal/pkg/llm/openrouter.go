@@ -17,7 +17,7 @@ const (
 	openRouterAPIURL = "https://openrouter.ai/api/v1/chat/completions"
 	// 阿里云通义千问 API
 	qwenAPIURL   = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-	defaultModel = "qwen-max"
+	defaultModel = "qwen3-max-2026-01-23"
 )
 
 // OpenRouterClient LLM API 客户端（支持 OpenRouter 和阿里云通义千问）
@@ -35,10 +35,10 @@ func NewOpenRouterClient(apiKey string, model string) *OpenRouterClient {
 	if strings.HasPrefix(apiKey, "sk-or-") {
 		// OpenRouter API Key 以 sk-or- 开头
 		apiURL = openRouterAPIURL
-		if model == "" {
-			model = "google/gemini-2.5-pro-preview-06-05" // OpenRouter 默认模型
-		}
-	} else if model == "" {
+	}
+
+	// 统一使用千问模型
+	if model == "" {
 		model = defaultModel
 	}
 
