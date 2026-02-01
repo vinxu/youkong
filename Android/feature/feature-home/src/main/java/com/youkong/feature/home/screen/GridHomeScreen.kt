@@ -93,6 +93,14 @@ fun GridHomeScreen(
                 }
             }
         }
+
+        // 海报分享对话框
+        if (uiState.showPosterDialog) {
+            PosterDialog(
+                friends = uiState.friends,
+                onDismiss = { viewModel.hidePoster() }
+            )
+        }
     }
 }
 

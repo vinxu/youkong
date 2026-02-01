@@ -30,8 +30,8 @@ class GridHomeViewModel @Inject constructor(
                 val response = homeApi.getGridData()
                 _uiState.update {
                     it.copy(
-                        friends = response.data.friends,
-                        gridSize = response.data.gridSize,
+                        friends = response.data!!.friends,
+                        gridSize = response.data!!.gridSize,
                         isLoading = false,
                         isRefreshing = false,
                         errorMessage = null

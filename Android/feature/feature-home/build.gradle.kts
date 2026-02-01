@@ -7,6 +7,9 @@ android {
 }
 
 dependencies {
+    // Core modules
+    implementation(project(":core:core-network"))
+
     // SwipeRefresh for pull-to-refresh
     implementation("com.google.accompanist:accompanist-swiperefresh:0.32.0")
 }
