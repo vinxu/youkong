@@ -19,7 +19,7 @@ func NewUserProfileService(profileRepo *repository.UserProfileRepository) *UserP
 }
 
 // 获取用户画像
-func (s *UserProfileService) GetProfile(userID string) (*model.UserProfile, error) {
+func (s *UserProfileService) GetProfile(userID string) (*model.UserProfileData, error) {
 	profile, err := s.profileRepo.Get(userID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -31,9 +31,9 @@ func (s *UserProfileService) GetProfile(userID string) (*model.UserProfile, erro
 }
 
 // 创建或更新用户画像
-func (s *UserProfileService) UpsertProfile(userID string, req *model.UserProfileRequest) (*model.UserProfile, error) {
+func (s *UserProfileService) UpsertProfile(userID string, req *model.UserProfileRequest) (*model.UserProfileData, error) {
 	// 构建 UserProfile
-	profile := &model.UserProfile{
+	profile := &model.UserProfileData{
 		UserID:            userID,
 		OccupationType:    req.OccupationType,
 		WorkSchedule:      req.WorkSchedule,

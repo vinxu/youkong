@@ -115,7 +115,7 @@ func (f FrequentLocations) Value() (driver.Value, error) {
 }
 
 // 用户画像
-type UserProfile struct {
+type UserProfileData struct {
 	UserID             string              `db:"user_id" json:"user_id"`
 	OccupationType     OccupationType      `db:"occupation_type" json:"occupation_type"`
 	WorkSchedule       WorkSchedule        `db:"work_schedule" json:"work_schedule"`

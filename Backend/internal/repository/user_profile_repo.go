@@ -14,8 +14,8 @@ func NewUserProfileRepository(db *sqlx.DB) *UserProfileRepository {
 }
 
 // 获取用户画像
-func (r *UserProfileRepository) Get(userID string) (*model.UserProfile, error) {
-	var profile model.UserProfile
+func (r *UserProfileRepository) Get(userID string) (*model.UserProfileData, error) {
+	var profile model.UserProfileData
 	query := `
 		SELECT user_id, occupation_type, work_schedule, typical_work_hours,
 		       lifestyle_type, exercise_frequency, social_preference,
@@ -31,7 +31,7 @@ func (r *UserProfileRepository) Get(userID string) (*model.UserProfile, error) {
 }
 
 // 创建或更新用户画像
-func (r *UserProfileRepository) Upsert(profile *model.UserProfile) error {
+func (r *UserProfileRepository) Upsert(profile *model.UserProfileData) error {
 	query := `
 		INSERT INTO user_profiles (
 			user_id, occupation_type, work_schedule, typical_work_hours,
