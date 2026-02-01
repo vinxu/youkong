@@ -206,6 +206,10 @@ type UserAnalysisCache struct {
 	AvailabilityConfidence  string    `db:"availability_confidence"`
 	LifeStatusEmoji         string    `db:"life_status_emoji"`
 	LifeStatusLabel         string    `db:"life_status_label"`
+	LifeStatusDescription   *string   `db:"life_status_description"` // 新增：详细描述
+	Mood                    *string   `db:"mood"`                    // 新增：心情
+	Activity                *string   `db:"activity"`                // 新增：活动
+	Context                 *string   `db:"context"`                 // 新增：上下文
 	CreatedAt               time.Time `db:"created_at"`
 	UpdatedAt               time.Time `db:"updated_at"`
 }
