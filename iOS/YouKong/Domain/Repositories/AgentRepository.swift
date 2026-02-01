@@ -9,6 +9,9 @@ protocol AgentRepositoryProtocol {
     /// 获取朋友有空概率列表
     func getFriendsFreeProbability() async throws -> [FriendRecommendation]
 
+    /// 获取自己的分析结果
+    func getMyAnalysis() async throws -> AnalysisData?
+
     /// 请求朋友 Agent 数据
     func queryAgentData(agentId: String) async throws -> AgentExposedData
 }
@@ -178,10 +181,12 @@ struct StatusReportResponse: Codable {
 struct AnalysisData: Codable {
     let availability: AvailabilityAnalysis
     let lifeStatus: LifeStatusData
+    let updatedAt: String?  // ISO 8601 格式时间
 
     enum CodingKeys: String, CodingKey {
         case availability
         case lifeStatus = "life_status"
+        case updatedAt = "updated_at"
     }
 }
 

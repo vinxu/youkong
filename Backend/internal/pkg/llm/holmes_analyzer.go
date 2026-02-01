@@ -77,6 +77,7 @@ func (h *HolmesAnalyzer) Analyze(ctx context.Context, input *HolmesInput) (*mode
 	result.Result.Probability = reasoning.Probability
 	result.Result.Confidence = reasoning.Confidence
 	result.Result.Summary = reasoning.Summary
+	result.Result.Emoji = reasoning.Emoji
 
 	return result, nil
 }
@@ -727,7 +728,7 @@ func (h *HolmesAnalyzer) analyzeWithRules(clue *model.HolmesClue, features *mode
 		confidence = "low"
 	}
 
-	return &model.HolmesResult{
+	result := &model.HolmesResult{
 		RawData:  clue,
 		Features: features,
 		Reasoning: &model.HolmesReasoning{
@@ -735,19 +736,15 @@ func (h *HolmesAnalyzer) analyzeWithRules(clue *model.HolmesClue, features *mode
 			Thinking:   "",
 			Conclusion: reasoning,
 		},
-		Result: struct {
-			Available   bool   `json:"available"`
-			Probability int    `json:"probability"`
-			Confidence  string `json:"confidence"`
-			Summary     string `json:"summary"`
-		}{
-			Available:   score >= 50,
-			Probability: score,
-			Confidence:  confidence,
-			Summary:     summary,
-		},
 		GeneratedAt: time.Now(),
 	}
+	result.Result.Available = score >= 50
+	result.Result.Probability = score
+	result.Result.Confidence = confidence
+	result.Result.Summary = summary
+	result.Result.Emoji = emoji
+
+	return result
 }
 
 // 辅助函数

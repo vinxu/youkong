@@ -41,8 +41,8 @@ struct RootView: View {
                             startDataCollection()
                         }
                 } else {
-                    // 显示权限请求页面
-                    PermissionRequestView(isCompleted: $hasCompletedOnboarding)
+                    // 显示完整引导流程（4屏）
+                    OnboardingView(isCompleted: $hasCompletedOnboarding)
                 }
             } else {
                 LoginView()

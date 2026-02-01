@@ -2,10 +2,10 @@ import SwiftUI
 
 // MARK: - Main Tab View
 
-/// 简化后的主视图 - 只有朋友列表和聊天
+/// 主视图 - 宫格首页
 struct MainTabView: View {
     var body: some View {
-        FriendsListView()
+        GridHomeView()
     }
 }
 

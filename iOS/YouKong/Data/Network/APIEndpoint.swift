@@ -123,6 +123,10 @@ extension APIEndpoint {
         APIEndpoint(path: "/api/v1/friends/free-probability")
     }
 
+    static var getMyAnalysis: APIEndpoint {
+        APIEndpoint(path: "/api/v1/agent/my-analysis")
+    }
+
     static func queryAgentData(agentId: String) -> APIEndpoint {
         APIEndpoint(
             path: "/api/v1/agent/query",
@@ -234,6 +238,22 @@ extension APIEndpoint {
         APIEndpoint(
             path: "/api/v1/invite/\(code)/accept",
             method: .post
+        )
+    }
+
+    // MARK: - Home (Grid)
+
+    /// 获取宫格数据
+    static var getGridData: APIEndpoint {
+        APIEndpoint(path: "/api/v1/home/grid")
+    }
+
+    /// 生成海报
+    static func generatePoster(userIds: [String]) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/home/poster",
+            method: .post,
+            body: ["user_ids": userIds]
         )
     }
 

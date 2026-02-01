@@ -267,6 +267,7 @@ private fun AgentStatusCard(
 
                 Spacer(modifier = Modifier.height(4.dp))
 
+                // 状态原因
                 Text(
                     text = analysisResult?.availability?.reason
                         ?: screenTimeMinutes?.let { "Screen: ${it}min today" }
@@ -276,6 +277,17 @@ private fun AgentStatusCard(
                     color = CLIColors.TextSecondary,
                     maxLines = 1,
                 )
+
+                // 更新时间
+                if (analysisResult?.updatedAt != null) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = com.youkong.core.ui.util.TimeUtils.getRelativeTimeText(analysisResult.updatedAt),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        color = CLIColors.TextSecondary.copy(alpha = 0.6f),
+                    )
+                }
             }
 
             // 箭头

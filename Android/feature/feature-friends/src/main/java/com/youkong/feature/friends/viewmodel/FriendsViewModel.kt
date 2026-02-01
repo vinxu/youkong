@@ -74,16 +74,15 @@ class FriendsViewModel @Inject constructor(
             // 并行加载好友列表和会话（最关键的数据）
             val friendsDeferred = async { loadFriends() }
             val conversationsDeferred = async { loadConversations() }
+            val myAnalysisDeferred = async { loadMyAnalysis() }
 
             // 等待好友列表和会话加载完成
             friendsDeferred.await()
             conversationsDeferred.await()
+            myAnalysisDeferred.await()
 
             // 列表已加载完成，立即显示
             _uiState.update { it.copy(isLoading = false) }
-
-            // 🔧 调试模式：关闭自动上报，改为在 Holmes Agent 页面手动上报
-            // loadAgentData()
         }
     }
 
@@ -135,6 +134,19 @@ class FriendsViewModel @Inject constructor(
             .onFailure { error ->
                 _uiState.update { it.copy(error = error.message ?: "加载失败") }
             }
+    }
+
+    private suspend fun loadMyAnalysis() {
+        try {
+            val response = agentApi.getMyAnalysis()
+            val data = response.data
+            if (response.code == 0 && data != null) {
+                _uiState.update { it.copy(analysisResult = data.analysis) }
+                android.util.Log.d("FriendsViewModel", "✅ 自己的分析结果已加载: ${data.analysis?.lifeStatus?.label}")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("FriendsViewModel", "❌ 加载自己的分析结果失败", e)
+        }
     }
 
     private suspend fun loadAgentData() {

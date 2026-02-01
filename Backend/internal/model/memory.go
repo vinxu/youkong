@@ -304,6 +304,7 @@ type HolmesResult struct {
 		Probability int    `json:"probability"`   // 0-100
 		Confidence  string `json:"confidence"`    // high/medium/low
 		Summary     string `json:"summary"`       // 简短总结（15字以内）
+		Emoji       string `json:"emoji"`         // 状态 emoji
 	} `json:"result"`
 
 	// 生成时间

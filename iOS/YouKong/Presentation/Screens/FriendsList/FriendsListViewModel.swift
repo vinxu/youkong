@@ -10,6 +10,7 @@ class FriendsListViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var error: Error?
     @Published var lastUpdated: Date?
+    @Published var myAnalysis: AnalysisData?  // 自己的分析结果
 
     @Injected(\.agentRepository) private var agentRepository
     @Injected(\.messageRepository) private var messageRepository
@@ -37,12 +38,14 @@ class FriendsListViewModel: ObservableObject {
         error = nil
 
         do {
-            // 并行加载好友列表和会话列表
+            // 并行加载好友列表、会话列表和自己的分析结果
             async let friendsTask = agentRepository.getFriendsFreeProbability()
             async let conversationsTask = messageRepository.getConversations()
+            async let myAnalysisTask = agentRepository.getMyAnalysis()
 
             friends = try await friendsTask
             let conversations = try await conversationsTask
+            myAnalysis = try await myAnalysisTask
 
             // 建立 friendId → conversationId 映射
             buildFriendConversationMap(conversations)
@@ -53,6 +56,7 @@ class FriendsListViewModel: ObservableObject {
             print("📬 好友数量: \(friends.count)")
             print("📬 会话数量: \(conversations.count)")
             print("📬 映射数量: \(friendConversationMap.count)")
+            print("📬 自己的状态: \(myAnalysis?.lifeStatus.label ?? "无")")
         } catch {
             self.error = error
             print("Failed to load friends: \(error)")

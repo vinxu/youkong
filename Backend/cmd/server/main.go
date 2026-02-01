@@ -175,6 +175,7 @@ func main() {
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo)
+	posterService := service.NewPosterService(memoryRepo, userRepo, cfg.Invitation.BaseURL)
 
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
@@ -188,7 +189,7 @@ func main() {
 	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
 	wsHandler := handler.NewWSHandler(wsManager, jwtManager)
 	deviceHandler := handler.NewDeviceHandler(notificationService)
-	homeHandler := handler.NewHomeHandler(homeService)
+	homeHandler := handler.NewHomeHandler(homeService, posterService)
 
 	// 设置Gin模式
 	gin.SetMode(cfg.Server.Mode)

@@ -216,6 +216,31 @@ func (h *AgentHandler) GetMemory(c *gin.Context) {
 	response.Success(c, memory)
 }
 
+// GetMyAnalysis 获取我的分析结果（用于显示自己的状态）
+// GET /api/agent/my-analysis
+func (h *AgentHandler) GetMyAnalysis(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.memoryService == nil {
+		response.Success(c, gin.H{
+			"analysis": nil,
+		})
+		return
+	}
+
+	// 从缓存获取分析结果
+	analysisMap, _ := h.memoryService.GetCachedAnalysisByUserIDs(c.Request.Context(), []string{userID})
+	analysis := analysisMap[userID]
+
+	response.Success(c, gin.H{
+		"analysis": analysis,
+	})
+}
+
 // GetHolmesFreeProbability 获取好友有空概率列表（福尔摩斯版，带完整推理过程）
 // GET /api/friends/holmes-probability
 func (h *AgentHandler) GetHolmesFreeProbability(c *gin.Context) {
@@ -319,6 +344,36 @@ func (h *AgentHandler) ReportStatusStream(c *gin.Context) {
 		return
 	}
 
+	// ✅ 立即缓存分析结果（转换为 AnalysisResult 格式）
+	if result != nil && h.memoryService != nil {
+		analysisResult := &model.AnalysisResult{
+			Availability: model.AvailabilityAnalysis{
+				Status:      getStatusFromProbability(result.Result.Probability),
+				Probability: result.Result.Probability,
+				Reason:      result.Result.Summary,
+				Confidence:  result.Result.Confidence,
+			},
+			LifeStatus: model.LifeStatus{
+				Emoji:       result.Result.Emoji,
+				Label:       result.Result.Summary,
+				Description: result.Result.Summary,
+			},
+			UpdatedAt: time.Now(),
+		}
+
+		// 异步缓存，不阻塞响应
+		go func() {
+			ctx := context.Background()
+			err := h.memoryService.CacheAnalysisResult(ctx, userID, analysisResult)
+			if err != nil {
+				fmt.Printf("[Holmes 缓存] 失败 user=%s error=%v\n", userID, err)
+			} else {
+				fmt.Printf("[Holmes 缓存] 成功 user=%s status=%s probability=%d\n",
+					userID, analysisResult.Availability.Status, analysisResult.Availability.Probability)
+			}
+		}()
+	}
+
 	// 发送最终结果
 	doneEvent := map[string]interface{}{
 		"type":   "done",
@@ -327,4 +382,15 @@ func (h *AgentHandler) ReportStatusStream(c *gin.Context) {
 	data, _ := json.Marshal(doneEvent)
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	w.Flush()
+}
+
+// getStatusFromProbability 根据概率确定状态文本
+func getStatusFromProbability(probability int) string {
+	if probability >= 70 {
+		return "有空"
+	} else if probability >= 40 {
+		return "可能有空"
+	} else {
+		return "忙碌"
+	}
 }

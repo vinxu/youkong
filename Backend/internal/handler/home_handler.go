@@ -9,13 +9,15 @@ import (
 
 // HomeHandler 首页处理器
 type HomeHandler struct {
-	homeService *service.HomeService
+	homeService   *service.HomeService
+	posterService *service.PosterService
 }
 
 // NewHomeHandler 创建首页处理器
-func NewHomeHandler(homeService *service.HomeService) *HomeHandler {
+func NewHomeHandler(homeService *service.HomeService, posterService *service.PosterService) *HomeHandler {
 	return &HomeHandler{
-		homeService: homeService,
+		homeService:   homeService,
+		posterService: posterService,
 	}
 }
 
@@ -33,12 +35,37 @@ func (h *HomeHandler) GetGrid(c *gin.Context) {
 	response.Success(c, gridData)
 }
 
+// GeneratePosterRequest 生成海报请求
+type GeneratePosterRequest struct {
+	UserIDs    []string `json:"user_ids"`
+	InviteCode string   `json:"invite_code,omitempty"`
+}
+
 // GeneratePoster 生成分享海报
 // POST /api/v1/home/poster
-// TODO: 实现海报生成逻辑
 func (h *HomeHandler) GeneratePoster(c *gin.Context) {
-	// userID := middleware.GetUserID(c)
+	var req GeneratePosterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "参数错误: "+err.Error())
+		return
+	}
 
-	// 暂时返回未实现
-	response.Error(c, response.CodeInternalError, "海报生成功能暂未实现，将在 Phase 4 完成")
+	// 限制用户数量（最多16个）
+	if len(req.UserIDs) > 16 {
+		req.UserIDs = req.UserIDs[:16]
+	}
+
+	// 生成海报
+	posterPath, err := h.posterService.GeneratePoster(req.UserIDs, req.InviteCode)
+	if err != nil {
+		response.InternalError(c, "生成海报失败: "+err.Error())
+		return
+	}
+
+	// 返回海报路径（实际应该上传到 COS 并返回 URL）
+	// TODO: 上传到腾讯云 COS
+	response.Success(c, gin.H{
+		"poster_url": posterPath,
+		"message":    "海报已生成（本地路径，生产环境需上传到 COS）",
+	})
 }

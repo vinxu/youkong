@@ -320,6 +320,7 @@ func (s *MemoryService) GetCachedAnalysis(ctx context.Context, userID string) (*
 // GetCachedAnalysisByUserIDs 批量获取缓存的分析结果（带时效检查）
 func (s *MemoryService) GetCachedAnalysisByUserIDs(ctx context.Context, userIDs []string) (map[string]*model.AnalysisResult, error) {
 	result := make(map[string]*model.AnalysisResult)
+	fmt.Printf("[查询缓存] 查询 %d 个好友的分析结果\n", len(userIDs))
 
 	// 先从 Redis 批量获取
 	for _, userID := range userIDs {
@@ -329,6 +330,8 @@ func (s *MemoryService) GetCachedAnalysisByUserIDs(ctx context.Context, userIDs 
 			var analysis model.AnalysisResult
 			if err := json.Unmarshal(data, &analysis); err == nil {
 				result[userID] = &analysis
+				fmt.Printf("[查询缓存] Redis 命中 user=%s status=%s probability=%d\n",
+					userID, analysis.Availability.Status, analysis.Availability.Probability)
 			}
 		}
 	}
@@ -341,23 +344,28 @@ func (s *MemoryService) GetCachedAnalysisByUserIDs(ctx context.Context, userIDs 
 		}
 	}
 
-	// 从 MySQL 批量获取缺失的（带时效检查）
+	if len(missingIDs) > 0 {
+		fmt.Printf("[查询缓存] Redis 未命中 %d 个，尝试从 MySQL 获取\n", len(missingIDs))
+	}
+
+	// 从 MySQL 批量获取缺失的（返回最后已知状态，不检查过期）
 	if len(missingIDs) > 0 {
 		dbResults, err := s.memoryRepo.GetAnalysisCacheByUserIDs(ctx, missingIDs)
 		if err == nil {
 			now := time.Now()
 			for userID, analysis := range dbResults {
-				// 检查MySQL缓存是否过期
+				// ✅ 直接返回 MySQL 中的数据（作为最后已知状态）
+				result[userID] = analysis
 				cacheAge := now.Sub(analysis.UpdatedAt)
-				if cacheAge <= analysisTTL {
-					// 未过期，使用缓存
-					result[userID] = analysis
-				}
-				// 过期的不加入结果，让调用方触发重新分析
+				fmt.Printf("[查询缓存] MySQL 命中 user=%s status=%s probability=%d age=%s\n",
+					userID, analysis.Availability.Status, analysis.Availability.Probability, cacheAge)
 			}
+		} else {
+			fmt.Printf("[查询缓存] MySQL 查询失败: %v\n", err)
 		}
 	}
 
+	fmt.Printf("[查询缓存] 最终返回 %d 个结果\n", len(result))
 	return result, nil
 }
 
@@ -402,6 +410,11 @@ func (s *MemoryService) createInitialMemory(ctx context.Context, userID string) 
 }
 
 // cacheAnalysisResult 缓存分析结果
+// CacheAnalysisResult 公开方法：缓存分析结果（供 handler 调用）
+func (s *MemoryService) CacheAnalysisResult(ctx context.Context, userID string, result *model.AnalysisResult) error {
+	return s.cacheAnalysisResult(ctx, userID, result)
+}
+
 func (s *MemoryService) cacheAnalysisResult(ctx context.Context, userID string, result *model.AnalysisResult) error {
 	// 1. 缓存到 Redis
 	data, err := json.Marshal(result)

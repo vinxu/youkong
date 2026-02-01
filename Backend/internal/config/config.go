@@ -77,6 +77,7 @@ type JWTConfig struct {
 type TencentConfig struct {
 	SecretID      string
 	SecretKey     string
+	Token         string // STS 临时 Token（可选）
 	SMSAppID      string
 	SMSSignName   string
 	SMSTemplateID string
@@ -169,6 +170,7 @@ func Load() (*Config, error) {
 		Tencent: TencentConfig{
 			SecretID:      viper.GetString("TENCENT_SECRET_ID"),
 			SecretKey:     viper.GetString("TENCENT_SECRET_KEY"),
+			Token:         viper.GetString("TENCENT_TOKEN"),
 			SMSAppID:      viper.GetString("TENCENT_SMS_SDK_APP_ID"),
 			SMSSignName:   viper.GetString("TENCENT_SMS_SIGN_NAME"),
 			SMSTemplateID: viper.GetString("TENCENT_SMS_TEMPLATE_ID"),

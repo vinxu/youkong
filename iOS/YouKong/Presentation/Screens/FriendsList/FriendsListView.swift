@@ -117,6 +117,15 @@ struct FriendsListView: View {
             // 朋友列表
             ScrollView {
                 LazyVStack(spacing: 0) {
+                    // 自己的状态卡片
+                    myStatusCard
+                        .padding(.bottom, 8)
+
+                    Rectangle()
+                        .fill(Color.gray.opacity(0.3))
+                        .frame(height: 1)
+                        .padding(.bottom, 8)
+
                     ForEach(viewModel.friends) { friend in
                         Button {
                             navigationPath.append(friend)
@@ -140,6 +149,68 @@ struct FriendsListView: View {
             // 底部状态栏
             terminalFooter
         }
+    }
+
+    // MARK: - My Status Card
+
+    private var myStatusCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 0) {
+                // 状态指示符 + Emoji
+                HStack(spacing: 4) {
+                    if let analysis = viewModel.myAnalysis {
+                        Text(CLIConstants.statusSymbol(for: analysis.availability.probability))
+                            .font(.system(size: 16, design: .monospaced))
+                            .foregroundColor(CLIConstants.color(for: analysis.availability.probability))
+
+                        Text(analysis.lifeStatus.emoji)
+                            .font(.system(size: 14))
+                    } else {
+                        Text("💤")
+                            .font(.system(size: 14))
+                    }
+                }
+                .frame(width: 40)
+
+                // 标题
+                Text("ME")
+                    .font(.system(size: 15, design: .monospaced))
+                    .fontWeight(.bold)
+                    .foregroundColor(.cyan)
+
+                Spacer()
+
+                // 概率
+                if let analysis = viewModel.myAnalysis {
+                    Text("\(analysis.availability.probability)%")
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundColor(CLIConstants.color(for: analysis.availability.probability))
+                } else {
+                    Text("NO DATA")
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundColor(.gray)
+                }
+            }
+
+            // 状态描述
+            if let analysis = viewModel.myAnalysis {
+                Text(analysis.lifeStatus.label)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundColor(.gray)
+                    .padding(.leading, 40)
+
+                // 更新时间
+                if let updatedAt = analysis.updatedAt {
+                    Text(updatedAt.relativeTimeText())
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.gray.opacity(0.6))
+                        .padding(.leading, 40)
+                }
+            }
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .background(Color(white: 0.08))
     }
 
     private func terminalFriendRow(friend: FriendRecommendation) -> some View {
