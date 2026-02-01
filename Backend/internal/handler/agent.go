@@ -44,25 +44,27 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 		return
 	}
 
-	// ✅ 只做内存分析，不保存原始数据
-	// 异步触发分析
-	go func() {
-		ctx := context.Background()
-		if h.memoryService != nil {
-			fmt.Printf("[上报] 开始异步分析 user=%s\n", userID)
-			result, err := h.memoryService.AnalyzeAndUpdateMemory(ctx, userID, &req)
-			if err != nil {
-				fmt.Printf("[上报] 分析失败 user=%s error=%v\n", userID, err)
-			} else {
-				fmt.Printf("[上报] 分析完成 user=%s status=%s\n", userID, result.Availability.Status)
-			}
-		}
-	}()
+	// ✅ 同步分析并返回结果
+	if h.memoryService == nil {
+		response.InternalError(c, "分析服务未初始化")
+		return
+	}
 
-	// 快速响应
+	fmt.Printf("[上报] 开始分析 user=%s\n", userID)
+	result, err := h.memoryService.AnalyzeAndUpdateMemory(c.Request.Context(), userID, &req)
+	if err != nil {
+		fmt.Printf("[上报] 分析失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "分析失败")
+		return
+	}
+
+	fmt.Printf("[上报] 分析完成 user=%s status=%s\n", userID, result.Availability.Status)
+
+	// 返回分析结果
 	response.Success(c, gin.H{
-		"success": true,
-		"message": "分析已触发",
+		"success":  true,
+		"message":  "分析完成",
+		"analysis": result,
 	})
 }
 

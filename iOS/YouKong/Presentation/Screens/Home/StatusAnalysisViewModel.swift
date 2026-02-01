@@ -133,8 +133,8 @@ class StatusAnalysisViewModel: ObservableObject {
         let deviceStatus = deviceCollector.currentStatus
         let screenStatus = screenCollector.currentStatus
         let locationStatus = locationCollector.currentStatus
-        let calendarStatus = calendarCollector.hasPermission ? calendarCollector.currentStatus : nil
-        let movementStatus = movementCollector.hasPermission ? movementCollector.currentStatus : nil
+        let calendarStatus = calendarCollector.isAuthorized ? calendarCollector.currentStatus : nil
+        let movementStatus = movementCollector.isAuthorized ? movementCollector.currentStatus : nil
 
         return StatusReportRequest(
             screen: ScreenRequestData(
@@ -219,20 +219,5 @@ class StatusAnalysisViewModel: ObservableObject {
 
     private func appendLine(_ text: String, type: OutputLine.LineType) {
         outputLines.append(OutputLine(text: text, type: type))
-    }
-}
-
-// MARK: - Movement Type Extension
-
-extension MovementType {
-    var displayName: String {
-        switch self {
-        case .stationary: return "静止"
-        case .walking: return "步行中"
-        case .running: return "跑步中"
-        case .cycling: return "骑行中"
-        case .automotive: return "驾驶中"
-        case .unknown: return "未知"
-        }
     }
 }
