@@ -68,16 +68,37 @@ func main() {
 	defer redisClient.Close()
 	logger.Info("Redis连接成功")
 
-	// 初始化腾讯云SMS客户端
-	smsClient, err := tencent.NewSMSClient(
-		cfg.Tencent.SecretID,
-		cfg.Tencent.SecretKey,
-		cfg.Tencent.SMSAppID,
-		cfg.Tencent.SMSSignName,
-		cfg.Tencent.SMSTemplateID,
-	)
-	if err != nil {
-		logger.Warn("初始化SMS客户端失败，短信功能将不可用", zap.Error(err))
+	// 初始化腾讯云SMS客户端（支持 STS 临时密钥）
+	var smsClient *tencent.SMSClient
+	if cfg.Tencent.Token != "" {
+		// 使用 STS 临时密钥
+		smsClient, err = tencent.NewSMSClientWithToken(
+			cfg.Tencent.SecretID,
+			cfg.Tencent.SecretKey,
+			cfg.Tencent.Token,
+			cfg.Tencent.SMSAppID,
+			cfg.Tencent.SMSSignName,
+			cfg.Tencent.SMSTemplateID,
+		)
+		if err != nil {
+			logger.Warn("初始化SMS客户端失败（STS模式），短信功能将不可用", zap.Error(err))
+		} else {
+			logger.Info("SMS客户端初始化成功（使用STS临时密钥）")
+		}
+	} else {
+		// 使用永久密钥
+		smsClient, err = tencent.NewSMSClient(
+			cfg.Tencent.SecretID,
+			cfg.Tencent.SecretKey,
+			cfg.Tencent.SMSAppID,
+			cfg.Tencent.SMSSignName,
+			cfg.Tencent.SMSTemplateID,
+		)
+		if err != nil {
+			logger.Warn("初始化SMS客户端失败，短信功能将不可用", zap.Error(err))
+		} else {
+			logger.Info("SMS客户端初始化成功（使用永久密钥）")
+		}
 	}
 
 	// 初始化JWT管理器
@@ -86,7 +107,6 @@ func main() {
 	// 初始化Repository
 	userRepo := repository.NewUserRepository(db)
 	circleRepo := repository.NewCircleRepository(db)
-	availabilityRepo := repository.NewAvailabilityRepository(db)
 	messageRepo := repository.NewMessageRepository(db)
 	wechatRepo := repository.NewWechatRepository(db)
 	invitationRepo := repository.NewInvitationRepository(db)
@@ -147,7 +167,6 @@ func main() {
 	authService := service.NewAuthService(userRepo, smsService, jwtManager)
 	userService := service.NewUserService(userRepo)
 	circleService := service.NewCircleService(circleRepo, userRepo)
-	availabilityService := service.NewAvailabilityService(availabilityRepo, circleRepo, userRepo)
 	conversationService := service.NewConversationService(messageRepo, userRepo, notificationService, wsManager)
 	wechatService := service.NewWechatService(wechatRepo, userRepo, invitationRepo, friendshipRepo, circleRepo, wechatClient, jwtManager)
 	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
@@ -155,12 +174,12 @@ func main() {
 	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, llmClient)
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
+	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo)
 
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
 	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL, messageRepo)
 	circleHandler := handler.NewCircleHandler(circleService)
-	availabilityHandler := handler.NewAvailabilityHandler(availabilityService)
 	conversationHandler := handler.NewConversationHandler(conversationService)
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
 	friendshipHandler := handler.NewFriendshipHandler(friendshipService)
@@ -169,6 +188,7 @@ func main() {
 	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
 	wsHandler := handler.NewWSHandler(wsManager, jwtManager)
 	deviceHandler := handler.NewDeviceHandler(notificationService)
+	homeHandler := handler.NewHomeHandler(homeService)
 
 	// 设置Gin模式
 	gin.SetMode(cfg.Server.Mode)
@@ -238,13 +258,11 @@ func main() {
 				circles.DELETE("/:id/members/:userId", circleHandler.RemoveMember)
 			}
 
-			// 有空状态模块
-			availabilities := authorized.Group("/availabilities")
+			// 首页宫格模块
+			home := authorized.Group("/home")
 			{
-				availabilities.GET("/friends", availabilityHandler.GetFriendsAvailabilities)
-				availabilities.GET("/mine", availabilityHandler.GetMyAvailabilities)
-				availabilities.POST("", availabilityHandler.CreateAvailability)
-				availabilities.DELETE("/:id", availabilityHandler.CancelAvailability)
+				home.GET("/grid", homeHandler.GetGrid)
+				home.POST("/poster", homeHandler.GeneratePoster)
 			}
 
 			// 会话消息模块
@@ -297,6 +315,7 @@ func main() {
 				agent.POST("/status/stream", agentHandler.ReportStatusStream) // 流式推理（SSE）
 				agent.POST("/query", agentHandler.QueryAgentData)
 				agent.GET("/memory", agentHandler.GetMemory)
+			agent.GET("/my-analysis", agentHandler.GetMyAnalysis) // 获取我的分析结果
 			}
 
 			// 通讯录模块
