@@ -47,6 +47,11 @@ struct GridHomeView: View {
         .sheet(isPresented: $viewModel.showPosterSheet) {
             PosterShareView(friends: viewModel.friends)
         }
+        .sheet(isPresented: $viewModel.showAnalysisSheet) {
+            StatusAnalysisView {
+                viewModel.onAnalysisComplete()
+            }
+        }
         .sheet(isPresented: $showSettings) {
             ProfileView()
         }
@@ -145,9 +150,7 @@ struct BottomButtons: View {
         HStack(spacing: 16) {
             // 更新状态按钮
             Button {
-                Task {
-                    await viewModel.updateStatus()
-                }
+                viewModel.updateStatus()
             } label: {
                 HStack {
                     Image(systemName: "arrow.clockwise")

@@ -8,6 +8,7 @@ class GridHomeViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published var showPosterSheet = false
+    @Published var showAnalysisSheet = false
 
     private let apiClient = APIClient.shared
 
@@ -31,10 +32,16 @@ class GridHomeViewModel: ObservableObject {
 
     // MARK: - Update Status
 
-    func updateStatus() async {
-        // TODO: 触发 Agent 分析
-        // 暂时直接刷新宫格
-        await loadGrid()
+    func updateStatus() {
+        // 显示 Agent 分析页面
+        showAnalysisSheet = true
+    }
+
+    func onAnalysisComplete() {
+        // 分析完成后刷新宫格
+        Task {
+            await loadGrid()
+        }
     }
 
     // MARK: - Generate Poster
