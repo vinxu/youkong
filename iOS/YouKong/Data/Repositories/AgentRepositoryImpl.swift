@@ -16,8 +16,61 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
 
     func reportStatus() async throws {
         // 收集设备状态数据
-        let collector = DeviceStatusCollector.shared
-        let request = await collector.buildStatusRequest()
+        let deviceCollector = DeviceStatusCollector.shared
+        let locationCollector = LocationDataCollector.shared
+        let calendarCollector = CalendarDataCollector.shared
+        let movementCollector = MovementDataCollector.shared
+
+        let deviceStatus = deviceCollector.currentStatus
+        let locationStatus = await locationCollector.currentStatus
+        let calendarStatus = await calendarCollector.currentStatus
+        let movementStatus = await movementCollector.currentStatus
+
+        // 构建请求
+        let request = StatusReportRequest(
+            screen: nil, // 屏幕数据已移除
+            location: LocationRequestData(
+                placeType: locationStatus.placeType.rawValue,
+                atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes
+            ),
+            extendedLocation: ExtendedLocationRequestData(
+                placeType: locationStatus.placeType.rawValue,
+                placeName: locationStatus.placeName,
+                atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes,
+                latitude: locationStatus.latitude,
+                longitude: locationStatus.longitude
+            ),
+            battery: BatteryRequestData(
+                batteryLevel: Int(deviceStatus.batteryLevel * 100),
+                batteryState: deviceStatus.batteryState.rawValue,
+                isCharging: deviceStatus.isCharging
+            ),
+            mode: ModeRequestData(
+                isLowPowerMode: deviceStatus.isLowPowerMode,
+                isFocusModeOn: deviceStatus.isFocusModeOn
+            ),
+            connection: ConnectionRequestData(
+                isHeadphonesConnected: deviceStatus.isHeadphonesConnected,
+                networkType: deviceStatus.networkType.rawValue
+            ),
+            display: DisplayRequestData(
+                screenBrightness: deviceStatus.screenBrightness
+            ),
+            calendar: CalendarRequestData(
+                hasCurrentEvent: calendarStatus.hasCurrentEvent,
+                currentEventTitle: calendarStatus.currentEventTitle,
+                eventEndMinutes: calendarStatus.eventEndMinutes,
+                nextEventInMinutes: calendarStatus.nextEventInMinutes,
+                todayRemainingCount: calendarStatus.todayRemainingCount
+            ),
+            movement: MovementRequestData(
+                isMoving: movementStatus.isMoving,
+                movementType: movementStatus.movementType.rawValue,
+                stepsToday: movementStatus.stepsToday,
+                stepsLastHour: movementStatus.stepsLastHour,
+                stationaryMinutes: movementStatus.stationaryMinutes
+            )
+        )
 
         // 上报状态
         _ = try await reportStatus(request: request)

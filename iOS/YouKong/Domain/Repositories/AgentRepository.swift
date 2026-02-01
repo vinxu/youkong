@@ -208,35 +208,3 @@ struct LifeStatusData: Codable {
     let label: String
     let description: String?
 }
-
-// MARK: - Grid Response
-
-struct GridResponse: Codable {
-    let gridSize: Int
-    let friends: [FriendGridItem]
-    
-    enum CodingKeys: String, CodingKey {
-        case gridSize = "grid_size"
-        case friends
-    }
-}
-
-struct FriendGridItem: Codable {
-    let userID: String
-    let nickname: String
-    let avatar: String?
-    let emoji: String
-    let status: String
-    let updatedAt: String
-    let relativeTime: String
-    
-    enum CodingKeys: String, CodingKey {
-        case userID = "user_id"
-        case nickname
-        case avatar
-        case emoji
-        case status
-        case updatedAt = "updated_at"
-        case relativeTime = "relative_time"
-    }
-}

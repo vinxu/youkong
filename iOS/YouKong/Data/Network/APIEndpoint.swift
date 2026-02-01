@@ -245,12 +245,6 @@ extension APIEndpoint {
         )
     }
 
-    // MARK: - Home (Grid)
-
-    /// 获取宫格数据
-    static var getGridData: APIEndpoint {
-        APIEndpoint(path: "/api/v1/home/grid")
-    }
 
     // MARK: - Device Token (Push Notifications)
 

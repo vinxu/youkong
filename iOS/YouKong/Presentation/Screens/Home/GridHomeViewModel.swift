@@ -25,7 +25,7 @@ class GridHomeViewModel: ObservableObject {
             let gridData = try await agentRepository.getGridData()
             friends = gridData.friends.map { friend in
                 FriendStatus(
-                    id: friend.userID,
+                    id: friend.userId,
                     nickname: friend.nickname,
                     avatar: friend.avatar,
                     emoji: friend.emoji,
