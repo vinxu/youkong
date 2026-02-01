@@ -409,7 +409,7 @@ struct MyAgentDataSheet: View {
     @State private var currentThinkingLine: String = ""
 
     // 数据状态
-    @State private var screenStatus: ScreenStatus = .idle
+    // screenStatus 已移除
     @State private var locationStatus: LocationStatus = .unknown
     @State private var deviceStatus: DeviceStatus = .unknown
 
@@ -677,7 +677,6 @@ struct MyAgentDataSheet: View {
         // 显示本地采集的数据摘要
         appendLine("", type: .output)
         appendLine("📱 本地数据采集完成:", type: .section)
-        appendLine("├─ 屏幕: \(screenStatus.isActive ? "活跃" : "空闲") (\(screenStatus.activityType.rawValue), \(screenStatus.sessionDurationMinutes)分钟)", type: .output)
         appendLine("├─ 位置: \(locationStatus.placeName ?? locationStatus.placeType.rawValue) (停留\(locationStatus.atPlaceSinceMinutes)分钟)", type: .output)
         appendLine("├─ 日历: \(calendarStatus.hasCurrentEvent ? "有日程" : "无日程") (剩余\(calendarStatus.todayRemainingCount)个)", type: .output)
         appendLine("├─ 运动: \(movementStatus.movementType.displayName) (今日\(movementStatus.stepsToday)步)", type: .output)
@@ -749,23 +748,12 @@ struct MyAgentDataSheet: View {
         appendLine("📍 位置权限: \(permissionManager.status.location ? "✅ 已授权" : "❌ 未授权")", type: .output)
         appendLine("📅 日历权限: \(permissionManager.status.calendar ? "✅ 已授权" : "❌ 未授权")", type: .output)
         appendLine("🏃 运动权限: \(permissionManager.status.motion ? "✅ 已授权" : "❌ 未授权")", type: .output)
-        appendLine("📱 屏幕时间: \(permissionManager.status.screenTime ? "✅ 已授权" : "❌ 未授权")", type: .output)
-        appendLine("👥 通讯录权限: \(permissionManager.status.contacts ? "✅ 已授权" : "❌ 未授权")", type: .output)
         appendLine("", type: .output)
 
         // 2. 数据采集器状态
         appendLine("═══════════════════════════════════════", type: .separator)
         appendLine("2️⃣  数据采集器状态", type: .section)
         appendLine("═══════════════════════════════════════", type: .separator)
-        appendLine("", type: .output)
-
-        // 屏幕数据
-        let screenCollector = ScreenDataCollector.shared
-        appendLine("📱 屏幕数据采集器:", type: .section)
-        appendLine("   - 监控状态: \(screenCollector.isMonitoring ? "✅ 运行中" : "❌ 未启动")", type: .output)
-        let screenStatus = screenCollector.currentStatus
-        appendLine("   - 当前状态: \(screenStatus.isActive ? "活跃" : "空闲")", type: .output)
-        appendLine("   - 活动类型: \(screenStatus.activityType.rawValue)", type: .output)
         appendLine("", type: .output)
 
         // 位置数据
@@ -853,10 +841,6 @@ struct MyAgentDataSheet: View {
             issues.append("⚠️  位置采集器未启动 → 重启 App 后应自动启动")
         }
 
-        if !screenCollector.isMonitoring {
-            issues.append("⚠️  屏幕数据采集器未启动 → 重启 App 后应自动启动")
-        }
-
         if issues.isEmpty {
             appendLine("✅ 所有数据采集器工作正常！", type: .success)
         } else {
@@ -896,8 +880,7 @@ struct MyAgentDataSheet: View {
                 // 显示分析结果
                 appendLine("📡 收集线索...", type: .phase)
                 appendLine("├─ 时间: \(formatCurrentTime())", type: .clue)
-                appendLine("├─ 位置: \(locationStatus.placeName ?? locationStatus.placeType.rawValue)", type: .clue)
-                appendLine("└─ 屏幕: \(screenStatus.isActive ? "活跃" : "空闲")", type: .clue)
+                appendLine("└─ 位置: \(locationStatus.placeName ?? locationStatus.placeType.rawValue)", type: .clue)
                 appendLine("", type: .output)
 
                 appendLine("🧠 分析特征...", type: .phase)
@@ -1055,19 +1038,13 @@ struct MyAgentDataSheet: View {
     // MARK: - Data Loading
 
     private func loadData() {
-        screenStatus = ScreenDataCollector.shared.currentStatus
         locationStatus = LocationDataCollector.shared.currentStatus
         deviceStatus = DeviceStatusCollector.shared.getCurrentStatus()
     }
 
     private func buildRequest(calendarStatus: CalendarStatus, movementStatus: MovementStatus) -> StatusReportRequest {
-        let screenData = ScreenRequestData(
-            isActive: screenStatus.isActive,
-            activityType: screenStatus.activityType.rawValue,
-            sessionDurationMinutes: screenStatus.sessionDurationMinutes,
-            lastActiveMinutesAgo: screenStatus.lastActiveMinutesAgo,
-            lastActiveCategory: screenStatus.lastActiveCategory
-        )
+        // 屏幕数据已移除
+        let screenData: ScreenRequestData? = nil
 
         let locationData = LocationRequestData(
             placeType: locationStatus.placeType.rawValue,

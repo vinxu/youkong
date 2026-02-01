@@ -230,7 +230,6 @@ struct TerminalPermissionStatusSheet: View {
 
                         VStack(spacing: 12) {
                             terminalPermissionRow("位置", granted: permissionManager.status.location)
-                            terminalPermissionRow("通讯录", granted: permissionManager.status.contacts)
                         }
                     }
 

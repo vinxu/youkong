@@ -167,7 +167,6 @@ fun FriendsListScreen(
                         item {
                             AgentStatusCard(
                                 analysisResult = uiState.analysisResult,
-                                screenTimeMinutes = uiState.screenData?.totalScreenTimeToday?.let { it / 60000 },
                                 onClick = onNavigateToAgentData,
                             )
                         }
@@ -207,24 +206,14 @@ fun FriendsListScreen(
 @Composable
 private fun AgentStatusCard(
     analysisResult: AnalysisResult?,
-    screenTimeMinutes: Long?,
     onClick: () -> Unit,
 ) {
     val probability = analysisResult?.availability?.probability ?: -1
     val probabilityColor = CLIColors.probabilityColor(probability)
 
     // 计算显示的标签和 emoji
-    val displayLabel = analysisResult?.lifeStatus?.label ?: run {
-        // 没有 LLM 分析结果时，显示简单状态
-        if (screenTimeMinutes != null && screenTimeMinutes > 0) {
-            "ACTIVE"
-        } else {
-            "NO DATA"
-        }
-    }
-    val displayEmoji = analysisResult?.lifeStatus?.emoji ?: run {
-        if (screenTimeMinutes != null && screenTimeMinutes > 0) "📱" else "💤"
-    }
+    val displayLabel = analysisResult?.lifeStatus?.label ?: "NO DATA"
+    val displayEmoji = analysisResult?.lifeStatus?.emoji ?: "💤"
 
     Column(
         modifier = Modifier
@@ -279,7 +268,6 @@ private fun AgentStatusCard(
                 // 状态原因
                 Text(
                     text = analysisResult?.availability?.reason
-                        ?: screenTimeMinutes?.let { "Screen: ${it}min today" }
                         ?: "Click to view Agent data",
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,

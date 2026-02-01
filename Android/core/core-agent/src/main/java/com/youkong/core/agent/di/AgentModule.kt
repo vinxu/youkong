@@ -2,8 +2,6 @@ package com.youkong.core.agent.di
 
 import com.youkong.core.agent.collector.LocationCollector
 import com.youkong.core.agent.collector.LocationDataCollector
-import com.youkong.core.agent.collector.ScreenDataCollector
-import com.youkong.core.agent.collector.UsageStatsCollector
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -16,12 +14,6 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class AgentModule {
-
-    @Binds
-    @Singleton
-    abstract fun bindScreenDataCollector(
-        impl: UsageStatsCollector
-    ): ScreenDataCollector
 
     @Binds
     @Singleton

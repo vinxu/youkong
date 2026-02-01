@@ -114,6 +114,7 @@ func main() {
 	friendRequestRepo := repository.NewFriendRequestRepository(db)
 	memoryRepo := repository.NewMemoryRepository(db)
 	deviceTokenRepo := repository.NewDeviceTokenRepository(db)
+	userProfileRepo := repository.NewUserProfileRepository(db)
 
 	// 初始化微信客户端
 	var wechatClient *wechat.Client
@@ -175,6 +176,7 @@ func main() {
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo)
+	userProfileService := service.NewUserProfileService(userProfileRepo)
 
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
@@ -189,6 +191,7 @@ func main() {
 	wsHandler := handler.NewWSHandler(wsManager, jwtManager)
 	deviceHandler := handler.NewDeviceHandler(notificationService)
 	homeHandler := handler.NewHomeHandler(homeService)
+	userProfileHandler := handler.NewUserProfileHandler(userProfileService)
 
 	// 设置Gin模式
 	gin.SetMode(cfg.Server.Mode)
@@ -244,6 +247,15 @@ func main() {
 				users.GET("/me/badge", userHandler.GetBadgeCount)
 				users.GET("/search", userHandler.SearchUsers)
 				users.GET("/:id", userHandler.GetUser)
+			}
+
+			// 用户画像模块
+			profile := authorized.Group("/profile")
+			{
+				profile.GET("", userProfileHandler.GetMyProfile)
+				profile.PUT("", userProfileHandler.UpsertProfile)
+				profile.GET("/status", userProfileHandler.GetProfileStatus)
+				profile.DELETE("", userProfileHandler.DeleteProfile)
 			}
 
 			// 圈子模块

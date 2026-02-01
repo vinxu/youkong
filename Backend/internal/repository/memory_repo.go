@@ -216,16 +216,22 @@ type UserAnalysisCache struct {
 
 // SaveAnalysisCache 保存分析缓存
 func (r *MemoryRepository) SaveAnalysisCache(ctx context.Context, userID string, result *model.AnalysisResult) error {
-	query := `INSERT INTO user_analysis_cache (user_id, availability_status, availability_probability, availability_reason, availability_confidence, life_status_emoji, life_status_label)
-              VALUES (?, ?, ?, ?, ?, ?, ?)
-              ON DUPLICATE KEY UPDATE
-              availability_status = VALUES(availability_status),
-              availability_probability = VALUES(availability_probability),
-              availability_reason = VALUES(availability_reason),
-              availability_confidence = VALUES(availability_confidence),
-              life_status_emoji = VALUES(life_status_emoji),
-              life_status_label = VALUES(life_status_label),
-              updated_at = NOW()`
+	query := `INSERT INTO user_analysis_cache (
+		user_id, availability_status, availability_probability, availability_reason, availability_confidence,
+		life_status_emoji, life_status_label, life_status_description, mood, activity, context
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON DUPLICATE KEY UPDATE
+		availability_status = VALUES(availability_status),
+		availability_probability = VALUES(availability_probability),
+		availability_reason = VALUES(availability_reason),
+		availability_confidence = VALUES(availability_confidence),
+		life_status_emoji = VALUES(life_status_emoji),
+		life_status_label = VALUES(life_status_label),
+		life_status_description = VALUES(life_status_description),
+		mood = VALUES(mood),
+		activity = VALUES(activity),
+		context = VALUES(context),
+		updated_at = NOW()`
 	_, err := r.db.ExecContext(ctx, query,
 		userID,
 		result.Availability.Status,
@@ -234,8 +240,20 @@ func (r *MemoryRepository) SaveAnalysisCache(ctx context.Context, userID string,
 		result.Availability.Confidence,
 		result.LifeStatus.Emoji,
 		result.LifeStatus.Label,
+		strPtrOrNull(result.LifeStatus.Description),
+		strPtrOrNull(result.Mood),
+		strPtrOrNull(result.Activity),
+		strPtrOrNull(result.Context),
 	)
 	return err
+}
+
+// strPtrOrNull 将字符串转换为指针，空字符串返回 nil
+func strPtrOrNull(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // GetAnalysisCache 获取分析缓存
@@ -258,11 +276,23 @@ func (r *MemoryRepository) GetAnalysisCache(ctx context.Context, userID string) 
 			Confidence:  cache.AvailabilityConfidence,
 		},
 		LifeStatus: model.LifeStatus{
-			Emoji: cache.LifeStatusEmoji,
-			Label: cache.LifeStatusLabel,
+			Emoji:       cache.LifeStatusEmoji,
+			Label:       cache.LifeStatusLabel,
+			Description: ptrStrToStr(cache.LifeStatusDescription),
 		},
+		Mood:      ptrStrToStr(cache.Mood),
+		Activity:  ptrStrToStr(cache.Activity),
+		Context:   ptrStrToStr(cache.Context),
 		UpdatedAt: cache.UpdatedAt, // 包含更新时间用于时效检查
 	}, nil
+}
+
+// ptrStrToStr 将字符串指针转换为字符串
+func ptrStrToStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // GetAnalysisCacheByUserIDs 批量获取分析缓存
@@ -293,9 +323,13 @@ func (r *MemoryRepository) GetAnalysisCacheByUserIDs(ctx context.Context, userID
 				Confidence:  cache.AvailabilityConfidence,
 			},
 			LifeStatus: model.LifeStatus{
-				Emoji: cache.LifeStatusEmoji,
-				Label: cache.LifeStatusLabel,
+				Emoji:       cache.LifeStatusEmoji,
+				Label:       cache.LifeStatusLabel,
+				Description: ptrStrToStr(cache.LifeStatusDescription),
 			},
+			Mood:      ptrStrToStr(cache.Mood),
+			Activity:  ptrStrToStr(cache.Activity),
+			Context:   ptrStrToStr(cache.Context),
 			UpdatedAt: cache.UpdatedAt, // 包含更新时间用于时效检查
 		}
 	}

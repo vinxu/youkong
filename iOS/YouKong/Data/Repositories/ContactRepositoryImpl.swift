@@ -7,16 +7,11 @@ import Factory
 class ContactRepositoryImpl: ContactRepositoryProtocol {
     @Injected(\.apiClient) private var apiClient
 
-    private let contactsManager = ContactsManager.shared
-
     // MARK: - Get Contact Friends
 
     func getContactFriends() async throws -> [UserProfile] {
-        // 获取通讯录并匹配已注册用户
-        let phoneNumbers = try await contactsManager.fetchAllPhoneNumbers()
-        let hashes = phoneNumbers.map { $0.sha256Hash }
-        let response = try await matchContacts(phoneHashes: hashes)
-        return response.matches.map { $0.user }
+        // 通讯录功能已移除
+        return []
     }
 
     // MARK: - Sync Contacts

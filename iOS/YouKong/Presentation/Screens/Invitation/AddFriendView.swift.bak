@@ -555,6 +555,176 @@ class FriendRequestsViewModel: ObservableObject {
     }
 }
 
+// MARK: - Contact Friends View (通讯录好友)
+
+struct ContactFriendsView: View {
+    @StateObject private var viewModel = ContactFriendsViewModel()
+
+    var body: some View {
+        Group {
+            if viewModel.isLoading {
+                ProgressView("正在匹配通讯录...")
+            } else if viewModel.matches.isEmpty {
+                emptyView
+            } else {
+                List {
+                    ForEach(viewModel.matches) { match in
+                        ContactMatchRow(match: match) {
+                            Task {
+                                await viewModel.sendRequest(to: match)
+                            }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+            }
+        }
+        .navigationTitle("通讯录好友")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task {
+                        await viewModel.refresh()
+                    }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .disabled(viewModel.isLoading)
+            }
+        }
+        .task {
+            await viewModel.loadContacts()
+        }
+        .alert("错误", isPresented: .constant(viewModel.errorMessage != nil)) {
+            Button("确定") {
+                viewModel.errorMessage = nil
+            }
+        } message: {
+            Text(viewModel.errorMessage ?? "")
+        }
+    }
+
+    private var emptyView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "person.crop.circle.badge.questionmark")
+                .font(.system(size: 48))
+                .foregroundColor(.secondary)
+            Text("没有找到通讯录好友")
+                .font(.headline)
+                .foregroundColor(.secondary)
+            Text("你的通讯录中暂时没有使用有空的好友")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding()
+    }
+}
+
+// MARK: - Contact Match Row
+
+struct ContactMatchRow: View {
+    let match: ContactMatch
+    let onSendRequest: () -> Void
+    @State private var requestSent = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(CLIConstants.bullet).font(.system(size: 16, design: .monospaced)).foregroundColor(.green).frame(width: 30)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(match.user.nickname)
+                    .fontWeight(.medium)
+            }
+
+            Spacer()
+
+            if match.isFriend {
+                Text("已是好友")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color(.systemGray5))
+                    .cornerRadius(14)
+            } else if requestSent {
+                Text("已发送")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.orange.opacity(0.1))
+                    .cornerRadius(14)
+            } else {
+                Button {
+                    onSendRequest()
+                    requestSent = true
+                } label: {
+                    Text("添加")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
+                        .background(Color.primaryGreen)
+                        .cornerRadius(14)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Contact Friends ViewModel
+
+@MainActor
+class ContactFriendsViewModel: ObservableObject {
+    @Published var matches: [ContactMatch] = []
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+
+    @Injected(\.contactRepository) private var contactRepository
+
+    private let contactsManager = ContactsManager.shared
+
+    func loadContacts() async {
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            let hasPermission = try await contactsManager.requestPermission()
+            guard hasPermission else {
+                errorMessage = "需要通讯录权限才能匹配好友"
+                isLoading = false
+                return
+            }
+
+            let phoneNumbers = try await contactsManager.fetchAllPhoneNumbers()
+            let hashes = phoneNumbers.map { $0.sha256Hash }
+
+            let response = try await contactRepository.matchContacts(phoneHashes: hashes)
+            matches = response.matches
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        isLoading = false
+    }
+
+    func refresh() async {
+        await loadContacts()
+    }
+
+    func sendRequest(to match: ContactMatch) async {
+        // 这里需要通过其他方式获取手机号，或者后端提供通过 userId 发送请求的接口
+        // 暂时使用 addFriends 接口
+        do {
+            _ = try await contactRepository.addFriends(userIds: [match.user.id])
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
 
 #Preview {
     AddFriendView()

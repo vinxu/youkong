@@ -146,8 +146,11 @@ type AvailabilityAnalysis struct {
 
 // AnalysisResult LLM 分析结果
 type AnalysisResult struct {
-	Availability AvailabilityAnalysis `json:"availability"`
-	LifeStatus   LifeStatus           `json:"life_status"`
+	Availability AvailabilityAnalysis `json:"availability"`          // 保留用于兼容
+	LifeStatus   LifeStatus           `json:"life_status"`           // 主要状态（emoji + label + description）
+	Mood         string               `json:"mood,omitempty"`        // 心情（如"开心"、"平静"、"焦虑"）
+	Activity     string               `json:"activity,omitempty"`    // 活动（如"工作"、"运动"、"休息"）
+	Context      string               `json:"context,omitempty"`     // 上下文描述
 	MemoryUpdate *MemoryUpdate        `json:"memory_update,omitempty"`
 	UpdatedAt    time.Time            `json:"updated_at,omitempty"` // 缓存更新时间（用于时效检查）
 }

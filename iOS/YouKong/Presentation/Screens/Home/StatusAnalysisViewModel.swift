@@ -10,7 +10,6 @@ class StatusAnalysisViewModel: ObservableObject {
     @Published var errorMessage: String?
 
     private let deviceCollector = DeviceStatusCollector.shared
-    private let screenCollector = ScreenDataCollector.shared
     private let locationCollector = LocationDataCollector.shared
     private let calendarCollector = CalendarDataCollector.shared
     private let movementCollector = MovementDataCollector.shared
@@ -82,12 +81,7 @@ class StatusAnalysisViewModel: ObservableObject {
 
     private func collectDeviceData() async {
         let deviceStatus = deviceCollector.currentStatus
-        let screenStatus = screenCollector.currentStatus
         let locationStatus = locationCollector.currentStatus
-
-        // 屏幕状态
-        let screenText = screenStatus.isActive ? "使用中" : "空闲"
-        appendLine("├─ 屏幕: \(screenText)", type: .clue)
 
         // 位置信息
         let placeText = locationStatus.placeName ?? locationStatus.placeType.rawValue
@@ -131,19 +125,12 @@ class StatusAnalysisViewModel: ObservableObject {
 
     private func buildStatusRequest() -> StatusReportRequest {
         let deviceStatus = deviceCollector.currentStatus
-        let screenStatus = screenCollector.currentStatus
         let locationStatus = locationCollector.currentStatus
         let calendarStatus = calendarCollector.isAuthorized ? calendarCollector.currentStatus : nil
         let movementStatus = movementCollector.isAuthorized ? movementCollector.currentStatus : nil
 
         return StatusReportRequest(
-            screen: ScreenRequestData(
-                isActive: screenStatus.isActive,
-                activityType: screenStatus.activityType.rawValue,
-                sessionDurationMinutes: screenStatus.sessionDurationMinutes,
-                lastActiveMinutesAgo: screenStatus.lastActiveMinutesAgo,
-                lastActiveCategory: nil
-            ),
+            screen: nil, // 屏幕数据已移除
             location: LocationRequestData(
                 placeType: locationStatus.placeType.rawValue,
                 atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes

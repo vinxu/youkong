@@ -4,11 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.youkong.core.agent.collector.DeviceStateCollector
 import com.youkong.core.agent.collector.LocationCollector
-import com.youkong.core.agent.collector.UsageStatsCollector
-import com.youkong.core.agent.model.ActivityType
 import com.youkong.core.agent.model.DeviceStateData
 import com.youkong.core.agent.model.LocalLocationData
-import com.youkong.core.agent.model.LocalScreenData
 import com.youkong.core.agent.model.PlaceType
 import com.youkong.core.domain.manager.UnreadMessageManager
 import com.youkong.core.domain.model.FriendWithProbability
@@ -22,7 +19,6 @@ import com.youkong.core.network.model.ConnectionDataRequest
 import com.youkong.core.network.model.DisplayDataRequest
 import com.youkong.core.network.model.LocationDataRequest
 import com.youkong.core.network.model.ModeDataRequest
-import com.youkong.core.network.model.ScreenDataRequest
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,7 +37,6 @@ data class FriendsUiState(
     val error: String? = null,
     // Agent 数据
     val analysisResult: AnalysisResult? = null,
-    val screenData: LocalScreenData? = null,
     // 未读刷新计数器（用于触发 UI 重组）
     val unreadRefreshCounter: Int = 0,
 )
@@ -50,7 +45,6 @@ data class FriendsUiState(
 class FriendsViewModel @Inject constructor(
     private val agentRepository: AgentRepository,
     private val messageRepository: MessageRepository,
-    private val usageStatsCollector: UsageStatsCollector,
     private val locationCollector: LocationCollector,
     private val deviceStateCollector: DeviceStateCollector,
     private val agentApi: AgentApi,
@@ -151,16 +145,13 @@ class FriendsViewModel @Inject constructor(
 
     private suspend fun loadAgentData() {
         try {
-            val screenData = usageStatsCollector.collect()
             val locationData = locationCollector.collect()
             val deviceStateData = deviceStateCollector.collect()
 
-            android.util.Log.d("FriendsViewModel", "📱 收集数据完成: screenData=${screenData != null}, location=${locationData != null}, device=${deviceStateData != null}")
-
-            _uiState.update { it.copy(screenData = screenData) }
+            android.util.Log.d("FriendsViewModel", "📱 收集数据完成: location=${locationData != null}, device=${deviceStateData != null}")
 
             // 上报数据并获取 LLM 分析结果
-            val request = buildRequest(screenData, locationData, deviceStateData)
+            val request = buildRequest(locationData, deviceStateData)
             android.util.Log.d("FriendsViewModel", "📤 上报 Agent 状态: $request")
 
             val response = agentApi.reportStatus(request)
@@ -195,46 +186,16 @@ class FriendsViewModel @Inject constructor(
     }
 
     private fun buildRequest(
-        screenData: LocalScreenData?,
         locationData: LocalLocationData?,
         deviceStateData: DeviceStateData?,
     ): AgentStatusRequest {
         return AgentStatusRequest(
-            screen = screenData?.let { convertScreenData(it) },
+            screen = null,
             location = locationData?.let { convertLocationData(it) },
             battery = deviceStateData?.let { convertBatteryData(it) },
             mode = deviceStateData?.let { convertModeData(it) },
             connection = deviceStateData?.let { convertConnectionData(it) },
             display = deviceStateData?.let { convertDisplayData(it) },
-        )
-    }
-
-    private fun convertScreenData(local: LocalScreenData): ScreenDataRequest {
-        val now = Clock.System.now()
-        val lastActiveMinutesAgo = local.lastActiveTime?.let {
-            ((now - it).inWholeMinutes).toInt()
-        } ?: 0
-
-        val sessionDurationMinutes = local.sessionStartTime?.let {
-            ((now - it).inWholeMinutes).toInt()
-        } ?: 0
-
-        val activityType = when {
-            !local.isScreenOn -> ActivityType.IDLE
-            local.currentApp?.contains("game", ignoreCase = true) == true -> ActivityType.ENTERTAINMENT
-            local.currentApp?.contains("video", ignoreCase = true) == true -> ActivityType.ENTERTAINMENT
-            local.currentApp?.contains("music", ignoreCase = true) == true -> ActivityType.ENTERTAINMENT
-            local.currentApp?.contains("chat", ignoreCase = true) == true -> ActivityType.COMMUNICATION
-            local.currentApp?.contains("message", ignoreCase = true) == true -> ActivityType.COMMUNICATION
-            local.currentApp?.contains("wechat", ignoreCase = true) == true -> ActivityType.COMMUNICATION
-            else -> ActivityType.PRODUCTIVITY
-        }
-
-        return ScreenDataRequest(
-            isActive = local.isScreenOn,
-            activityType = activityType.name.lowercase(),
-            sessionDurationMinutes = sessionDurationMinutes,
-            lastActiveMinutesAgo = lastActiveMinutesAgo,
         )
     }
 

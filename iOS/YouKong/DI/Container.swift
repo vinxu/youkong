@@ -46,4 +46,9 @@ extension Container {
         Factory(self) { FriendshipRepositoryImpl() }
             .singleton
     }
+
+    var userProfileRepository: Factory<UserProfileRepositoryProtocol> {
+        Factory(self) { UserProfileRepositoryImpl() }
+            .singleton
+    }
 }

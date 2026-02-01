@@ -54,18 +54,6 @@ struct FriendsHubView: View {
                                     TerminalHubRow(icon: "📱", title: "通过手机号添加")
                                 }
                                 .buttonStyle(.plain)
-
-                                Rectangle()
-                                    .fill(CLIColors.border)
-                                    .frame(height: 1)
-                                    .padding(.leading, 16)
-
-                                NavigationLink {
-                                    ContactFriendsView()
-                                } label: {
-                                    TerminalHubRow(icon: "📇", title: "从通讯录添加")
-                                }
-                                .buttonStyle(.plain)
                             }
                             .background(CLIColors.backgroundSecondary)
                             .overlay(

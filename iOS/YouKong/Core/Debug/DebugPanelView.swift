@@ -714,7 +714,6 @@ extension View {
 // MARK: - Agent Data View
 
 struct AgentDataView: View {
-    @StateObject private var screenCollector = ScreenDataCollector.shared
     @StateObject private var locationCollector = LocationDataCollector.shared
     @StateObject private var permissionManager = PermissionManager.shared
 
@@ -743,26 +742,9 @@ struct AgentDataView: View {
                 // 权限状态
                 GroupBox("权限状态") {
                     VStack(alignment: .leading, spacing: 8) {
-                        permissionRow("屏幕使用时间", granted: permissionManager.status.screenTime)
                         permissionRow("地理位置", granted: permissionManager.status.location)
-                        permissionRow("通讯录", granted: permissionManager.status.contacts)
-                    }
-                }
-                .padding(.horizontal)
-
-                // 屏幕数据
-                GroupBox("屏幕使用数据 (ScreenStatus)") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        let status = screenCollector.getCurrentStatus()
-                        dataRow("is_active", value: "\(status.isActive)")
-                        dataRow("activity_type", value: status.activityType.rawValue)
-                        dataRow("session_duration_minutes", value: "\(status.sessionDurationMinutes)")
-                        dataRow("last_active_minutes_ago", value: "\(status.lastActiveMinutesAgo)")
-
-                        Divider()
-
-                        dataRow("isMonitoring", value: "\(screenCollector.isMonitoring)")
-                        dataRow("isAuthorized", value: "\(screenCollector.isAuthorized)")
+                        permissionRow("日历", granted: permissionManager.status.calendar)
+                        permissionRow("运动", granted: permissionManager.status.motion)
                     }
                 }
                 .padding(.horizontal)
@@ -827,17 +809,11 @@ struct AgentDataView: View {
 
                 // 上报预览
                 GroupBox("API 上报预览 (JSON)") {
-                    let screenStatus = screenCollector.getCurrentStatus()
                     let locationStatus = locationCollector.getCurrentStatus()
 
                     let json = """
                     {
-                      "screen": {
-                        "is_active": \(screenStatus.isActive),
-                        "activity_type": "\(screenStatus.activityType.rawValue)",
-                        "session_duration_minutes": \(screenStatus.sessionDurationMinutes),
-                        "last_active_minutes_ago": \(screenStatus.lastActiveMinutesAgo)
-                      },
+                      "screen": null,
                       "location": {
                         "place_type": "\(locationStatus.placeType.rawValue)",
                         "at_place_since_minutes": \(locationStatus.atPlaceSinceMinutes)
@@ -880,7 +856,6 @@ struct AgentDataView: View {
         Task {
             await permissionManager.checkAllPermissions()
         }
-        _ = screenCollector.getCurrentStatus()
         _ = locationCollector.getCurrentStatus()
     }
 

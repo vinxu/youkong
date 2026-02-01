@@ -4,11 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.youkong.core.agent.collector.DeviceStateCollector
 import com.youkong.core.agent.collector.LocationCollector
-import com.youkong.core.agent.collector.UsageStatsCollector
-import com.youkong.core.agent.model.ActivityType
 import com.youkong.core.agent.model.DeviceStateData
 import com.youkong.core.agent.model.LocalLocationData
-import com.youkong.core.agent.model.LocalScreenData
 import com.youkong.core.agent.model.PlaceType
 import com.youkong.core.datastore.TokenManager
 import com.youkong.core.network.model.AgentStatusRequest
@@ -18,7 +15,6 @@ import com.youkong.core.network.model.DisplayDataRequest
 import com.youkong.core.network.model.HolmesFullResult
 import com.youkong.core.network.model.LocationDataRequest
 import com.youkong.core.network.model.ModeDataRequest
-import com.youkong.core.network.model.ScreenDataRequest
 import com.youkong.core.network.api.AgentApi
 import com.youkong.core.network.sse.AgentSseClient
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -56,14 +52,12 @@ data class AgentDataUiState(
     val lastResult: HolmesFullResult? = null,  // 保存最后的分析结果
     val isUploading: Boolean = false,          // 是否正在上报
     // 保存收集的原始数据，用于上报
-    val lastScreenData: LocalScreenData? = null,
     val lastLocationData: LocalLocationData? = null,
     val lastDeviceStateData: DeviceStateData? = null,
 )
 
 @HiltViewModel
 class AgentDataViewModel @Inject constructor(
-    private val usageStatsCollector: UsageStatsCollector,
     private val locationCollector: LocationCollector,
     private val deviceStateCollector: DeviceStateCollector,
     private val agentApi: AgentApi,
@@ -102,24 +96,12 @@ class AgentDataViewModel @Inject constructor(
             appendLine(CliLine.Output("[${dateFormat.format(Date())}] 初始化 Holmes Agent..."))
             delay(200)
 
-            var screenData: LocalScreenData? = null
             var locationData: LocalLocationData? = null
             var deviceStateData: DeviceStateData? = null
 
             // Step 1: 本地数据收集
             appendLine(CliLine.Phase("📱", "采集本地设备数据..."))
             delay(150)
-
-            try {
-                screenData = usageStatsCollector.collect()
-                val screenStatus = if (screenData?.isScreenOn == true) "亮屏" else "息屏"
-                val currentApp = screenData?.currentApp ?: "无"
-                appendLine(CliLine.Clue("屏幕: $screenStatus | 当前: $currentApp"))
-            } catch (e: Exception) {
-                appendLine(CliLine.Error("屏幕数据采集失败: ${e.message}"))
-            }
-
-            delay(100)
             try {
                 locationData = locationCollector.collect()
                 if (locationData != null) {
@@ -142,12 +124,11 @@ class AgentDataViewModel @Inject constructor(
             delay(200)
 
             // Step 2: 构建请求并保存收集的数据
-            val request = buildRequest(screenData, locationData, deviceStateData)
+            val request = buildRequest(locationData, deviceStateData)
 
             // 保存收集的数据，供后续上报使用
             _uiState.update {
                 it.copy(
-                    lastScreenData = screenData,
                     lastLocationData = locationData,
                     lastDeviceStateData = deviceStateData
                 )
@@ -297,12 +278,11 @@ class AgentDataViewModel @Inject constructor(
 
             try {
                 // ✅ 使用已收集的数据，不重新收集（避免耗时）
-                val screenData = currentState.lastScreenData
                 val locationData = currentState.lastLocationData
                 val deviceStateData = currentState.lastDeviceStateData
 
                 // 构建请求
-                val request = buildRequest(screenData, locationData, deviceStateData)
+                val request = buildRequest(locationData, deviceStateData)
 
                 appendLine(CliLine.Output("POST /api/v1/agent/status"))
                 val response = agentApi.reportStatus(request)
@@ -327,81 +307,16 @@ class AgentDataViewModel @Inject constructor(
     }
 
     private fun buildRequest(
-        screenData: LocalScreenData?,
         locationData: LocalLocationData?,
         deviceStateData: DeviceStateData?
     ): AgentStatusRequest {
         return AgentStatusRequest(
-            screen = screenData?.let { convertScreenData(it) },
+            screen = null,
             location = locationData?.let { convertLocationData(it) },
             battery = deviceStateData?.let { convertBatteryData(it) },
             mode = deviceStateData?.let { convertModeData(it) },
             connection = deviceStateData?.let { convertConnectionData(it) },
             display = deviceStateData?.let { convertDisplayData(it) },
-        )
-    }
-
-    private fun convertScreenData(local: LocalScreenData): ScreenDataRequest {
-        val now = Clock.System.now()
-
-        // 如果屏幕是亮的，last_active_minutes_ago 应该是 0
-        val lastActiveMinutesAgo = if (local.isScreenOn) {
-            0
-        } else {
-            local.lastActiveTime?.let {
-                ((now - it).inWholeMinutes).toInt()
-            } ?: 0
-        }
-
-        // session_duration_minutes 应该是当前会话的持续时间（分钟）
-        // 如果屏幕关闭，session 为 0
-        val sessionDurationMinutes = if (local.isScreenOn) {
-            local.sessionStartTime?.let {
-                ((now - it).inWholeMinutes).toInt().coerceAtMost(120) // 最多 2 小时，避免异常值
-            } ?: 0
-        } else {
-            0
-        }
-
-        // 改进 activity_type 判断
-        val currentApp = local.currentApp?.lowercase() ?: ""
-        val activityType = when {
-            !local.isScreenOn -> ActivityType.IDLE
-            // 娱乐类
-            currentApp.contains("game") -> ActivityType.ENTERTAINMENT
-            currentApp.contains("video") -> ActivityType.ENTERTAINMENT
-            currentApp.contains("music") -> ActivityType.ENTERTAINMENT
-            currentApp.contains("tiktok") -> ActivityType.ENTERTAINMENT
-            currentApp.contains("douyin") -> ActivityType.ENTERTAINMENT
-            currentApp.contains("bilibili") -> ActivityType.ENTERTAINMENT
-            currentApp.contains("youtube") -> ActivityType.ENTERTAINMENT
-            currentApp.contains("netflix") -> ActivityType.ENTERTAINMENT
-            currentApp.contains("iqiyi") -> ActivityType.ENTERTAINMENT
-            currentApp.contains("youku") -> ActivityType.ENTERTAINMENT
-            // 通讯类
-            currentApp.contains("wechat") -> ActivityType.COMMUNICATION
-            currentApp.contains("weixin") -> ActivityType.COMMUNICATION
-            currentApp.contains("qq") -> ActivityType.COMMUNICATION
-            currentApp.contains("telegram") -> ActivityType.COMMUNICATION
-            currentApp.contains("whatsapp") -> ActivityType.COMMUNICATION
-            currentApp.contains("message") -> ActivityType.COMMUNICATION
-            currentApp.contains("chat") -> ActivityType.COMMUNICATION
-            currentApp.contains("mail") -> ActivityType.COMMUNICATION
-            currentApp.contains("phone") -> ActivityType.COMMUNICATION
-            currentApp.contains("dialer") -> ActivityType.COMMUNICATION
-            // 系统/设置类 - 视为空闲
-            currentApp.contains("launcher") -> ActivityType.IDLE
-            currentApp.contains("settings") -> ActivityType.IDLE
-            currentApp.contains("systemui") -> ActivityType.IDLE
-            // 其他默认为工作
-            else -> ActivityType.PRODUCTIVITY
-        }
-
-        return ScreenDataRequest(
-            isActive = local.isScreenOn,
-            activityType = activityType.name.lowercase(),
-            sessionDurationMinutes = sessionDurationMinutes,
-            lastActiveMinutesAgo = lastActiveMinutesAgo,
         )
     }
 

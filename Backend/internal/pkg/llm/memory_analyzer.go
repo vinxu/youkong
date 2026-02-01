@@ -37,12 +37,15 @@ type LLMAnalysisResponse struct {
 		Probability int    `json:"probability"`
 		Reason      string `json:"reason"`
 		Confidence  string `json:"confidence"`
-	} `json:"availability"`
+	} `json:"availability"` // 保留用于兼容，但不再作为主要输出
 	LifeStatus struct {
 		Emoji       string `json:"emoji"`
 		Label       string `json:"label"`
 		Description string `json:"description"`
 	} `json:"life_status"`
+	Mood     string `json:"mood"`     // 新增：心情（如"开心"、"平静"、"焦虑"）
+	Activity string `json:"activity"` // 新增：活动（如"工作中"、"运动中"）
+	Context  string `json:"context"`  // 新增：上下文（详细描述）
 	MemoryUpdates struct {
 		BehaviorInsights    string `json:"behavior_insights"`
 		TimePatterns        string `json:"time_patterns"`
@@ -104,7 +107,7 @@ func (a *MemoryAnalyzer) buildPrompt(input *AnalysisInput) string {
 		recentSummary = fmt.Sprintf("最近 %d 条上报记录", len(input.RecentHistory))
 	}
 
-	prompt := fmt.Sprintf(`你是一个用户行为分析专家。根据用户的实时状态数据和历史记忆，分析用户当前状态并更新记忆。
+	prompt := fmt.Sprintf(`你是一个用户行为分析专家。根据用户的实时设备状态数据和历史记忆，推测用户**此刻**在做什么、心情如何。
 
 ## 当前数据
 - 时间：%s（%s，%d点）
@@ -117,22 +120,27 @@ func (a *MemoryAnalyzer) buildPrompt(input *AnalysisInput) string {
 %s
 
 ## 任务
-1. **有空分析**：判断用户当前是否有空（有空/忙碌/可能有空），预测概率（0-100）
-2. **生活状态**：用一个 emoji 描述用户当前在做什么，要贴近真实生活
-3. **记忆更新**：如果发现新的规律或洞察，更新核心记忆
+1. **状态推测**：推测用户此刻在做什么，用 emoji + 简短文字描述（如"🏃 晨跑中"、"💼 工作中"、"😴 睡觉中"）
+2. **心情分析**：判断用户当前的心情状态（开心/平静/焦虑/疲惫/专注/放松等）
+3. **活动类型**：判断用户正在进行的活动（工作/娱乐/运动/休息/通勤/社交等）
+4. **上下文描述**：基于数据推测更详细的情况（如"周五晚上在家刷手机，应该在放松"）
+5. **记忆更新**：如果发现新的规律或洞察，更新核心记忆
 
 ## 输出格式（严格 JSON，不要包含任何其他内容）
 {
-    "availability": {
-        "status": "有空|忙碌|可能有空",
-        "probability": 75,
-        "reason": "简短理由（15字以内）",
-        "confidence": "high|medium|low"
-    },
     "life_status": {
         "emoji": "🛋️",
         "label": "在家躺着",
-        "description": "看起来很悠闲"
+        "description": "周末在家放松，看起来很悠闲"
+    },
+    "mood": "放松",
+    "activity": "休息",
+    "context": "周六下午在家，手机娱乐活动，应该在放松休息",
+    "availability": {
+        "status": "有空",
+        "probability": 75,
+        "reason": "在家休息",
+        "confidence": "medium"
     },
     "memory_updates": {
         "behavior_insights": "更新的行为洞察（如果有，否则为空字符串）",
@@ -280,6 +288,9 @@ func (a *MemoryAnalyzer) parseResponse(response string) (*model.AnalysisResult, 
 			Label:       llmResult.LifeStatus.Label,
 			Description: llmResult.LifeStatus.Description,
 		},
+		Mood:     truncateString(llmResult.Mood, 20),
+		Activity: truncateString(llmResult.Activity, 50),
+		Context:  truncateString(llmResult.Context, 200),
 	}
 
 	if llmResult.ShouldUpdateMemory {

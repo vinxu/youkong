@@ -6,7 +6,6 @@ import com.youkong.core.agent.collector.CalendarCollector
 import com.youkong.core.agent.collector.DeviceStateCollector
 import com.youkong.core.agent.collector.LocationCollector
 import com.youkong.core.agent.collector.MovementCollector
-import com.youkong.core.agent.collector.UsageStatsCollector
 import com.youkong.core.network.api.AgentApi
 import com.youkong.core.network.model.AgentStatusRequest
 import com.youkong.core.network.model.*
@@ -22,7 +21,6 @@ import javax.inject.Inject
 @HiltViewModel
 class StatusAnalysisViewModel @Inject constructor(
     private val agentApi: AgentApi,
-    private val usageStatsCollector: UsageStatsCollector,
     private val locationCollector: LocationCollector,
     private val calendarCollector: CalendarCollector,
     private val movementCollector: MovementCollector,

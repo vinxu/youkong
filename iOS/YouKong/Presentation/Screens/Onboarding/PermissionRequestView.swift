@@ -181,9 +181,7 @@ struct PermissionRequestView: View {
 
     private func isPermissionGranted(_ permission: PermissionType) -> Bool {
         switch permission {
-        case .screenTime: return permissionManager.status.screenTime
         case .location: return permissionManager.status.location
-        case .contacts: return permissionManager.status.contacts
         case .calendar: return permissionManager.status.calendar
         case .motion: return permissionManager.status.motion
         }
@@ -200,13 +198,8 @@ struct PermissionRequestView: View {
 
         do {
             switch permission {
-            case .screenTime:
-                // ⚠️ 屏幕时间权限已禁用，不应该出现在此（方案 C）
-                print("[PermissionView] Screen time permission is disabled")
             case .location:
                 _ = try await permissionManager.requestLocationPermission()
-            case .contacts:
-                _ = try await permissionManager.requestContactsPermission()
             case .calendar:
                 print("[PermissionView] Calling requestCalendarPermission...")
                 _ = try await permissionManager.requestCalendarPermission()
@@ -332,12 +325,8 @@ struct PermissionItemView: View {
 extension PermissionType {
     var detailedReason: String {
         switch self {
-        case .screenTime:
-            return "只用来判断你现在是否有空。比如你刷了一会儿手机，说明你可能比较闲。"
         case .location:
             return "通过了解你在家、公司还是外出，判断你的状态。比如周末在家通常比较有空。"
-        case .contacts:
-            return "从通讯录中找到已注册的朋友，这样你才能看到他们是否有空。"
         case .calendar:
             return "通过日历了解你是否有安排，比如你没有会议的时候可能比较有空。"
         case .motion:
@@ -347,12 +336,8 @@ extension PermissionType {
 
     var privacyNote: String {
         switch self {
-        case .screenTime:
-            return "不会知道你用了什么 App，只判断是否有空"
         case .location:
             return "仅判断位置类型，不会记录精确坐标"
-        case .contacts:
-            return "仅匹配手机号，不会上传通讯录"
         case .calendar:
             return "仅判断是否有日程，不会读取日程内容"
         case .motion:

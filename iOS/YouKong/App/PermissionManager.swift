@@ -1,7 +1,6 @@
 import Foundation
 import Combine
 import CoreLocation
-import Contacts
 import EventKit
 import CoreMotion
 import UIKit
@@ -30,33 +29,14 @@ class PermissionManager: NSObject, ObservableObject {
         isChecking = true
         defer { isChecking = false }
 
-        // ⚠️ 屏幕使用时间权限已禁用（方案 C）
-        // status.screenTime = await checkScreenTimePermission()
-
         // 检查位置权限
         status.location = checkLocationPermission()
-
-        // 检查通讯录权限
-        status.contacts = checkContactsPermission()
 
         // 检查日历权限
         status.calendar = checkCalendarPermission()
 
         // 检查运动权限
         status.motion = checkMotionPermission()
-    }
-
-    // MARK: - Screen Time Permission (已禁用 - 方案 C)
-
-    /// ⚠️ 屏幕使用时间权限已禁用，始终返回 false
-    private func checkScreenTimePermission() async -> Bool {
-        return false
-    }
-
-    /// ⚠️ 屏幕使用时间权限已禁用，始终返回 false
-    func requestScreenTimePermission() async throws -> Bool {
-        status.screenTime = false
-        return false
     }
 
     // MARK: - Location Permission
@@ -88,26 +68,6 @@ class PermissionManager: NSObject, ObservableObject {
             return false
         @unknown default:
             return false
-        }
-    }
-
-    // MARK: - Contacts Permission
-
-    private func checkContactsPermission() -> Bool {
-        let status = CNContactStore.authorizationStatus(for: .contacts)
-        return status == .authorized
-    }
-
-    func requestContactsPermission() async throws -> Bool {
-        let store = CNContactStore()
-
-        do {
-            let granted = try await store.requestAccess(for: .contacts)
-            status.contacts = granted
-            return granted
-        } catch {
-            status.contacts = false
-            throw error
         }
     }
 
@@ -221,18 +181,12 @@ class PermissionManager: NSObject, ObservableObject {
     // MARK: - Request All Permissions
 
     func requestAllPermissions() async {
-        // 依次请求所有权限（已移除屏幕时间权限 - 方案 C）
+        // 依次请求所有权限
 
         do {
             _ = try await requestLocationPermission()
         } catch {
             print("Location permission error: \(error)")
-        }
-
-        do {
-            _ = try await requestContactsPermission()
-        } catch {
-            print("Contacts permission error: \(error)")
         }
 
         do {

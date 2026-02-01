@@ -7,7 +7,6 @@ struct FriendsManagementView: View {
     @StateObject private var viewModel = FriendsManagementViewModel()
     @State private var selectedTab = 0
     @State private var showAddFriend = false
-    @State private var showContactFriends = false
     @State private var showFriendRequests = false
 
     var body: some View {
@@ -57,18 +56,8 @@ struct FriendsManagementView: View {
             }
 
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button {
-                        showAddFriend = true
-                    } label: {
-                        Label("通过手机号添加", systemImage: "phone")
-                    }
-
-                    Button {
-                        showContactFriends = true
-                    } label: {
-                        Label("从通讯录添加", systemImage: "person.crop.rectangle.stack")
-                    }
+                Button {
+                    showAddFriend = true
                 } label: {
                     Image(systemName: "person.badge.plus")
                 }
@@ -76,18 +65,6 @@ struct FriendsManagementView: View {
         }
         .sheet(isPresented: $showAddFriend) {
             AddFriendSheetView()
-        }
-        .sheet(isPresented: $showContactFriends) {
-            NavigationStack {
-                ContactFriendsView()
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button("完成") {
-                                showContactFriends = false
-                            }
-                        }
-                    }
-            }
         }
         .sheet(isPresented: $showFriendRequests) {
             NavigationStack {
