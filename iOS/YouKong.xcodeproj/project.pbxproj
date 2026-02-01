@@ -7,7 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		763740232F2659C80054FAD9 /* Factory in Frameworks */ = {isa = PBXBuildFile; productRef = 763740222F2659C80054FAD9 /* Factory */; };
+		7671D2482F2F905B004D5CA7 /* Factory in Frameworks */ = {isa = PBXBuildFile; productRef = 7671D2472F2F905B004D5CA7 /* Factory */; };
+		7671D24A2F2F905B004D5CA7 /* FactoryKit in Frameworks */ = {isa = PBXBuildFile; productRef = 7671D2492F2F905B004D5CA7 /* FactoryKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -51,7 +52,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				763740232F2659C80054FAD9 /* Factory in Frameworks */,
+				7671D24A2F2F905B004D5CA7 /* FactoryKit in Frameworks */,
+				7671D2482F2F905B004D5CA7 /* Factory in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -108,7 +110,8 @@
 			);
 			name = YouKong;
 			packageProductDependencies = (
-				763740222F2659C80054FAD9 /* Factory */,
+				7671D2472F2F905B004D5CA7 /* Factory */,
+				7671D2492F2F905B004D5CA7 /* FactoryKit */,
 			);
 			productName = YouKong;
 			productReference = 76373F7D2F2658C90054FAD9 /* YouKong.app */;
@@ -140,7 +143,7 @@
 			);
 			mainGroup = 00000000000000000000000;
 			packageReferences = (
-				763740212F2659C80054FAD9 /* XCRemoteSwiftPackageReference "Factory" */,
+				7671D2462F2F905B004D5CA7 /* XCRemoteSwiftPackageReference "Factory" */,
 			);
 			productRefGroup = 22222222222222222222222 /* Products */;
 			projectDirPath = "";
@@ -387,7 +390,7 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		763740212F2659C80054FAD9 /* XCRemoteSwiftPackageReference "Factory" */ = {
+		7671D2462F2F905B004D5CA7 /* XCRemoteSwiftPackageReference "Factory" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/hmlongco/Factory";
 			requirement = {
@@ -398,10 +401,15 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		763740222F2659C80054FAD9 /* Factory */ = {
+		7671D2472F2F905B004D5CA7 /* Factory */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 763740212F2659C80054FAD9 /* XCRemoteSwiftPackageReference "Factory" */;
+			package = 7671D2462F2F905B004D5CA7 /* XCRemoteSwiftPackageReference "Factory" */;
 			productName = Factory;
+		};
+		7671D2492F2F905B004D5CA7 /* FactoryKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 7671D2462F2F905B004D5CA7 /* XCRemoteSwiftPackageReference "Factory" */;
+			productName = FactoryKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

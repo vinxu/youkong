@@ -117,6 +117,8 @@ data class AnalysisResult(
     val availability: AvailabilityAnalysis,
     @SerialName("life_status")
     val lifeStatus: LifeStatus,
+    @SerialName("updated_at")
+    val updatedAt: String? = null,  // ISO 8601 格式时间
 )
 
 /**

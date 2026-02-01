@@ -7,7 +7,8 @@ struct ProfileView: View {
     @State private var showAgentData = false
 
     var body: some View {
-        VStack(spacing: 0) {
+        NavigationStack {
+            VStack(spacing: 0) {
             // Terminal Header
             CLIHeaderView(title: "我的", subtitle: authManager.currentUser?.nickname)
 
@@ -90,24 +91,25 @@ struct ProfileView: View {
                 }
                 .padding(16)
             }
-        }
-        .background(CLIColors.background)
-        .navigationBarHidden(true)
-        .sheet(isPresented: $showEditProfile) {
-            if let user = authManager.currentUser {
-                EditProfileView(user: user)
             }
-        }
-        .alert("退出登录", isPresented: $showLogoutConfirm) {
-            Button("取消", role: .cancel) {}
-            Button("退出", role: .destructive) {
-                authManager.logout()
+            .background(CLIColors.background)
+            .navigationBarHidden(true)
+            .sheet(isPresented: $showEditProfile) {
+                if let user = authManager.currentUser {
+                    EditProfileView(user: user)
+                }
             }
-        } message: {
-            Text("确定要退出登录吗？")
-        }
-        .sheet(isPresented: $showAgentData) {
-            MyAgentDataSheet()
+            .alert("退出登录", isPresented: $showLogoutConfirm) {
+                Button("取消", role: .cancel) {}
+                Button("退出", role: .destructive) {
+                    authManager.logout()
+                }
+            } message: {
+                Text("确定要退出登录吗？")
+            }
+            .sheet(isPresented: $showAgentData) {
+                MyAgentDataSheet()
+            }
         }
     }
 }
@@ -229,7 +231,9 @@ struct ProfileMenuItem: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .background(CLIColors.backgroundSecondary)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 }
 

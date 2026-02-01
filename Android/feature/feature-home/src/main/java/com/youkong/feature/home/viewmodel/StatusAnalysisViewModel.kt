@@ -88,12 +88,12 @@ class StatusAnalysisViewModel @Inject constructor(
         val locationData = locationCollector.collect()
         val movementData = movementCollector.collect()
 
-        // 屏幕状态
-        val screenText = if (deviceState.isScreenOn) "点亮" else "熄灭"
-        appendLine("├─ 屏幕: $screenText", LineType.CLUE)
-
         // 位置信息
-        val placeText = locationData?.placeName ?: locationData?.placeType ?: "未知"
+        val placeText = if (locationData != null) {
+            "已获取 (${String.format("%.4f", locationData.latitude)}, ${String.format("%.4f", locationData.longitude)})"
+        } else {
+            "未知"
+        }
         appendLine("├─ 位置: $placeText", LineType.CLUE)
 
         // 电池状态
@@ -128,26 +128,18 @@ class StatusAnalysisViewModel @Inject constructor(
 
     // MARK: - Build Request
 
-    private fun buildStatusRequest(): AgentStatusRequest {
-        val usageStats = usageStatsCollector.collect()
+    private suspend fun buildStatusRequest(): AgentStatusRequest {
         val deviceState = deviceStateCollector.collect()
         val locationData = locationCollector.collect()
         val calendarData = calendarCollector.collect()
         val movementData = movementCollector.collect()
 
         return AgentStatusRequest(
-            screen = usageStats?.let {
-                ScreenDataRequest(
-                    isActive = it.isScreenOn,
-                    activityType = "unknown", // 简化处理
-                    sessionDurationMinutes = 0,
-                    lastActiveMinutesAgo = 0
-                )
-            },
+            screen = null, // 简化处理，屏幕状态暂不上报
             location = locationData?.let {
                 LocationDataRequest(
-                    placeType = it.placeType ?: "unknown",
-                    atPlaceSinceMinutes = it.durationMinutes ?: 0
+                    placeType = "unknown", // 简化处理，暂不推断位置类型
+                    atPlaceSinceMinutes = 0
                 )
             },
             battery = BatteryDataRequest(
@@ -157,7 +149,7 @@ class StatusAnalysisViewModel @Inject constructor(
             ),
             mode = ModeDataRequest(
                 isLowPowerMode = deviceState.isPowerSaveMode,
-                isFocusModeOn = deviceState.isDoNotDisturb
+                isFocusModeOn = deviceState.isDoNotDisturbEnabled
             ),
             connection = ConnectionDataRequest(
                 isHeadphonesConnected = deviceState.isHeadphonesConnected,
@@ -171,7 +163,7 @@ class StatusAnalysisViewModel @Inject constructor(
 
     // MARK: - Display Result
 
-    private fun displayAnalysisResult(analysis: AnalysisData) {
+    private fun displayAnalysisResult(analysis: AnalysisResult) {
         appendLine("", LineType.NORMAL)
         appendLine("✨ 分析结果", LineType.PHASE)
         appendLine("━━━━━━━━━━━━━━━━━━━━━━━━━━", LineType.PHASE)

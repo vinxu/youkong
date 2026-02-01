@@ -533,14 +533,23 @@ class FriendRequestsViewModel: ObservableObject {
     }
 
     func handleRequest(_ request: FriendRequest, accept: Bool) async {
+        // 乐观更新：立即从列表中移除
+        receivedRequests.removeAll { $0.id == request.id }
+
         do {
-            _ = try await contactRepository.handleFriendRequest(
+            let response = try await contactRepository.handleFriendRequest(
                 requestId: request.id,
                 accept: accept
             )
-            // 重新加载列表
+
+            // 显示成功消息（可选，通过 errorMessage 复用）
+            // errorMessage 可以用来显示成功提示
+
+            // 刷新列表以确保数据同步
             await loadRequests()
         } catch {
+            // 失败时恢复到列表
+            receivedRequests.insert(request, at: 0)
             errorMessage = error.localizedDescription
         }
     }

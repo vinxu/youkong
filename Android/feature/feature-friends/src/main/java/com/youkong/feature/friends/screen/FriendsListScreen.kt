@@ -85,6 +85,15 @@ fun FriendsListScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(
+                        text = "[⟳] 更新",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp,
+                        color = CLIColors.Green,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.clickable(onClick = { viewModel.updateStatus() })
+                    )
+
+                    Text(
                         text = "[+] 添加",
                         fontFamily = FontFamily.Monospace,
                         fontSize = 13.sp,

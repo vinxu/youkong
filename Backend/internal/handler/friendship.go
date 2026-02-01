@@ -200,7 +200,10 @@ func (h *FriendshipHandler) HandleFriendRequest(c *gin.Context) {
 	if req.Accept {
 		msg = "已同意，你们已成为好友"
 	}
-	response.Success(c, gin.H{"message": msg})
+	response.Success(c, gin.H{
+		"success": true,
+		"message": msg,
+	})
 }
 
 // GetPendingRequestCount 获取待处理请求数量

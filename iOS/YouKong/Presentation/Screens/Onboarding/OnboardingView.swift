@@ -200,7 +200,7 @@ struct PrivacyPromiseScreen: View {
                 VStack(spacing: 20) {
                     PrivacyItem(
                         icon: "✅",
-                        text: "只显示推测的状态（如"工作中"）"
+                        text: "只显示推测的状态（如'工作中'）"
                     )
 
                     PrivacyItem(

@@ -98,7 +98,14 @@ struct FriendGrid: View {
     var body: some View {
         LazyVGrid(columns: columns, spacing: 12) {
             ForEach(friends) { friend in
-                FriendCard(friend: friend)
+                NavigationLink(destination: ChatView(
+                    partnerId: friend.userId,
+                    partnerName: friend.nickname,
+                    partnerAvatar: friend.avatar
+                )) {
+                    FriendCard(friend: friend)
+                }
+                .buttonStyle(.plain)
             }
         }
     }

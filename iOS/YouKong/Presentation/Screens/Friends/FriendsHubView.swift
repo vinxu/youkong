@@ -53,6 +53,7 @@ struct FriendsHubView: View {
                                 } label: {
                                     TerminalHubRow(icon: "📱", title: "通过手机号添加")
                                 }
+                                .buttonStyle(.plain)
 
                                 Rectangle()
                                     .fill(CLIColors.border)
@@ -64,6 +65,7 @@ struct FriendsHubView: View {
                                 } label: {
                                     TerminalHubRow(icon: "📇", title: "从通讯录添加")
                                 }
+                                .buttonStyle(.plain)
                             }
                             .background(CLIColors.backgroundSecondary)
                             .overlay(
@@ -104,7 +106,9 @@ struct FriendsHubView: View {
                                             .foregroundColor(CLIColors.textSecondary)
                                     }
                                     .padding(16)
+                                    .contentShape(Rectangle())
                                 }
+                                .buttonStyle(.plain)
                             }
                             .background(CLIColors.backgroundSecondary)
                             .overlay(
@@ -128,6 +132,7 @@ struct FriendsHubView: View {
                                 } label: {
                                     TerminalHubRow(icon: "🔗", title: "邀请好友")
                                 }
+                                .buttonStyle(.plain)
                             }
                             .background(CLIColors.backgroundSecondary)
                             .overlay(
@@ -150,6 +155,7 @@ struct FriendsHubView: View {
                                 } label: {
                                     TerminalHubRow(icon: "👥", title: "好友管理")
                                 }
+                                .buttonStyle(.plain)
                             }
                             .background(CLIColors.backgroundSecondary)
                             .overlay(

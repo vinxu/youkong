@@ -71,7 +71,7 @@ final class KeychainManager {
             kSecAttrService as String: service,
             kSecAttrAccount as String: key,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked // 删除 App 后会清除
         ]
 
         SecItemAdd(attributes as CFDictionary, nil)

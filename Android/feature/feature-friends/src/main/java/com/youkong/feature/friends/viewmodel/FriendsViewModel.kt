@@ -182,6 +182,14 @@ class FriendsViewModel @Inject constructor(
         loadData()
     }
 
+    fun updateStatus() {
+        viewModelScope.launch {
+            loadAgentData()
+            // 同时刷新好友概率列表
+            loadFriends()
+        }
+    }
+
     fun clearError() {
         _uiState.update { it.copy(error = null) }
     }
