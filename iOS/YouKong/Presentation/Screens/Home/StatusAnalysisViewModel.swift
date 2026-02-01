@@ -102,7 +102,7 @@ class StatusAnalysisViewModel: ObservableObject {
         appendLine("├─ 网络: \(deviceStatus.networkType.rawValue)", type: .clue)
 
         // 日历
-        if calendarCollector.hasPermission {
+        if calendarCollector.isAuthorized {
             let calendarStatus = calendarCollector.currentStatus
             if calendarStatus.hasCurrentEvent {
                 appendLine("├─ 日历: 有会议进行中", type: .clue)
@@ -112,7 +112,7 @@ class StatusAnalysisViewModel: ObservableObject {
         }
 
         // 运动
-        if movementCollector.hasPermission {
+        if movementCollector.isAuthorized {
             let movementStatus = movementCollector.currentStatus
             if movementStatus.isMoving {
                 appendLine("└─ 运动: \(movementStatus.movementType.displayName)", type: .clue)
@@ -171,24 +171,20 @@ class StatusAnalysisViewModel: ObservableObject {
             display: DisplayRequestData(
                 screenBrightness: deviceStatus.screenBrightness
             ),
-            calendar: calendarStatus.map { status in
-                CalendarRequestData(
-                    hasCurrentEvent: status.hasCurrentEvent,
-                    currentEventTitle: status.currentEventTitle,
-                    eventEndMinutes: status.eventEndMinutes,
-                    nextEventInMinutes: status.nextEventInMinutes,
-                    todayRemainingCount: status.todayRemainingCount
-                )
-            },
-            movement: movementStatus.map { status in
-                MovementRequestData(
-                    isMoving: status.isMoving,
-                    movementType: status.movementType.rawValue,
-                    stepsToday: status.stepsToday,
-                    stepsLastHour: status.stepsLastHour,
-                    stationaryMinutes: status.stationaryMinutes
-                )
-            }
+            calendar: calendarCollector.isAuthorized ? CalendarRequestData(
+                hasCurrentEvent: calendarCollector.currentStatus.hasCurrentEvent,
+                currentEventTitle: calendarCollector.currentStatus.currentEventTitle,
+                eventEndMinutes: calendarCollector.currentStatus.eventEndMinutes,
+                nextEventInMinutes: calendarCollector.currentStatus.nextEventInMinutes,
+                todayRemainingCount: calendarCollector.currentStatus.todayRemainingCount
+            ) : nil,
+            movement: movementCollector.isAuthorized ? MovementRequestData(
+                isMoving: movementCollector.currentStatus.isMoving,
+                movementType: movementCollector.currentStatus.movementType.rawValue,
+                stepsToday: movementCollector.currentStatus.stepsToday,
+                stepsLastHour: movementCollector.currentStatus.stepsLastHour,
+                stationaryMinutes: movementCollector.currentStatus.stationaryMinutes
+            ) : nil
         )
     }
 
