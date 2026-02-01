@@ -18,12 +18,9 @@ class GridHomeViewModel: ObservableObject {
         errorMessage = nil
 
         do {
-            let response: APIResponse<GridResponse> = try await apiClient.request(.getGridData)
-            guard let data = response.data else {
-                throw NSError(domain: "GridHome", code: -1, userInfo: [NSLocalizedDescriptionKey: "响应数据为空"])
-            }
-            friends = data.friends
-            gridSize = data.gridSize
+            let gridData: GridResponse = try await apiClient.request(.getGridData)
+            friends = gridData.friends
+            gridSize = gridData.gridSize
         } catch {
             errorMessage = "加载失败: \(error.localizedDescription)"
             print("❌ [GridHome] Load failed: \(error)")
