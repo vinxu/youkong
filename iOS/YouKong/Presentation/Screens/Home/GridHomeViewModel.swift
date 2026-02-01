@@ -1,71 +1,79 @@
 import Foundation
-import SwiftUI
+import Combine
+import Factory
+
+// MARK: - Grid Home View Model
 
 @MainActor
 class GridHomeViewModel: ObservableObject {
-    @Published var friends: [FriendGridItem] = []
-    @Published var gridSize: Int = 1
+    @Published var friends: [FriendStatus] = []
     @Published var isLoading = false
-    @Published var errorMessage: String?
+    @Published var error: Error?
     @Published var showPosterSheet = false
-    @Published var showAnalysisSheet = false
 
-    private let apiClient = APIClient.shared
-    private var loadTask: Task<Void, Never>?
+    @Injected(\.agentRepository) private var agentRepository
 
-    // MARK: - Load Grid Data
+    // MARK: - Load Grid
 
     func loadGrid() async {
-        // 取消之前的请求
-        loadTask?.cancel()
+        guard !isLoading else { return }
 
-        loadTask = Task {
-            isLoading = true
-            errorMessage = nil
+        isLoading = true
+        error = nil
 
-            do {
-                let gridData: GridResponse = try await apiClient.request(.getGridData)
-
-                // 检查是否已被取消
-                if Task.isCancelled {
-                    return
-                }
-
-                friends = gridData.friends
-                gridSize = gridData.gridSize
-            } catch {
-                // 忽略取消错误
-                if (error as NSError).code == NSURLErrorCancelled {
-                    return
-                }
-                errorMessage = "加载失败: \(error.localizedDescription)"
-                print("❌ [GridHome] Load failed: \(error)")
+        do {
+            let gridData = try await agentRepository.getGridData()
+            friends = gridData.friends.map { friend in
+                FriendStatus(
+                    id: friend.userID,
+                    nickname: friend.nickname,
+                    avatar: friend.avatar,
+                    emoji: friend.emoji,
+                    status: friend.status,
+                    updatedAt: ISO8601DateFormatter().date(from: friend.updatedAt) ?? Date(),
+                    relativeTime: friend.relativeTime
+                )
             }
-
-            isLoading = false
+        } catch {
+            self.error = error
+            print("❌ [GridHome] Load failed: \(error)")
         }
 
-        await loadTask?.value
+        isLoading = false
+    }
+
+    // MARK: - Refresh
+
+    func refresh() async {
+        await loadGrid()
     }
 
     // MARK: - Update Status
 
-    func updateStatus() {
-        // 显示 Agent 分析页面
-        showAnalysisSheet = true
-    }
-
-    func onAnalysisComplete() {
-        // 分析完成后刷新宫格
-        Task {
+    func updateStatus() async {
+        // 触发状态更新（上报设备状态）
+        // 这会触发后端 LLM 分析并更新缓存
+        do {
+            try await agentRepository.reportStatus()
+            // 等待一小段时间让后端处理完成
+            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
+            // 刷新数据
             await loadGrid()
+        } catch {
+            print("❌ [GridHome] Update status failed: \(error)")
+            self.error = error
         }
     }
+}
 
-    // MARK: - Generate Poster
+// MARK: - Friend Status Model
 
-    func generatePoster() {
-        // TODO: 实现海报生成
-        showPosterSheet = true
-    }
+struct FriendStatus: Identifiable {
+    let id: String  // user_id
+    let nickname: String
+    let avatar: String?
+    let emoji: String
+    let status: String
+    let updatedAt: Date
+    let relativeTime: String
 }

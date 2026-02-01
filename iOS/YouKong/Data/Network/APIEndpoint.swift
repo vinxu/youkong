@@ -135,6 +135,10 @@ extension APIEndpoint {
         )
     }
 
+    static var getGridData: APIEndpoint {
+        APIEndpoint(path: "/api/v1/home/grid")
+    }
+
     /// 流式 Holmes 推理 API
     static func reportAgentStatusStream(request: StatusReportRequest) -> APIEndpoint {
         return APIEndpoint(

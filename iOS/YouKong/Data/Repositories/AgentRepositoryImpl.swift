@@ -14,6 +14,15 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
         return try await apiClient.request(endpoint)
     }
 
+    func reportStatus() async throws {
+        // 收集设备状态数据
+        let collector = DeviceStatusCollector.shared
+        let request = await collector.buildStatusRequest()
+
+        // 上报状态
+        _ = try await reportStatus(request: request)
+    }
+
     // MARK: - Get Friends Free Probability
 
     func getFriendsFreeProbability() async throws -> [FriendRecommendation] {
@@ -34,6 +43,13 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
 
     func queryAgentData(agentId: String) async throws -> AgentExposedData {
         let endpoint = APIEndpoint.queryAgentData(agentId: agentId)
+        return try await apiClient.request(endpoint)
+    }
+
+    // MARK: - Get Grid Data
+
+    func getGridData() async throws -> GridResponse {
+        let endpoint = APIEndpoint.getGridData
         return try await apiClient.request(endpoint)
     }
 }

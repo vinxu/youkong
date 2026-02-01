@@ -6,6 +6,9 @@ protocol AgentRepositoryProtocol {
     /// 上报自己的状态，返回 LLM 预测结果
     func reportStatus(request: StatusReportRequest) async throws -> StatusReportResponse
 
+    /// 上报状态（便捷方法，自动收集设备数据）
+    func reportStatus() async throws
+
     /// 获取朋友有空概率列表
     func getFriendsFreeProbability() async throws -> [FriendRecommendation]
 
@@ -14,6 +17,9 @@ protocol AgentRepositoryProtocol {
 
     /// 请求朋友 Agent 数据
     func queryAgentData(agentId: String) async throws -> AgentExposedData
+
+    /// 获取宫格数据（所有好友的实时状态）
+    func getGridData() async throws -> GridResponse
 }
 
 // MARK: - Status Report Request (按 API 规范分组)
@@ -201,4 +207,36 @@ struct LifeStatusData: Codable {
     let emoji: String
     let label: String
     let description: String?
+}
+
+// MARK: - Grid Response
+
+struct GridResponse: Codable {
+    let gridSize: Int
+    let friends: [FriendGridItem]
+    
+    enum CodingKeys: String, CodingKey {
+        case gridSize = "grid_size"
+        case friends
+    }
+}
+
+struct FriendGridItem: Codable {
+    let userID: String
+    let nickname: String
+    let avatar: String?
+    let emoji: String
+    let status: String
+    let updatedAt: String
+    let relativeTime: String
+    
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case nickname
+        case avatar
+        case emoji
+        case status
+        case updatedAt = "updated_at"
+        case relativeTime = "relative_time"
+    }
 }
