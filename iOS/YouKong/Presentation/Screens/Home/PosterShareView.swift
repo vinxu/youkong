@@ -100,25 +100,8 @@ struct PosterShareView: View {
     private func generatePoster() async {
         isGenerating = true
 
-        // 调用后端 API 生成海报
-        let userIds = friends.map { $0.userId }
-
-        do {
-            let apiClient = APIClient.shared
-            let response: APIResponse<PosterResponse> = try await apiClient.request(
-                .generatePoster(userIds: userIds)
-            )
-
-            // 下载海报图片
-            if let url = URL(string: response.data.posterUrl) {
-                let (data, _) = try await URLSession.shared.data(from: url)
-                posterImage = UIImage(data: data)
-            }
-        } catch {
-            print("❌ [Poster] 生成失败: \(error)")
-            // 失败则使用本地渲染
-            posterImage = await renderPosterLocally()
-        }
+        // 使用本地渲染生成海报
+        posterImage = await renderPosterLocally()
 
         isGenerating = false
     }

@@ -35,16 +35,3 @@ struct FriendGridItem: Codable, Identifiable {
         case relativeTime = "relative_time"
     }
 }
-
-// MARK: - Poster Models
-
-/// 海报响应
-struct PosterResponse: Codable {
-    let posterUrl: String
-    let message: String?
-
-    enum CodingKeys: String, CodingKey {
-        case posterUrl = "poster_url"
-        case message
-    }
-}

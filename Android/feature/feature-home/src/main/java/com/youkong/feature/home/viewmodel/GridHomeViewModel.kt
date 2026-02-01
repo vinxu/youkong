@@ -61,38 +61,14 @@ class GridHomeViewModel @Inject constructor(
 
     fun showPoster() {
         viewModelScope.launch {
-            _uiState.update { it.copy(showPosterDialog = true, posterLoading = true) }
-
-            try {
-                val userIds = _uiState.value.friends.map { it.userId }
-                val response = homeApi.generatePoster(
-                    com.youkong.core.network.api.GeneratePosterRequest(userIds)
-                )
-
-                _uiState.update {
-                    it.copy(
-                        posterUrl = response.data.poster_url,
-                        posterLoading = false
-                    )
-                }
-            } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        posterLoading = false,
-                        posterError = e.message ?: "生成海报失败"
-                    )
-                }
-            }
+            // 显示海报对话框（本地生成）
+            _uiState.update { it.copy(showPosterDialog = true) }
         }
     }
 
     fun hidePoster() {
         _uiState.update {
-            it.copy(
-                showPosterDialog = false,
-                posterUrl = null,
-                posterError = null
-            )
+            it.copy(showPosterDialog = false)
         }
     }
 }
@@ -105,8 +81,5 @@ data class GridHomeUiState(
     val isLoading: Boolean = false,
     val isRefreshing: Boolean = false,
     val errorMessage: String? = null,
-    val showPosterDialog: Boolean = false,
-    val posterUrl: String? = null,
-    val posterLoading: Boolean = false,
-    val posterError: String? = null
+    val showPosterDialog: Boolean = false
 )

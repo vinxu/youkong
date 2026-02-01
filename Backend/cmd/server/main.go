@@ -175,7 +175,6 @@ func main() {
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo)
-	posterService := service.NewPosterService(memoryRepo, userRepo, cfg.Invitation.BaseURL)
 
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
@@ -189,7 +188,7 @@ func main() {
 	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
 	wsHandler := handler.NewWSHandler(wsManager, jwtManager)
 	deviceHandler := handler.NewDeviceHandler(notificationService)
-	homeHandler := handler.NewHomeHandler(homeService, posterService)
+	homeHandler := handler.NewHomeHandler(homeService)
 
 	// 设置Gin模式
 	gin.SetMode(cfg.Server.Mode)
@@ -263,7 +262,6 @@ func main() {
 			home := authorized.Group("/home")
 			{
 				home.GET("/grid", homeHandler.GetGrid)
-				home.POST("/poster", homeHandler.GeneratePoster)
 			}
 
 			// 会话消息模块

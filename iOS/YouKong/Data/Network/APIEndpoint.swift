@@ -248,15 +248,6 @@ extension APIEndpoint {
         APIEndpoint(path: "/api/v1/home/grid")
     }
 
-    /// 生成海报
-    static func generatePoster(userIds: [String]) -> APIEndpoint {
-        APIEndpoint(
-            path: "/api/v1/home/poster",
-            method: .post,
-            body: ["user_ids": userIds]
-        )
-    }
-
     // MARK: - Device Token (Push Notifications)
 
     /// 注册设备 Token
