@@ -129,7 +129,10 @@ func (s *MemoryService) AnalyzeAndUpdateMemory(ctx context.Context, userID strin
 		}
 	}
 
-	// 9. 缓存分析结果（Redis + MySQL）
+	// 9. 设置更新时间
+	result.UpdatedAt = now
+
+	// 10. 缓存分析结果（Redis + MySQL）
 	if err := s.cacheAnalysisResult(ctx, userID, result); err != nil {
 		fmt.Printf("cache analysis result error: %v\n", err)
 	}

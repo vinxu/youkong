@@ -11,23 +11,41 @@ class GridHomeViewModel: ObservableObject {
     @Published var showAnalysisSheet = false
 
     private let apiClient = APIClient.shared
+    private var loadTask: Task<Void, Never>?
 
     // MARK: - Load Grid Data
 
     func loadGrid() async {
-        isLoading = true
-        errorMessage = nil
+        // 取消之前的请求
+        loadTask?.cancel()
 
-        do {
-            let gridData: GridResponse = try await apiClient.request(.getGridData)
-            friends = gridData.friends
-            gridSize = gridData.gridSize
-        } catch {
-            errorMessage = "加载失败: \(error.localizedDescription)"
-            print("❌ [GridHome] Load failed: \(error)")
+        loadTask = Task {
+            isLoading = true
+            errorMessage = nil
+
+            do {
+                let gridData: GridResponse = try await apiClient.request(.getGridData)
+
+                // 检查是否已被取消
+                if Task.isCancelled {
+                    return
+                }
+
+                friends = gridData.friends
+                gridSize = gridData.gridSize
+            } catch {
+                // 忽略取消错误
+                if (error as NSError).code == NSURLErrorCancelled {
+                    return
+                }
+                errorMessage = "加载失败: \(error.localizedDescription)"
+                print("❌ [GridHome] Load failed: \(error)")
+            }
+
+            isLoading = false
         }
 
-        isLoading = false
+        await loadTask?.value
     }
 
     // MARK: - Update Status
