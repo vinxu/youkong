@@ -101,6 +101,14 @@ fun GridHomeScreen(
                 onDismiss = { viewModel.hidePoster() }
             )
         }
+
+        // 状态分析页面
+        if (uiState.showAnalysisDialog) {
+            StatusAnalysisScreen(
+                onComplete = { viewModel.onAnalysisComplete() },
+                onDismiss = { viewModel.hideAnalysisDialog() }
+            )
+        }
     }
 }
 

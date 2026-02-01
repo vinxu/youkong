@@ -52,9 +52,18 @@ class GridHomeViewModel @Inject constructor(
     // MARK: - Update Status
 
     fun updateStatus() {
-        // TODO: 触发 Agent 分析
-        // 暂时直接刷新宫格
+        // 显示 Agent 分析页面
+        _uiState.update { it.copy(showAnalysisDialog = true) }
+    }
+
+    fun onAnalysisComplete() {
+        // 分析完成后刷新宫格
+        _uiState.update { it.copy(showAnalysisDialog = false) }
         loadGrid()
+    }
+
+    fun hideAnalysisDialog() {
+        _uiState.update { it.copy(showAnalysisDialog = false) }
     }
 
     // MARK: - Show Poster
@@ -81,5 +90,6 @@ data class GridHomeUiState(
     val isLoading: Boolean = false,
     val isRefreshing: Boolean = false,
     val errorMessage: String? = null,
-    val showPosterDialog: Boolean = false
+    val showPosterDialog: Boolean = false,
+    val showAnalysisDialog: Boolean = false
 )
