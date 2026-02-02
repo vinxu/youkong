@@ -59,69 +59,71 @@ struct GridHomeView: View {
                 }
             } else {
                 // 宫格 + 底部按钮
-                ScrollView {
-                    VStack(spacing: 16) {
-                        // 宫格
-                        FriendGrid(friends: viewModel.friends)
-                            .padding(.horizontal, 16)
-                            .padding(.top, 16)
-                        
-                        Spacer().frame(height: 100) // 底部按钮占位
-                    }
-                }
-                .refreshable {
-                    await viewModel.refresh()
-                }
-                
-                // 底部按钮
-                VStack(spacing: 12) {
-                    Rectangle()
-                        .fill(CLIColors.border)
-                        .frame(height: 1)
-                    
-                    HStack(spacing: 12) {
-                        // 更新状态按钮
-                        Button {
-                            Task {
-                                await viewModel.updateStatus()
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "arrow.clockwise")
-                                Text("更新状态")
-                            }
-                            .font(.cliBody)
-                            .foregroundColor(CLIColors.green)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .overlay(
-                                Rectangle()
-                                    .stroke(CLIColors.green, lineWidth: 1)
-                            )
-                        }
-                        
-                        // 分享按钮
-                        Button {
-                            viewModel.showPosterSheet = true
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "square.and.arrow.up")
-                                Text("分享")
-                            }
-                            .font(.cliBody)
-                            .foregroundColor(CLIColors.textPrimary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .overlay(
-                                Rectangle()
-                                    .stroke(CLIColors.border, lineWidth: 1)
-                            )
+                VStack(spacing: 0) {
+                    ScrollView {
+                        VStack(spacing: 16) {
+                            // 宫格
+                            FriendGrid(friends: viewModel.friends)
+                                .padding(.horizontal, 16)
+                                .padding(.top, 16)
+
+                            Spacer().frame(height: 100) // 底部按钮占位
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 16)
+                    .refreshable {
+                        await viewModel.refresh()
+                    }
+
+                    // 底部按钮
+                    VStack(spacing: 12) {
+                        Rectangle()
+                            .fill(CLIColors.border)
+                            .frame(height: 1)
+
+                        HStack(spacing: 12) {
+                            // 更新状态按钮
+                            Button {
+                                Task {
+                                    await viewModel.updateStatus()
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "arrow.clockwise")
+                                    Text("更新状态")
+                                }
+                                .font(.cliBody)
+                                .foregroundColor(CLIColors.green)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .overlay(
+                                    Rectangle()
+                                        .stroke(CLIColors.green, lineWidth: 1)
+                                )
+                            }
+
+                            // 分享按钮
+                            Button {
+                                viewModel.showPosterSheet = true
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "square.and.arrow.up")
+                                    Text("分享")
+                                }
+                                .font(.cliBody)
+                                .foregroundColor(CLIColors.textPrimary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .overlay(
+                                    Rectangle()
+                                        .stroke(CLIColors.border, lineWidth: 1)
+                                )
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 16)
+                    }
+                    .background(CLIColors.background)
                 }
-                .background(CLIColors.background)
             }
         }
         .background(CLIColors.background)
