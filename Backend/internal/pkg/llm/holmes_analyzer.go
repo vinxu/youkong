@@ -378,7 +378,7 @@ func (h *HolmesAnalyzer) buildPrompt(clue *model.HolmesClue, features *model.Hol
 
 	prompt := fmt.Sprintf(`你是福尔摩斯，擅长从细节推断真相。
 
-现在需要判断一个人此刻是否有空约朋友。
+现在需要推测一个人**此刻正在做什么**、**心情如何**。
 
 ## 线索（原始数据）
 
@@ -395,40 +395,42 @@ func (h *HolmesAnalyzer) buildPrompt(clue *model.HolmesClue, features *model.Hol
 ## 推理要求
 
 1. 像侦探一样分析每个线索的含义
-2. 综合所有线索进行推断
+2. 综合所有线索推断此刻的状态和心情
 3. 考虑时间、地点、活动的关联性
-4. 给出结论和置信度
+4. 给出生动的状态描述
 
 ## 输出格式（严格 JSON，不要包含任何其他内容）
 
 {
-    "reasoning": "你的完整推理过程（不限长度，详细分析）",
+    "reasoning": "你的完整推理过程（不限长度，详细分析每个线索）",
     "available": true,
     "probability": 88,
     "confidence": "high",
-    "summary": "看起来在咖啡厅边喝咖啡边刷手机摸鱼，应该有空约",
-    "emoji": "☕"
+    "summary": "周日下午在家躺着刷手机，看起来很悠闲放松",
+    "emoji": "🛋️"
 }
 
 ## 输出要求
-- summary: 用自然口语化描述当前状态（20-40字），可以使用"摸鱼"、"刷手机"、"追剧"等真实表达
-- emoji: 可以自由选择任何 Unicode emoji，不限于预设列表
-- reasoning: 详细的推理过程，不限长度
+- reasoning: 详细的推理过程，像侦探一样分析每个线索，推理出此刻的状态
+- summary: 用自然口语化描述**此刻在做什么**（15-30字），要生动形象，如"在家躺平刷手机"、"上班摸鱼中"、"通勤路上听歌"
+- emoji: 选择最能代表当前状态的 emoji
+- available/probability: 顺便判断是否方便被打扰
 
-## 置信度说明
-- high: 线索充分，推断可靠
-- medium: 部分线索缺失，但主要判断可信
-- low: 线索不足，存在较大不确定性
+## 心情/状态参考
+- 放松：在家休息、刷手机、追剧
+- 专注：工作中、学习中、开会中
+- 运动：跑步、健身、散步
+- 社交：聚会、聊天、约会
+- 通勤：上班路上、下班路上
+- 疲惫：深夜、加班、长时间工作
 
-## Emoji 建议（可自由选择任何 Unicode emoji）
-🎮 游戏 | 📺 追剧 | 💼 工作 | ☕ 咖啡厅/摸鱼
+## Emoji 建议（可自由选择）
+🎮 游戏 | 📺 追剧 | 💼 工作 | ☕ 摸鱼
 🍜 吃饭 | 🛋️ 躺平 | 🚶 外出 | 😴 睡觉
 📱 刷手机 | 💬 聊天 | 🎧 听歌 | 🏃 运动
 🍻 聚会 | 🔕 勿扰 | 📊 开会 | 🚇 通勤
 🛍️ 购物 | 🎬 看电影 | 📚 看书 | 🎨 创作
 🏋️ 健身 | 🍕 美食 | 🎉 娱乐 | 😊 休闲
-
-你也可以根据具体情况选择其他更合适的 emoji。
 
 只输出 JSON，不要有任何前缀或解释。`,
 		clueText,
@@ -798,4 +800,627 @@ func sanitizeCalendarTitle(title string) string {
 		return string([]rune(title)[:20]) + "..."
 	}
 	return title
+}
+
+// ========== Holmes 2.0 语义上下文建模 ==========
+
+// buildSemanticContext 从原始线索构建语义上下文 (Layer 2)
+func (h *HolmesAnalyzer) buildSemanticContext(clue *model.HolmesClue) *model.SemanticContext {
+	return &model.SemanticContext{
+		Space:    h.inferSpaceSemantic(clue),
+		Time:     h.inferTimeSemantic(clue),
+		Activity: h.inferActivitySemantic(clue),
+		Energy:   h.inferEnergyLevel(clue),
+	}
+}
+
+// inferSpaceSemantic 推断空间语义
+func (h *HolmesAnalyzer) inferSpaceSemantic(clue *model.HolmesClue) *model.SpaceSemantic {
+	space := &model.SpaceSemantic{
+		Nature: "未知空间",
+		Vibe:   "未知",
+		Social: "未知",
+	}
+
+	// 根据移动状态判断
+	if clue.IsMoving {
+		space.Nature = "移动中"
+		if clue.MovementType == "walking" {
+			space.Vibe = "户外"
+			space.Social = "可能有他人"
+		} else if clue.MovementType == "driving" {
+			space.Vibe = "封闭"
+			space.Social = "独处或少数人"
+		}
+		return space
+	}
+
+	// 根据位置类型判断
+	switch clue.PlaceType {
+	case "home":
+		space.Nature = "私密空间"
+		space.Vibe = "安静"
+		space.Social = "独处"
+	case "work":
+		space.Nature = "专业空间"
+		space.Vibe = "专业"
+		space.Social = "可能有同事"
+	case "leisure":
+		space.Nature = "公共空间"
+		space.Vibe = "休闲"
+		space.Social = "社交场合"
+	case "transit":
+		space.Nature = "移动中"
+		space.Vibe = "嘈杂"
+		space.Social = "陌生人群"
+	}
+
+	// 根据耳机连接判断
+	if clue.HeadphonesConnected {
+		space.Social = "可能独处（戴耳机）"
+	}
+
+	// 根据专注模式判断
+	if clue.FocusModeOn {
+		space.Vibe = "安静（专注模式）"
+	}
+
+	return space
+}
+
+// inferTimeSemantic 推断时间语义
+func (h *HolmesAnalyzer) inferTimeSemantic(clue *model.HolmesClue) *model.TimeSemantic {
+	time := &model.TimeSemantic{
+		Phase:      "未知",
+		Rhythm:     "未知",
+		Continuity: "未知",
+	}
+
+	hour := clue.Timestamp.Hour()
+
+	// 推断时间阶段
+	switch {
+	case hour >= 5 && hour < 9:
+		time.Phase = "苏醒期"
+	case hour >= 9 && hour < 12:
+		time.Phase = "高效期（上午）"
+	case hour >= 12 && hour < 14:
+		time.Phase = "休整期（午间）"
+	case hour >= 14 && hour < 18:
+		time.Phase = "高效期（下午）"
+	case hour >= 18 && hour < 22:
+		time.Phase = "放松期"
+	case hour >= 22 || hour < 5:
+		time.Phase = "入睡期"
+	}
+
+	// 推断节奏
+	if clue.IsWeekend {
+		time.Rhythm = "休闲节奏"
+	} else {
+		if hour >= 9 && hour < 18 {
+			time.Rhythm = "工作节奏"
+		} else if hour >= 7 && hour < 9 || hour >= 18 && hour < 20 {
+			time.Rhythm = "过渡期（通勤时段）"
+		} else {
+			time.Rhythm = "个人时间"
+		}
+	}
+
+	// 推断持续性
+	if clue.AtPlaceSinceMinutes < 15 {
+		time.Continuity = "刚开始"
+	} else if clue.AtPlaceSinceMinutes < 120 {
+		time.Continuity = "进行中"
+	} else {
+		time.Continuity = "持续较久"
+	}
+
+	return time
+}
+
+// inferActivitySemantic 推断活动语义
+func (h *HolmesAnalyzer) inferActivitySemantic(clue *model.HolmesClue) *model.ActivitySemantic {
+	activity := &model.ActivitySemantic{
+		BodyState:  "未知",
+		MindState:  "未知",
+		Engagement: "未知",
+	}
+
+	// 推断身体状态
+	if clue.IsMoving {
+		switch clue.MovementType {
+		case "running":
+			activity.BodyState = "运动中"
+		case "walking":
+			activity.BodyState = "轻度活动"
+		case "driving", "cycling":
+			activity.BodyState = "移动中"
+		default:
+			activity.BodyState = "移动中"
+		}
+	} else {
+		if clue.StationaryMinutes > 60 {
+			activity.BodyState = "长时间静态"
+		} else {
+			activity.BodyState = "静态"
+		}
+	}
+
+	// 推断心智状态
+	if clue.HasCalendarEvent {
+		activity.MindState = "专注（有日程）"
+	} else if clue.FocusModeOn {
+		activity.MindState = "专注（勿扰模式）"
+	} else if clue.ScreenActive {
+		switch clue.ActivityType {
+		case "entertainment":
+			activity.MindState = "消遣"
+		case "productivity":
+			activity.MindState = "专注"
+		case "communication":
+			activity.MindState = "社交"
+		default:
+			activity.MindState = "消遣"
+		}
+	} else if clue.LastActiveMinutesAgo > 60 {
+		activity.MindState = "休息"
+	} else {
+		activity.MindState = "闲置"
+	}
+
+	// 推断投入程度
+	if clue.ScreenDurationMins > 30 || clue.StationaryMinutes > 60 {
+		activity.Engagement = "深度投入"
+	} else if clue.ScreenActive {
+		activity.Engagement = "浅层互动"
+	} else if clue.LastActiveMinutesAgo < 30 {
+		activity.Engagement = "间歇使用"
+	} else {
+		activity.Engagement = "闲置"
+	}
+
+	return activity
+}
+
+// inferEnergyLevel 推断能量状态
+func (h *HolmesAnalyzer) inferEnergyLevel(clue *model.HolmesClue) *model.EnergyLevel {
+	energy := &model.EnergyLevel{
+		Physical: "正常",
+		Mental:   "平静",
+		Social:   "中性",
+	}
+
+	hour := clue.Timestamp.Hour()
+
+	// 推断身体能量
+	if clue.StepsLastHour > 500 {
+		energy.Physical = "活跃"
+	} else if clue.LowBatteryMode || clue.BatteryLevel < 20 {
+		energy.Physical = "可能疲惫"
+	} else if hour >= 23 || hour < 6 {
+		energy.Physical = "可能疲惫"
+	}
+
+	// 推断精神能量
+	if clue.FocusModeOn {
+		energy.Mental = "专注"
+	} else if hour >= 23 || hour < 6 {
+		energy.Mental = "低迷"
+	} else if clue.ScreenActive && clue.ActivityType == "entertainment" {
+		energy.Mental = "放松"
+	} else if clue.HasCalendarEvent {
+		energy.Mental = "专注"
+	}
+
+	// 推断社交能量
+	if clue.FocusModeOn {
+		energy.Social = "封闭"
+	} else if clue.PlaceType == "leisure" || clue.ActivityType == "communication" {
+		energy.Social = "开放"
+	} else if clue.PlaceType == "home" && (hour >= 22 || hour < 8) {
+		energy.Social = "封闭"
+	}
+
+	return energy
+}
+
+// ========== 异常检测 ==========
+
+// detectAnomalies 检测行为异常
+func (h *HolmesAnalyzer) detectAnomalies(clue *model.HolmesClue, memory *model.CoreMemory) []model.Anomaly {
+	anomalies := []model.Anomaly{}
+
+	if memory == nil || memory.SampleCount < 5 {
+		return anomalies // 数据不足，无法检测异常
+	}
+
+	hour := clue.Timestamp.Hour()
+
+	// 时间异常检测
+	if (hour >= 23 || hour < 6) && clue.ScreenActive && clue.ScreenDurationMins > 30 {
+		if strings.Contains(memory.TimePatterns, "早睡") {
+			anomalies = append(anomalies, model.Anomaly{
+				Type:   "unusual_time",
+				Detail: "通常这时候已经休息了，今晚还在活跃",
+			})
+		}
+	}
+
+	// 地点异常检测
+	if !clue.IsWeekend && hour >= 9 && hour < 18 {
+		if clue.PlaceType == "leisure" || clue.PlaceType == "home" {
+			if strings.Contains(memory.BehaviorInsights, "工作日") && strings.Contains(memory.BehaviorInsights, "公司") {
+				anomalies = append(anomalies, model.Anomaly{
+					Type:   "unusual_location",
+					Detail: "工作日工作时间不在公司，可能请假或远程",
+				})
+			}
+		}
+	}
+
+	// 周末地点异常
+	if clue.IsWeekend && clue.PlaceType == "work" {
+		if strings.Contains(memory.BehaviorInsights, "周末") && !strings.Contains(memory.BehaviorInsights, "加班") {
+			anomalies = append(anomalies, model.Anomaly{
+				Type:   "unusual_location",
+				Detail: "周末在公司，可能有紧急工作或加班",
+			})
+		}
+	}
+
+	// 活动异常检测
+	if clue.StepsToday > 15000 {
+		if !strings.Contains(memory.BehaviorInsights, "运动") && !strings.Contains(memory.BehaviorInsights, "健身") {
+			anomalies = append(anomalies, model.Anomaly{
+				Type:   "behavior_change",
+				Detail: "今天活动量异常大，可能在旅行或运动",
+			})
+		}
+	}
+
+	// 长时间静止异常
+	if clue.StationaryMinutes > 180 && !clue.HasCalendarEvent && hour >= 9 && hour < 18 {
+		anomalies = append(anomalies, model.Anomaly{
+			Type:   "behavior_change",
+			Detail: "已静止超过3小时，可能在专注做某事或休息",
+		})
+	}
+
+	return anomalies
+}
+
+// ========== Holmes 2.0 创意叙事生成 ==========
+
+// Analyze2 执行 Holmes 2.0 推理分析（新版本）
+func (h *HolmesAnalyzer) Analyze2(ctx context.Context, input *HolmesInput) (*model.Holmes2Result, error) {
+	// Layer 1: 收集线索
+	clue := h.collectClues(input)
+
+	// Layer 2: 构建语义上下文
+	semanticCtx := h.buildSemanticContext(clue)
+
+	// Layer 3: 异常检测
+	anomalies := h.detectAnomalies(clue, input.CoreMemory)
+
+	// Layer 4: 调用 LLM 进行创意叙事生成
+	creative, err := h.callCreativeLLM(ctx, clue, semanticCtx, anomalies, input.CoreMemory)
+	if err != nil {
+		// LLM 调用失败，使用规则引擎降级
+		fallbackResult := h.analyzeWithRules(clue, h.extractFeatures(clue))
+		return &model.Holmes2Result{
+			RawData:   clue,
+			Context:   semanticCtx,
+			Anomalies: anomalies,
+			Creative: &model.HolmesCreativeResult{
+				Narrative:   "规则推理：" + fallbackResult.Reasoning.Conclusion,
+				Scene:       fallbackResult.Result.Summary,
+				Emoji:       fallbackResult.Result.Emoji,
+				Mood:        &model.MoodVector{Valence: 0, Arousal: 0.3, Openness: 0.5},
+				Confidence:  fallbackResult.Result.Confidence,
+				Basis:       []string{"规则推理"},
+				GeneratedAt: time.Now().UnixMilli(),
+			},
+			Result: fallbackResult.Result,
+			GeneratedAt: time.Now().UnixMilli(),
+		}, nil
+	}
+
+	// 构建最终结果
+	result := &model.Holmes2Result{
+		RawData:     clue,
+		Context:     semanticCtx,
+		Anomalies:   anomalies,
+		Creative:    creative,
+		GeneratedAt: time.Now().UnixMilli(),
+	}
+
+	// 设置兼容旧版的结果字段
+	result.Result.Summary = creative.Scene
+	result.Result.Emoji = creative.Emoji
+	result.Result.Confidence = creative.Confidence
+
+	// 根据心情向量推算有空概率
+	if creative.Mood != nil {
+		// 社交开放度越高，有空概率越高
+		// 唤醒度中等时有空概率最高
+		openness := creative.Mood.Openness
+		arousal := creative.Mood.Arousal
+		valence := creative.Mood.Valence
+
+		// 基础分数 = 社交开放度 * 60 + 效价 * 20
+		probability := int(openness*60 + (valence+1)*10)
+
+		// 唤醒度过高或过低都会降低概率
+		if arousal > 0.7 || arousal < 0.2 {
+			probability -= 10
+		}
+
+		if probability > 100 {
+			probability = 100
+		}
+		if probability < 0 {
+			probability = 0
+		}
+
+		result.Result.Probability = probability
+		result.Result.Available = probability >= 50
+	} else {
+		result.Result.Probability = 50
+		result.Result.Available = true
+	}
+
+	return result, nil
+}
+
+// HolmesCreativeLLMResponse LLM 返回的创意叙事结果
+type HolmesCreativeLLMResponse struct {
+	Narrative  string   `json:"narrative"`
+	Scene      string   `json:"scene"`
+	Emoji      string   `json:"emoji"`
+	Mood       struct {
+		Valence  float64 `json:"valence"`
+		Arousal  float64 `json:"arousal"`
+		Openness float64 `json:"openness"`
+	} `json:"mood"`
+	Confidence string   `json:"confidence"`
+	Basis      []string `json:"basis"`
+}
+
+// callCreativeLLM 调用 LLM 进行创意叙事生成
+func (h *HolmesAnalyzer) callCreativeLLM(ctx context.Context, clue *model.HolmesClue, semanticCtx *model.SemanticContext, anomalies []model.Anomaly, memory *model.CoreMemory) (*model.HolmesCreativeResult, error) {
+	if h.client == nil {
+		return nil, fmt.Errorf("LLM client not available")
+	}
+
+	prompt := h.buildCreativePrompt(clue, semanticCtx, anomalies, memory)
+
+	requestBody := map[string]interface{}{
+		"model": holmesModel,
+		"messages": []ChatMessage{
+			{Role: "user", Content: prompt},
+		},
+		"enable_thinking": true,
+	}
+
+	thinkingResp, err := h.client.ChatWithThinking(ctx, requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("LLM call failed: %w", err)
+	}
+
+	return h.parseCreativeResponse(thinkingResp)
+}
+
+// buildCreativePrompt 构建创意叙事 Prompt
+func (h *HolmesAnalyzer) buildCreativePrompt(clue *model.HolmesClue, ctx *model.SemanticContext, anomalies []model.Anomaly, memory *model.CoreMemory) string {
+	// 格式化语义上下文
+	spaceText := "未知"
+	if ctx.Space != nil {
+		spaceText = fmt.Sprintf("空间性质: %s\n氛围: %s\n社交环境: %s", ctx.Space.Nature, ctx.Space.Vibe, ctx.Space.Social)
+	}
+
+	timeText := "未知"
+	if ctx.Time != nil {
+		timeText = fmt.Sprintf("时间阶段: %s\n生活节奏: %s\n状态持续: %s", ctx.Time.Phase, ctx.Time.Rhythm, ctx.Time.Continuity)
+	}
+
+	activityText := "未知"
+	if ctx.Activity != nil {
+		activityText = fmt.Sprintf("身体状态: %s\n心智状态: %s\n投入程度: %s", ctx.Activity.BodyState, ctx.Activity.MindState, ctx.Activity.Engagement)
+	}
+
+	energyText := "未知"
+	if ctx.Energy != nil {
+		energyText = fmt.Sprintf("身体能量: %s\n精神状态: %s\n社交意愿: %s", ctx.Energy.Physical, ctx.Energy.Mental, ctx.Energy.Social)
+	}
+
+	// 格式化记忆
+	memoryText := "暂无历史数据，这是一个新用户"
+	if memory != nil && memory.SampleCount > 0 {
+		memoryText = fmt.Sprintf(`这个人的特点（基于 %d 个历史样本）：
+- 行为模式: %s
+- 时间规律: %s
+- 地点偏好: %s
+- 社交倾向: %s`,
+			memory.SampleCount,
+			nvl(memory.BehaviorInsights, "暂无"),
+			nvl(memory.TimePatterns, "暂无"),
+			nvl(memory.LocationPreferences, "暂无"),
+			nvl(memory.SocialTendency, "暂无"),
+		)
+	}
+
+	// 格式化异常
+	anomalyText := "无特殊异常"
+	if len(anomalies) > 0 {
+		lines := []string{}
+		for _, a := range anomalies {
+			lines = append(lines, fmt.Sprintf("⚠️ %s: %s", a.Type, a.Detail))
+		}
+		anomalyText = strings.Join(lines, "\n")
+	}
+
+	// 格式化原始线索（补充）
+	rawClueText := h.formatClues(clue)
+
+	return fmt.Sprintf(`你是一个洞察人心的叙事者。
+
+## 你的任务
+根据下面的线索，用第三人称描述这个人**此刻**正在做什么、心情如何。
+要像写小说一样生动，但要简洁。
+
+## 原始线索
+
+%s
+
+## 语义分析
+
+**空间感**
+%s
+
+**时间感**
+%s
+
+**活动感**
+%s
+
+**能量状态**
+%s
+
+## 这个人的特点（来自记忆）
+
+%s
+
+## 异常观察
+
+%s
+
+## 创作要求
+
+1. **不要用预设标签**
+   - 不要说"工作中"/"休息中"这种无聊的标签
+   - 要有画面感，如"窝在沙发里漫无目的地刷着手机"
+
+2. **要有想象力**
+   - 根据线索合理推测具体场景
+   - 可以推测心情、想法，但要有依据
+
+3. **简洁有力**
+   - scene（场景描述）控制在15-25字
+   - 用一个最传神的 emoji
+
+4. **考虑记忆**
+   - 如果行为符合习惯，可以更自信
+   - 如果偏离习惯，要注意可能有特殊情况
+
+## 输出格式（严格JSON）
+
+{
+    "narrative": "你的叙事推理过程（100-200字，像侦探推理一样）",
+    "scene": "此刻的场景描述（15-25字，要有画面感）",
+    "emoji": "最传神的emoji",
+    "mood": {
+        "valence": 0.7,
+        "arousal": 0.3,
+        "openness": 0.5
+    },
+    "confidence": "high",
+    "basis": ["依据1", "依据2", "依据3"]
+}
+
+## 字段说明
+- narrative: 详细的推理过程，像侦探一样分析每个线索
+- scene: 用自然口语化描述**此刻在做什么**，要生动形象
+- emoji: 选择最能代表当前状态的 emoji
+- mood.valence: 效价，-1(消极) 到 1(积极)
+- mood.arousal: 唤醒度，0(平静) 到 1(激动)
+- mood.openness: 社交开放度，0(封闭) 到 1(开放)
+- confidence: 置信度 high/medium/low
+- basis: 列出3个主要推断依据
+
+## Emoji 参考（可自由选择）
+🎮 游戏 | 📺 追剧 | 💼 工作 | ☕ 摸鱼
+🍜 吃饭 | 🛋️ 躺平 | 🚶 外出 | 😴 睡觉
+📱 刷手机 | 💬 聊天 | 🎧 听歌 | 🏃 运动
+🍻 聚会 | 🔕 勿扰 | 📊 开会 | 🚇 通勤
+
+只输出 JSON，不要有任何前缀或解释。`,
+		rawClueText,
+		spaceText,
+		timeText,
+		activityText,
+		energyText,
+		memoryText,
+		anomalyText,
+	)
+}
+
+// parseCreativeResponse 解析创意叙事响应
+func (h *HolmesAnalyzer) parseCreativeResponse(resp *ThinkingResponse) (*model.HolmesCreativeResult, error) {
+	content := strings.TrimSpace(resp.Content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	var llmResp HolmesCreativeLLMResponse
+	if err := json.Unmarshal([]byte(content), &llmResp); err != nil {
+		return nil, fmt.Errorf("parse LLM response: %w, content: %s", err, content)
+	}
+
+	// 使用 reasoning_content 补充 narrative
+	narrative := llmResp.Narrative
+	if resp.ReasoningContent != "" && narrative == "" {
+		narrative = resp.ReasoningContent
+	}
+
+	// 验证和修正数据
+	if llmResp.Scene == "" {
+		llmResp.Scene = "状态未知"
+	}
+	if llmResp.Emoji == "" {
+		llmResp.Emoji = "🤔"
+	}
+	if llmResp.Confidence == "" {
+		llmResp.Confidence = "medium"
+	}
+
+	// 限制 mood 范围
+	valence := llmResp.Mood.Valence
+	if valence < -1 {
+		valence = -1
+	}
+	if valence > 1 {
+		valence = 1
+	}
+
+	arousal := llmResp.Mood.Arousal
+	if arousal < 0 {
+		arousal = 0
+	}
+	if arousal > 1 {
+		arousal = 1
+	}
+
+	openness := llmResp.Mood.Openness
+	if openness < 0 {
+		openness = 0
+	}
+	if openness > 1 {
+		openness = 1
+	}
+
+	return &model.HolmesCreativeResult{
+		Narrative:  narrative,
+		Scene:      llmResp.Scene,
+		Emoji:      llmResp.Emoji,
+		Mood: &model.MoodVector{
+			Valence:  valence,
+			Arousal:  arousal,
+			Openness: openness,
+		},
+		Confidence:  llmResp.Confidence,
+		Basis:       llmResp.Basis,
+		GeneratedAt: time.Now().UnixMilli(),
+	}, nil
 }

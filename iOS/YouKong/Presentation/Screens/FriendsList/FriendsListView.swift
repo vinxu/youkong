@@ -991,6 +991,32 @@ struct MyAgentDataSheet: View {
             if let content = event.content {
                 appendLine("[ERROR] \(content)", type: .error)
             }
+
+        // Holmes 2.0 新增事件类型
+        case .context:
+            if let content = event.content {
+                appendLine(content, type: .clue)
+            }
+
+        case .anomaly:
+            if let content = event.content {
+                appendLine(content, type: .thinking)
+            }
+
+        case .narrative:
+            // 流式显示叙事推理过程
+            if let content = event.content {
+                let parts = content.components(separatedBy: "\n")
+                for (index, part) in parts.enumerated() {
+                    currentThinkingLine += part
+                    if index < parts.count - 1 {
+                        if !currentThinkingLine.isEmpty {
+                            appendLine("   " + currentThinkingLine, type: .thinking)
+                        }
+                        currentThinkingLine = ""
+                    }
+                }
+            }
         }
     }
 

@@ -386,6 +386,105 @@ func (h *AgentHandler) ReportStatusStream(c *gin.Context) {
 	w.Flush()
 }
 
+// ReportStatus2Stream Holmes 2.0 流式上报状态（SSE 实时输出叙事推理过程）
+// POST /api/agent/status/stream2
+func (h *AgentHandler) ReportStatus2Stream(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权"})
+		return
+	}
+
+	var req model.ExtendedStatusReportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+		return
+	}
+
+	// 设置 SSE 响应头
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	w := c.Writer
+
+	// 流式执行 Holmes 2.0 推理
+	result, err := h.agentService.ReportExtendedStatus2Stream(c.Request.Context(), userID, &req, func(event interface{}) {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+	})
+
+	if err != nil {
+		errEvent := map[string]string{
+			"type":    "error",
+			"content": err.Error(),
+		}
+		data, _ := json.Marshal(errEvent)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+		return
+	}
+
+	// 缓存分析结果
+	if result != nil && h.memoryService != nil {
+		// 从 Holmes2Result 转换为 AnalysisResult
+		analysisResult := &model.AnalysisResult{
+			Availability: model.AvailabilityAnalysis{
+				Status:      getStatusFromProbability(result.Result.Probability),
+				Probability: result.Result.Probability,
+				Reason:      result.Result.Summary,
+				Confidence:  result.Result.Confidence,
+			},
+			LifeStatus: model.LifeStatus{
+				Emoji:       result.Result.Emoji,
+				Label:       result.Result.Summary,
+				Description: result.Creative.Narrative,
+			},
+			UpdatedAt: time.Now(),
+		}
+
+		// 添加心情信息
+		if result.Creative != nil && result.Creative.Mood != nil {
+			mood := result.Creative.Mood
+			if mood.Valence > 0.5 {
+				analysisResult.Mood = "积极"
+			} else if mood.Valence > 0 {
+				analysisResult.Mood = "平静"
+			} else if mood.Valence > -0.5 {
+				analysisResult.Mood = "低落"
+			} else {
+				analysisResult.Mood = "消极"
+			}
+		}
+
+		// 异步缓存
+		go func() {
+			ctx := context.Background()
+			err := h.memoryService.CacheAnalysisResult(ctx, userID, analysisResult)
+			if err != nil {
+				fmt.Printf("[Holmes 2.0 缓存] 失败 user=%s error=%v\n", userID, err)
+			} else {
+				fmt.Printf("[Holmes 2.0 缓存] 成功 user=%s scene=%s\n",
+					userID, result.Creative.Scene)
+			}
+		}()
+	}
+
+	// 发送最终结果
+	doneEvent := map[string]interface{}{
+		"type":   "done",
+		"result": result,
+	}
+	data, _ := json.Marshal(doneEvent)
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	w.Flush()
+}
+
 // getStatusFromProbability 根据概率确定状态文本
 func getStatusFromProbability(probability int) string {
 	if probability >= 70 {

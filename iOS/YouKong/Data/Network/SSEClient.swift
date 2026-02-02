@@ -17,6 +17,10 @@ struct HolmesStreamEvent: Codable {
         case conclusion
         case done
         case error
+        // Holmes 2.0 新增事件类型
+        case context    // 语义上下文
+        case anomaly    // 异常检测
+        case narrative  // 叙事推理
     }
 
     // 判断是否是最终结果（没有 type 但有 result）
@@ -31,12 +35,92 @@ struct SSEFullResult: Codable {
     let features: SSEFeatures?
     let reasoning: SSEReasoning?
     let result: SSEResult?
+    // Holmes 2.0 新增字段
+    let context: SSESemanticContext?
+    let anomalies: [SSEAnomaly]?
+    let creative: SSECreativeResult?
 
     enum CodingKeys: String, CodingKey {
         case rawData = "raw_data"
         case features
         case reasoning
         case result
+        case context
+        case anomalies
+        case creative
+    }
+}
+
+// MARK: - Holmes 2.0 语义上下文
+
+/// 语义上下文
+struct SSESemanticContext: Codable {
+    let space: SSESpaceSemantic?
+    let time: SSETimeSemantic?
+    let activity: SSEActivitySemantic?
+    let energy: SSEEnergyLevel?
+}
+
+/// 空间语义
+struct SSESpaceSemantic: Codable {
+    let nature: String?
+    let vibe: String?
+    let social: String?
+}
+
+/// 时间语义
+struct SSETimeSemantic: Codable {
+    let phase: String?
+    let rhythm: String?
+    let continuity: String?
+}
+
+/// 活动语义
+struct SSEActivitySemantic: Codable {
+    let bodyState: String?
+    let mindState: String?
+    let engagement: String?
+
+    enum CodingKeys: String, CodingKey {
+        case bodyState = "body_state"
+        case mindState = "mind_state"
+        case engagement
+    }
+}
+
+/// 能量状态
+struct SSEEnergyLevel: Codable {
+    let physical: String?
+    let mental: String?
+    let social: String?
+}
+
+/// 异常标记
+struct SSEAnomaly: Codable {
+    let type: String?
+    let detail: String?
+}
+
+/// 心情向量
+struct SSEMoodVector: Codable {
+    let valence: Double?   // 效价 -1~1
+    let arousal: Double?   // 唤醒度 0~1
+    let openness: Double?  // 社交开放度 0~1
+}
+
+/// 创意叙事结果
+struct SSECreativeResult: Codable {
+    let narrative: String?
+    let scene: String?
+    let emoji: String?
+    let mood: SSEMoodVector?
+    let confidence: String?
+    let basis: [String]?
+    let generatedAt: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case narrative, scene, emoji, mood, confidence, basis
+        case generatedAt = "generated_at"
     }
 }
 

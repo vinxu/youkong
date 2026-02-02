@@ -828,3 +828,68 @@ func getEmojiFromAnalysis(analysis *model.HolmesResult) string {
 	}
 	return "🤔"
 }
+
+// ========== Holmes 2.0 流式分析 ==========
+
+// ReportExtendedStatus2Stream Holmes 2.0 流式上报状态
+func (s *AgentService) ReportExtendedStatus2Stream(ctx context.Context, userID string, req *model.ExtendedStatusReportRequest, callback func(event interface{})) (*model.Holmes2Result, error) {
+	// 1. 保存原始状态到 Redis
+	status := model.UserRealtimeStatus{
+		UserID:    userID,
+		UpdatedAt: time.Now(),
+	}
+	if req.Screen != nil {
+		status.Screen = *req.Screen
+	}
+	if req.Location != nil {
+		status.Location = *req.Location
+	}
+
+	data, err := json.Marshal(status)
+	if err != nil {
+		return nil, fmt.Errorf("marshal status: %w", err)
+	}
+
+	key := fmt.Sprintf(keyUserStatus, userID)
+	if err := s.redisClient.Set(ctx, key, data, statusTTL); err != nil {
+		return nil, fmt.Errorf("save status to redis: %w", err)
+	}
+
+	// 2. 保存扩展状态到 Redis
+	extData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal extended status: %w", err)
+	}
+
+	extKey := fmt.Sprintf("agent:extended:%s", userID)
+	if err := s.redisClient.Set(ctx, extKey, extData, statusTTL); err != nil {
+		return nil, fmt.Errorf("save extended status to redis: %w", err)
+	}
+
+	// 3. 流式执行 Holmes 2.0 分析
+	if s.holmesAnalyzer == nil {
+		return nil, fmt.Errorf("holmes analyzer not available")
+	}
+
+	input := &llm.HolmesInput{
+		Status:    req,
+		Timestamp: time.Now(),
+	}
+
+	// 使用 Holmes 2.0 流式分析
+	result, err := s.holmesAnalyzer.Analyze2Stream(ctx, input, func(event *llm.HolmesStreamEvent) {
+		callback(event)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("holmes 2.0 stream analysis failed: %w", err)
+	}
+
+	// 4. 缓存分析结果
+	if result != nil {
+		cacheData, _ := json.Marshal(result)
+		cacheKey := fmt.Sprintf(keyHolmesCache, userID)
+		_ = s.redisClient.Set(ctx, cacheKey, cacheData, holmesCacheTTL)
+	}
+
+	return result, nil
+}

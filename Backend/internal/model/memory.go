@@ -347,3 +347,107 @@ type HolmesFriendListResponse struct {
 	Friends     []HolmesAPIResponse `json:"friends"`
 	GeneratedAt int64               `json:"generated_at"`
 }
+
+// ========== Holmes 2.0 语义上下文建模 ==========
+
+// SpaceSemantic 空间语义 - 描述"这是什么样的地方"
+type SpaceSemantic struct {
+	Nature string `json:"nature"` // "私密空间"/"公共空间"/"移动中"/"户外"
+	Vibe   string `json:"vibe"`   // "安静"/"喧嚣"/"专业"/"休闲"
+	Social string `json:"social"` // "独处"/"可能有他人"/"社交场合"
+}
+
+// TimeSemantic 时间语义 - 描述"这是什么样的时刻"
+type TimeSemantic struct {
+	Phase      string `json:"phase"`      // "苏醒期"/"高效期"/"放松期"/"入睡期"
+	Rhythm     string `json:"rhythm"`     // "工作节奏"/"休闲节奏"/"过渡期"
+	Continuity string `json:"continuity"` // "刚开始"/"进行中"/"即将结束"
+}
+
+// ActivitySemantic 活动语义 - 描述"人在做什么类型的事"
+type ActivitySemantic struct {
+	BodyState  string `json:"body_state"`  // "静态"/"轻度活动"/"运动中"/"移动中"
+	MindState  string `json:"mind_state"`  // "专注"/"消遣"/"社交"/"休息"
+	Engagement string `json:"engagement"`  // "深度投入"/"浅层互动"/"被动接收"/"闲置"
+}
+
+// EnergyLevel 能量状态 - 描述"此刻的能量水平"
+type EnergyLevel struct {
+	Physical string `json:"physical"` // "充沛"/"正常"/"疲惫"
+	Mental   string `json:"mental"`   // "清醒"/"平静"/"低迷"
+	Social   string `json:"social"`   // "开放"/"中性"/"封闭"
+}
+
+// SemanticContext 语义上下文 - Layer 2 从原始数据提取的语义
+type SemanticContext struct {
+	Space    *SpaceSemantic    `json:"space"`
+	Time     *TimeSemantic     `json:"time"`
+	Activity *ActivitySemantic `json:"activity"`
+	Energy   *EnergyLevel      `json:"energy"`
+}
+
+// Anomaly 异常标记
+type Anomaly struct {
+	Type   string `json:"type"`   // "unusual_location"/"unusual_time"/"behavior_change"
+	Detail string `json:"detail"` // "通常这时候在家，今天在外面"
+}
+
+// MoodVector 心情向量 - 连续维度表示
+type MoodVector struct {
+	Valence  float64 `json:"valence"`  // 效价：-1(消极) 到 1(积极)
+	Arousal  float64 `json:"arousal"`  // 唤醒度：0(平静) 到 1(激动)
+	Openness float64 `json:"openness"` // 社交开放度：0(封闭) 到 1(开放)
+}
+
+// HolmesCreativeResult Holmes 2.0 创意叙事结果
+type HolmesCreativeResult struct {
+	Narrative   string      `json:"narrative"`    // 叙事推理过程
+	Scene       string      `json:"scene"`        // 场景描述（展示用）
+	Emoji       string      `json:"emoji"`        // 表情
+	Mood        *MoodVector `json:"mood"`         // 心情向量
+	Confidence  string      `json:"confidence"`   // 置信度
+	Basis       []string    `json:"basis"`        // 推断依据
+	GeneratedAt int64       `json:"generated_at"` // 生成时间戳
+}
+
+// InferenceContext 推断上下文 - 传给 LLM 的完整上下文
+type InferenceContext struct {
+	Current      *SemanticContext `json:"current"`       // 当前上下文
+	Memory       *CoreMemory      `json:"memory"`        // 历史记忆
+	RecentStates []*RecentState   `json:"recent_states"` // 最近状态序列
+	Anomalies    []Anomaly        `json:"anomalies"`     // 异常标记
+}
+
+// RecentState 最近的状态快照
+type RecentState struct {
+	Timestamp int64  `json:"timestamp"` // 毫秒时间戳
+	Summary   string `json:"summary"`   // 之前的状态摘要
+	Duration  int    `json:"duration"`  // 持续多久（分钟）
+}
+
+// Holmes2Result Holmes 2.0 完整分析结果
+type Holmes2Result struct {
+	// 原始数据（Layer 1）
+	RawData *HolmesClue `json:"raw_data"`
+
+	// 语义上下文（Layer 2）
+	Context *SemanticContext `json:"context"`
+
+	// 异常检测
+	Anomalies []Anomaly `json:"anomalies,omitempty"`
+
+	// 创意叙事结果（Layer 4）
+	Creative *HolmesCreativeResult `json:"creative"`
+
+	// 兼容旧版结果（供宫格显示）
+	Result struct {
+		Available   bool   `json:"available"`
+		Probability int    `json:"probability"`
+		Confidence  string `json:"confidence"`
+		Summary     string `json:"summary"`
+		Emoji       string `json:"emoji"`
+	} `json:"result"`
+
+	// 生成时间
+	GeneratedAt int64 `json:"generated_at"`
+}
