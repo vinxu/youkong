@@ -139,10 +139,19 @@ extension APIEndpoint {
         APIEndpoint(path: "/api/v1/home/grid")
     }
 
-    /// 流式 Holmes 推理 API
+    /// 流式 Holmes 推理 API (v1)
     static func reportAgentStatusStream(request: StatusReportRequest) -> APIEndpoint {
         return APIEndpoint(
             path: "/api/v1/agent/status/stream",
+            method: .post,
+            body: request
+        )
+    }
+
+    /// Holmes 2.0 流式推理 API - 支持语义上下文、异常检测、创意叙事
+    static func reportAgentStatusStream2(request: StatusReportRequest) -> APIEndpoint {
+        return APIEndpoint(
+            path: "/api/v1/agent/status/stream2",
             method: .post,
             body: request
         )

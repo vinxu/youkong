@@ -207,12 +207,13 @@ actor SSEClient {
         self.encoder = JSONEncoder()
     }
 
-    /// 流式 Holmes 推理
+    /// 流式 Holmes 2.0 推理（语义上下文 + 异常检测 + 创意叙事）
     func streamHolmesAnalysis(
         request: StatusReportRequest,
         onEvent: @escaping @MainActor (HolmesStreamEvent) -> Void
     ) async throws {
-        let endpoint = APIEndpoint.reportAgentStatusStream(request: request)
+        // 使用 Holmes 2.0 API
+        let endpoint = APIEndpoint.reportAgentStatusStream2(request: request)
 
         var urlRequest = try buildRequest(for: endpoint)
         urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
