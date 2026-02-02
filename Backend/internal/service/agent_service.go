@@ -829,6 +829,53 @@ func getEmojiFromAnalysis(analysis *model.HolmesResult) string {
 	return "🤔"
 }
 
+// ========== 状态选项生成 ==========
+
+// GenerateStatusOptionsStream 流式生成状态选项
+func (s *AgentService) GenerateStatusOptionsStream(ctx context.Context, userID string, req *model.ExtendedStatusReportRequest, recentMemory []*model.UserStatusMemory, callback func(event interface{})) (*model.StatusOptionsResult, error) {
+	// 1. 保存状态到 Redis
+	status := model.UserRealtimeStatus{
+		UserID:    userID,
+		UpdatedAt: time.Now(),
+	}
+	if req.Screen != nil {
+		status.Screen = *req.Screen
+	}
+	if req.Location != nil {
+		status.Location = *req.Location
+	}
+
+	data, err := json.Marshal(status)
+	if err != nil {
+		return nil, fmt.Errorf("marshal status: %w", err)
+	}
+
+	key := fmt.Sprintf(keyUserStatus, userID)
+	if err := s.redisClient.Set(ctx, key, data, statusTTL); err != nil {
+		return nil, fmt.Errorf("save status to redis: %w", err)
+	}
+
+	// 2. 流式生成状态选项
+	if s.holmesAnalyzer == nil {
+		return nil, fmt.Errorf("holmes analyzer not available")
+	}
+
+	input := &llm.HolmesInput{
+		Status:    req,
+		Timestamp: time.Now(),
+	}
+
+	// 使用流式生成状态选项
+	result, err := s.holmesAnalyzer.GenerateStatusOptionsStream(ctx, input, recentMemory, func(event *llm.HolmesStreamEvent) {
+		callback(event)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("generate status options failed: %w", err)
+	}
+
+	return result, nil
+}
+
 // ========== Holmes 2.0 流式分析 ==========
 
 // ReportExtendedStatus2Stream Holmes 2.0 流式上报状态

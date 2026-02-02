@@ -484,3 +484,65 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// ========== 训练 AI - 状态选择功能 ==========
+
+// GetRecentUserStatusMemory 获取用户最近的状态记忆
+func (s *MemoryService) GetRecentUserStatusMemory(ctx context.Context, userID string, limit int) ([]*model.UserStatusMemory, error) {
+	return s.memoryRepo.GetRecentUserStatusMemory(ctx, userID, limit)
+}
+
+// SelectStatus 用户选择状态，保存到记忆并更新缓存
+func (s *MemoryService) SelectStatus(ctx context.Context, userID string, req *model.SelectStatusRequest) error {
+	// 1. 序列化设备上下文数据
+	contextJSON := ""
+	if req.DeviceData != nil {
+		if data, err := json.Marshal(req.DeviceData); err == nil {
+			contextJSON = string(data)
+		}
+	}
+
+	// 2. 保存到状态记忆表
+	memory := &model.UserStatusMemory{
+		UserID:  userID,
+		Emoji:   req.Emoji,
+		Status:  req.Status,
+		Context: contextJSON,
+	}
+	if err := s.memoryRepo.SaveUserStatusMemory(ctx, memory); err != nil {
+		return fmt.Errorf("save status memory: %w", err)
+	}
+
+	// 3. 更新用户分析缓存中的生活状态
+	if err := s.memoryRepo.UpdateLifeStatus(ctx, userID, req.Emoji, req.Status); err != nil {
+		fmt.Printf("[SelectStatus] 更新缓存失败 user=%s error=%v\n", userID, err)
+	}
+
+	// 4. 更新 Redis 缓存
+	// 先获取现有缓存，只更新 LifeStatus 部分
+	if cached, err := s.GetCachedAnalysis(ctx, userID); err == nil && cached != nil {
+		cached.LifeStatus.Emoji = req.Emoji
+		cached.LifeStatus.Label = req.Status
+		cached.UpdatedAt = time.Now()
+		s.cacheAnalysisResult(ctx, userID, cached)
+	} else {
+		// 没有缓存，创建一个新的
+		result := &model.AnalysisResult{
+			Availability: model.AvailabilityAnalysis{
+				Status:      "可能有空",
+				Probability: 50,
+				Reason:      "用户手动选择状态",
+				Confidence:  "high",
+			},
+			LifeStatus: model.LifeStatus{
+				Emoji: req.Emoji,
+				Label: req.Status,
+			},
+			UpdatedAt: time.Now(),
+		}
+		s.cacheAnalysisResult(ctx, userID, result)
+	}
+
+	fmt.Printf("[SelectStatus] 状态已保存 user=%s emoji=%s status=%s\n", userID, req.Emoji, req.Status)
+	return nil
+}

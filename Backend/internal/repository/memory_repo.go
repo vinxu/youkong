@@ -702,3 +702,54 @@ func (r *MemoryRepository) GetTimeSlotStats(ctx context.Context, userID string, 
 	}
 	return sampleCount, availableRate, nil
 }
+
+// ========== 用户状态记忆操作（训练 AI）==========
+
+// SaveUserStatusMemory 保存用户选择的状态记忆
+func (r *MemoryRepository) SaveUserStatusMemory(ctx context.Context, memory *model.UserStatusMemory) error {
+	query := `INSERT INTO user_status_memory (user_id, emoji, status, context, created_at)
+              VALUES (?, ?, ?, ?, ?)`
+	_, err := r.db.ExecContext(ctx, query,
+		memory.UserID,
+		memory.Emoji,
+		memory.Status,
+		memory.Context,
+		time.Now(),
+	)
+	return err
+}
+
+// GetRecentUserStatusMemory 获取用户最近的状态记忆
+func (r *MemoryRepository) GetRecentUserStatusMemory(ctx context.Context, userID string, limit int) ([]*model.UserStatusMemory, error) {
+	var memories []*model.UserStatusMemory
+	query := `SELECT id, user_id, emoji, status, context, created_at
+              FROM user_status_memory
+              WHERE user_id = ?
+              ORDER BY created_at DESC
+              LIMIT ?`
+	err := r.db.SelectContext(ctx, &memories, query, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return memories, nil
+}
+
+// GetUserStatusMemoryCount 获取用户状态记忆数量
+func (r *MemoryRepository) GetUserStatusMemoryCount(ctx context.Context, userID string) (int, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM user_status_memory WHERE user_id = ?`
+	err := r.db.GetContext(ctx, &count, query, userID)
+	return count, err
+}
+
+// UpdateLifeStatus 更新用户的生活状态（缓存表）
+func (r *MemoryRepository) UpdateLifeStatus(ctx context.Context, userID, emoji, label string) error {
+	query := `INSERT INTO user_analysis_cache (user_id, life_status_emoji, life_status_label)
+              VALUES (?, ?, ?)
+              ON DUPLICATE KEY UPDATE
+              life_status_emoji = VALUES(life_status_emoji),
+              life_status_label = VALUES(life_status_label),
+              updated_at = NOW()`
+	_, err := r.db.ExecContext(ctx, query, userID, emoji, label)
+	return err
+}

@@ -495,3 +495,105 @@ func getStatusFromProbability(probability int) string {
 		return "忙碌"
 	}
 }
+
+// GenerateStatusOptionsStream 流式生成状态选项（SSE）
+// POST /api/agent/status-options
+func (h *AgentHandler) GenerateStatusOptionsStream(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权"})
+		return
+	}
+
+	var req model.ExtendedStatusReportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+		return
+	}
+
+	// 设置 SSE 响应头
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	w := c.Writer
+
+	// 获取用户最近的状态记忆（用于推理）
+	var recentMemory []*model.UserStatusMemory
+	if h.memoryService != nil {
+		recentMemory, _ = h.memoryService.GetRecentUserStatusMemory(c.Request.Context(), userID, 10)
+	}
+
+	// 流式执行状态选项生成
+	result, err := h.agentService.GenerateStatusOptionsStream(c.Request.Context(), userID, &req, recentMemory, func(event interface{}) {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+	})
+
+	if err != nil {
+		errEvent := map[string]string{
+			"type":    "error",
+			"content": err.Error(),
+		}
+		data, _ := json.Marshal(errEvent)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+		return
+	}
+
+	// 发送状态选项
+	if result != nil {
+		optionsEvent := map[string]interface{}{
+			"type": "options",
+			"data": result,
+		}
+		data, _ := json.Marshal(optionsEvent)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+	}
+
+	// 发送完成信号
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	w.Flush()
+}
+
+// SelectStatus 选择状态并记录
+// POST /api/agent/select-status
+func (h *AgentHandler) SelectStatus(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	var req model.SelectStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "参数错误")
+		return
+	}
+
+	if h.memoryService == nil {
+		response.InternalError(c, "记忆服务未启用")
+		return
+	}
+
+	// 选择状态并记录
+	err := h.memoryService.SelectStatus(c.Request.Context(), userID, &req)
+	if err != nil {
+		fmt.Printf("[选择状态] 失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "保存失败")
+		return
+	}
+
+	fmt.Printf("[选择状态] 成功 user=%s emoji=%s status=%s\n", userID, req.Emoji, req.Status)
+
+	response.Success(c, gin.H{
+		"success": true,
+		"message": "状态已更新",
+	})
+}

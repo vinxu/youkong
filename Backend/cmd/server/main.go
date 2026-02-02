@@ -327,7 +327,9 @@ func main() {
 				agent.POST("/status/stream2", agentHandler.ReportStatus2Stream) // Holmes 2.0 流式推理
 				agent.POST("/query", agentHandler.QueryAgentData)
 				agent.GET("/memory", agentHandler.GetMemory)
-				agent.GET("/my-analysis", agentHandler.GetMyAnalysis) // 获取我的分析结果
+				agent.GET("/my-analysis", agentHandler.GetMyAnalysis)               // 获取我的分析结果
+				agent.POST("/status-options", agentHandler.GenerateStatusOptionsStream) // 流式生成状态选项
+				agent.POST("/select-status", agentHandler.SelectStatus)             // 选择状态并记录
 			}
 
 			// 通讯录模块

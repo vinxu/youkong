@@ -451,3 +451,33 @@ type Holmes2Result struct {
 	// 生成时间
 	GeneratedAt int64 `json:"generated_at"`
 }
+
+// ========== 训练 AI - 状态选择功能 ==========
+
+// StatusOption 状态选项
+type StatusOption struct {
+	Emoji  string `json:"emoji"`  // 状态 emoji
+	Status string `json:"status"` // 状态描述
+}
+
+// StatusOptionsResult 状态选项生成结果
+type StatusOptionsResult struct {
+	Options []StatusOption `json:"options"` // 4 个状态选项
+}
+
+// SelectStatusRequest 选择状态请求
+type SelectStatusRequest struct {
+	Emoji      string                       `json:"emoji" binding:"required"`
+	Status     string                       `json:"status" binding:"required"`
+	DeviceData *ExtendedStatusReportRequest `json:"device_data,omitempty"` // 选择时的设备数据
+}
+
+// UserStatusMemory 用户状态记忆（数据库模型）
+type UserStatusMemory struct {
+	ID        int64     `json:"id" db:"id"`
+	UserID    string    `json:"user_id" db:"user_id"`
+	Emoji     string    `json:"emoji" db:"emoji"`
+	Status    string    `json:"status" db:"status"`
+	Context   string    `json:"context" db:"context"` // JSON 格式的设备上下文
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+}

@@ -785,3 +785,329 @@ func (h *HolmesAnalyzer) parseCreativeSSEStream(reader io.Reader, callback Holme
 		ReasoningContent: fullReasoning.String(),
 	})
 }
+
+// ========== 训练 AI - 状态选项生成 ==========
+
+// StatusOptionsLLMResponse LLM 返回的状态选项结果
+type StatusOptionsLLMResponse struct {
+	Options []model.StatusOption `json:"options"`
+}
+
+// GenerateStatusOptionsStream 流式生成状态选项
+func (h *HolmesAnalyzer) GenerateStatusOptionsStream(ctx context.Context, input *HolmesInput, recentMemory []*model.UserStatusMemory, callback HolmesStreamCallback) (*model.StatusOptionsResult, error) {
+	// Phase 1: 收集线索
+	callback(&HolmesStreamEvent{
+		Type:    "phase",
+		Phase:   "collecting",
+		Content: "📡 收集线索...",
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	clue := h.collectClues(input)
+	h.streamClues(clue, callback)
+
+	// Phase 2: 语义上下文建模
+	callback(&HolmesStreamEvent{
+		Type:    "phase",
+		Phase:   "context",
+		Content: "🧠 语义建模...",
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	semanticCtx := h.buildSemanticContext(clue)
+	h.streamSemanticContext(semanticCtx, callback)
+
+	// Phase 3: AI 推理
+	callback(&HolmesStreamEvent{
+		Type:    "phase",
+		Phase:   "reasoning",
+		Content: "💭 AI 推理中...",
+	})
+
+	options, err := h.callStatusOptionsLLMStream(ctx, clue, semanticCtx, recentMemory, callback)
+	if err != nil {
+		log.Printf("[状态选项] LLM 调用失败，使用默认选项: %v", err)
+		callback(&HolmesStreamEvent{
+			Type:    "thinking",
+			Content: "⚠️ 使用默认状态选项...",
+		})
+		options = h.getDefaultStatusOptions(clue, semanticCtx)
+	}
+
+	// Phase 4: 完成
+	callback(&HolmesStreamEvent{
+		Type:    "phase",
+		Phase:   "done",
+		Content: "✨ 选择你的状态",
+	})
+
+	// 发送选项事件
+	callback(&HolmesStreamEvent{
+		Type: "options",
+		Data: map[string]interface{}{
+			"options": options,
+		},
+	})
+
+	return &model.StatusOptionsResult{Options: options}, nil
+}
+
+// callStatusOptionsLLMStream 流式调用 LLM 生成状态选项
+func (h *HolmesAnalyzer) callStatusOptionsLLMStream(ctx context.Context, clue *model.HolmesClue, semanticCtx *model.SemanticContext, recentMemory []*model.UserStatusMemory, callback HolmesStreamCallback) ([]model.StatusOption, error) {
+	if h.client == nil {
+		return nil, fmt.Errorf("LLM client not available")
+	}
+
+	prompt := h.buildStatusOptionsPrompt(clue, semanticCtx, recentMemory)
+
+	requestBody := map[string]interface{}{
+		"model": holmesModel,
+		"messages": []ChatMessage{
+			{Role: "user", Content: prompt},
+		},
+		"enable_thinking": true,
+		"stream":          true,
+	}
+
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	apiURL := h.client.apiURL
+	if apiURL == "" {
+		apiURL = qwenAPIURL
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+h.client.apiKey)
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	resp, err := h.client.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API error: %d - %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	return h.parseStatusOptionsSSEStream(resp.Body, callback)
+}
+
+// buildStatusOptionsPrompt 构建状态选项 Prompt
+func (h *HolmesAnalyzer) buildStatusOptionsPrompt(clue *model.HolmesClue, ctx *model.SemanticContext, recentMemory []*model.UserStatusMemory) string {
+	// 格式化当前数据
+	currentData := h.formatClues(clue)
+
+	// 格式化语义上下文
+	spaceText := "未知"
+	if ctx.Space != nil {
+		spaceText = fmt.Sprintf("空间: %s (%s)", ctx.Space.Nature, ctx.Space.Vibe)
+	}
+	timeText := "未知"
+	if ctx.Time != nil {
+		timeText = fmt.Sprintf("时间: %s · %s", ctx.Time.Phase, ctx.Time.Rhythm)
+	}
+	activityText := "未知"
+	if ctx.Activity != nil {
+		activityText = fmt.Sprintf("活动: %s · %s", ctx.Activity.BodyState, ctx.Activity.MindState)
+	}
+
+	// 格式化历史记录
+	memoryText := "暂无历史记录"
+	if len(recentMemory) > 0 {
+		lines := []string{}
+		for _, m := range recentMemory {
+			lines = append(lines, fmt.Sprintf("- %s %s %s",
+				m.CreatedAt.Format("01-02 15:04"),
+				m.Emoji,
+				m.Status,
+			))
+		}
+		memoryText = strings.Join(lines, "\n")
+	}
+
+	return fmt.Sprintf(`你是一个了解用户的 AI 助手。根据以下设备数据和历史记录，推测用户此刻最可能在做什么。
+
+## 当前数据
+%s
+
+## 语义上下文
+%s
+%s
+%s
+
+## 历史记录（最近 10 条）
+%s
+
+## 要求
+1. 分析用户的设备数据和历史模式
+2. 推测用户此刻最可能在做什么
+3. 生成 4 个最可能的状态选项，按可能性从高到低排序
+4. 每个选项包含一个贴切的 emoji 和简短描述（2-6字）
+
+## 输出格式（JSON）
+{
+  "options": [
+    {"emoji": "💼", "status": "专注工作"},
+    {"emoji": "📊", "status": "开会讨论"},
+    {"emoji": "☕", "status": "喝咖啡"},
+    {"emoji": "📱", "status": "摸鱼刷手机"}
+  ]
+}
+
+## Emoji 建议（可自由选择）
+🎮 游戏 | 📺 追剧 | 💼 工作 | ☕ 摸鱼
+🍜 吃饭 | 🛋️ 躺平 | 🚶 外出 | 😴 睡觉
+📱 刷手机 | 💬 聊天 | 🎧 听歌 | 🏃 运动
+🍻 聚会 | 🔕 专注 | 📊 开会 | 🚇 通勤
+🛍️ 购物 | 🎬 看电影 | 📚 看书 | 🎨 创作
+🏋️ 健身 | 🍕 美食 | 🎉 娱乐 | 😊 休闲
+
+只输出 JSON，不要有任何前缀或解释。`,
+		currentData,
+		spaceText,
+		timeText,
+		activityText,
+		memoryText,
+	)
+}
+
+// parseStatusOptionsSSEStream 解析状态选项 SSE 流
+func (h *HolmesAnalyzer) parseStatusOptionsSSEStream(reader io.Reader, callback HolmesStreamCallback) ([]model.StatusOption, error) {
+	scanner := bufio.NewScanner(reader)
+
+	var fullContent strings.Builder
+	var fullReasoning strings.Builder
+	var lastReasoningLen int
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var chunk sseChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+
+		delta := chunk.Choices[0].Delta
+
+		// 处理思考内容
+		if delta.ReasoningContent != "" {
+			fullReasoning.WriteString(delta.ReasoningContent)
+
+			currentLen := fullReasoning.Len()
+			if currentLen-lastReasoningLen >= 30 || strings.HasSuffix(delta.ReasoningContent, "。") || strings.HasSuffix(delta.ReasoningContent, "\n") {
+				newContent := fullReasoning.String()[lastReasoningLen:]
+				if strings.TrimSpace(newContent) != "" {
+					callback(&HolmesStreamEvent{
+						Type:    "thinking",
+						Content: strings.TrimSpace(newContent),
+					})
+				}
+				lastReasoningLen = currentLen
+			}
+		}
+
+		// 处理最终内容
+		if delta.Content != "" {
+			fullContent.WriteString(delta.Content)
+		}
+
+		if chunk.Choices[0].FinishReason == "stop" {
+			break
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read stream: %w", err)
+	}
+
+	// 解析 JSON 结果
+	content := strings.TrimSpace(fullContent.String())
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	var result StatusOptionsLLMResponse
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w, content: %s", err, content)
+	}
+
+	// 确保有 4 个选项
+	if len(result.Options) < 4 {
+		return nil, fmt.Errorf("insufficient options: got %d, need 4", len(result.Options))
+	}
+
+	return result.Options[:4], nil
+}
+
+// getDefaultStatusOptions 获取默认状态选项
+func (h *HolmesAnalyzer) getDefaultStatusOptions(clue *model.HolmesClue, ctx *model.SemanticContext) []model.StatusOption {
+	hour := clue.Timestamp.Hour()
+
+	// 根据时间和上下文返回默认选项
+	if clue.PlaceType == "work" {
+		return []model.StatusOption{
+			{Emoji: "💼", Status: "专注工作"},
+			{Emoji: "📊", Status: "开会中"},
+			{Emoji: "☕", Status: "休息摸鱼"},
+			{Emoji: "💬", Status: "同事聊天"},
+		}
+	}
+
+	if clue.PlaceType == "home" {
+		if hour >= 22 || hour < 7 {
+			return []model.StatusOption{
+				{Emoji: "😴", Status: "准备睡觉"},
+				{Emoji: "📱", Status: "刷手机"},
+				{Emoji: "📺", Status: "看剧"},
+				{Emoji: "🛋️", Status: "躺着发呆"},
+			}
+		}
+		return []model.StatusOption{
+			{Emoji: "🛋️", Status: "在家休息"},
+			{Emoji: "📱", Status: "刷手机"},
+			{Emoji: "🎮", Status: "打游戏"},
+			{Emoji: "📺", Status: "看剧"},
+		}
+	}
+
+	if clue.IsMoving {
+		return []model.StatusOption{
+			{Emoji: "🚇", Status: "通勤路上"},
+			{Emoji: "🚶", Status: "走路中"},
+			{Emoji: "🎧", Status: "听歌走路"},
+			{Emoji: "📱", Status: "边走边刷手机"},
+		}
+	}
+
+	// 默认选项
+	return []model.StatusOption{
+		{Emoji: "😊", Status: "休闲放松"},
+		{Emoji: "📱", Status: "刷手机"},
+		{Emoji: "💬", Status: "和朋友聊天"},
+		{Emoji: "🍜", Status: "吃东西"},
+	}
+}
