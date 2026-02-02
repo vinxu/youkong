@@ -518,6 +518,23 @@ DEPLOY_WEB_DIR=/opt/youkong/web
 
 **日常使用**: 直接 `git push`，等待自动部署完成即可
 
+**🔑 SSH 连接（Claude 必须使用）**:
+```bash
+# SSH 密钥文件位置（项目根目录）
+/Users/xuxuheng/Desktop/youkong/youkong-server.pem
+
+# 连接命令（用户是 ubuntu，不是 root）
+ssh -i /Users/xuxuheng/Desktop/youkong/youkong-server.pem ubuntu@49.232.13.41
+
+# 示例：执行命令
+ssh -i /Users/xuxuheng/Desktop/youkong/youkong-server.pem ubuntu@49.232.13.41 "sudo systemctl status youkong"
+```
+
+**⚠️ Claude 部署时必须**：
+1. 使用上面的 SSH 密钥文件连接服务器
+2. 用户名是 `ubuntu`，不是 `root`
+3. 需要 `sudo` 执行管理命令
+
 **服务管理**:
 ```bash
 systemctl status youkong    # 查看状态
