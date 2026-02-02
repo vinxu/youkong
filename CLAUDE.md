@@ -534,17 +534,79 @@ journalctl -u youkong -f    # 查看日志
 
 自动部署可能因为网络问题失败，需要手动更新。
 
+**🚨 重大警告（每次部署前必读）**：
+
+部署经常导致服务器不可用！必须按以下步骤操作：
+
 **⚠️ 重要规则（Claude 必须遵守）**：
 - 让用户手动部署时，**必须指定具体版本号**（如 `build-45`），不要用 `latest`
 - **必须使用 ghfast.top 代理**
+- **部署前必须先停止服务**，不能直接覆盖正在运行的二进制文件
+- **部署后必须验证服务启动成功**
 
 **GitHub 代理**: `https://ghfast.top/`（国内加速）
 
 ```bash
-# 服务器上执行（将 build-XX 替换为实际版本号）
+# ===== 完整部署流程（必须按顺序执行）=====
+
+# 1. 先停止服务
+sudo systemctl stop youkong
+
+# 2. 备份当前版本（可选但推荐）
+cp /opt/youkong/server /opt/youkong/server.bak
+
+# 3. 下载新版本（将 build-XX 替换为实际版本号）
 cd /opt/youkong
 curl -L -o backend.tar.gz "https://ghfast.top/https://github.com/vinxu/youkong/releases/download/build-XX/youkong-backend.tar.gz"
-tar -xzf backend.tar.gz && chmod +x server && systemctl restart youkong
+
+# 4. 验证下载文件是否正确（必须是 gzip 压缩文件）
+file backend.tar.gz
+# 应该显示: backend.tar.gz: gzip compressed data
+# 如果显示 HTML 或 ASCII，说明下载失败，需要换代理重试
+
+# 5. 解压并设置权限
+tar -xzf backend.tar.gz
+chmod +x server
+
+# 6. 验证是否是有效的可执行文件
+file server
+# 应该显示: server: ELF 64-bit LSB executable, x86-64
+# 如果不是 ELF 文件，说明下载或解压出错
+
+# 7. 启动服务
+sudo systemctl start youkong
+
+# 8. 检查服务状态（必须）
+sudo systemctl status youkong
+# 应该显示 Active: active (running)
+
+# 9. 验证 API 可用（必须）
+curl http://localhost:8080/health
+# 应该返回 JSON 响应
+
+# 10. 查看日志确认无错误
+sudo journalctl -u youkong -n 50 --no-pager
+```
+
+**如果服务启动失败，排查步骤**：
+
+```bash
+# 1. 查看详细错误
+sudo journalctl -u youkong -n 100 --no-pager
+
+# 2. 检查文件类型
+file /opt/youkong/server
+
+# 3. 检查依赖服务
+sudo systemctl status mysql
+sudo systemctl status redis
+
+# 4. 手动运行查看错误
+cd /opt/youkong && ./server
+
+# 5. 如果新版本有问题，回滚到备份
+cp /opt/youkong/server.bak /opt/youkong/server
+sudo systemctl start youkong
 ```
 
 ### 部署常见问题
@@ -556,6 +618,9 @@ tar -xzf backend.tar.gz && chmod +x server && systemctl restart youkong
 | 代理连接失败 | 代理不稳定 | 换其他代理：gh-proxy.com、ghproxy.link |
 | 数据库表不存在 | 迁移未执行 | 手动执行 SQL（见下方） |
 | 接口返回数据缺少字段 | 代码未更新或配置缺失 | 检查 release 版本和 .env 配置 |
+| 服务启动后立即退出 | 配置错误或依赖服务未启动 | 查看 journalctl 日志，检查 MySQL/Redis |
+| 覆盖运行中的二进制导致崩溃 | 没有先停止服务 | **必须先 systemctl stop youkong** |
+| 端口被占用 | 旧进程未完全退出 | `sudo lsof -i:8080` 查看并 kill |
 
 ### 数据库迁移（手动）
 
