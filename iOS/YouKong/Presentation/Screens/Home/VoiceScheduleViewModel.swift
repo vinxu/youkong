@@ -6,6 +6,8 @@ enum VoiceScheduleState: Equatable {
     case idle                           // 空闲（可以录音）
     case recording                      // 录音中
     case processing                     // 处理中（识别+分析）
+    case discussing                     // 讨论中（多阶段对话）
+    case awaitingApproval               // 等待审批
     case confirming                     // 确认中
     case completed                      // 完成
     case error(String)                  // 错误
@@ -15,6 +17,8 @@ enum VoiceScheduleState: Equatable {
         case (.idle, .idle),
              (.recording, .recording),
              (.processing, .processing),
+             (.discussing, .discussing),
+             (.awaitingApproval, .awaitingApproval),
              (.confirming, .confirming),
              (.completed, .completed):
             return true
@@ -56,6 +60,13 @@ class VoiceScheduleViewModel: ObservableObject {
     @Published var selectedVisibility: ScheduleVisibility = .allFriends
     @Published var selectedCircleIDs: Set<String> = []
     @Published var availableCircles: [CircleInfoCompact] = []
+
+    // ========== 多阶段对话状态机（新增）==========
+    @Published var currentPhase: ConversationPhase = .understanding
+    @Published var intentSummary: IntentSummary?
+    @Published var draftPlan: DraftPlan?
+    @Published var clarifications: [ClarificationItem] = []
+    @Published var canApprove: Bool = false
 
     /// 过程反馈条目
     struct ProgressItem: Identifiable {
@@ -119,10 +130,16 @@ class VoiceScheduleViewModel: ObservableObject {
         await recorder.requestPermission()
     }
 
+    /// 预热音频会话（在界面显示时调用）
+    func prepareAudioSession() {
+        recorder.prepareAudioSession()
+    }
+
     // MARK: - Recording
 
     func startRecording() {
         // 允许在非 processing/confirming 状态下录音
+        // 新增：在 awaitingApproval 状态下也允许录音（用户可以说"确定"或"修改"）
         guard state != .processing && state != .confirming else {
             return
         }
@@ -171,15 +188,20 @@ class VoiceScheduleViewModel: ObservableObject {
         state = .processing
         processingStatus = "上传中..."
 
+        // 清空上一轮的进度项，避免累积
+        progressItems = []
+
         do {
+            // 传递 sessionId 以恢复多轮对话上下文（如目标日期）
             let newSessionId = try await sseClient.streamVoiceSchedule(
                 audioData: audioData,
+                sessionId: sessionId,  // 传递已有的 sessionId
                 onEvent: { [weak self] event in
                     self?.handleEvent(event)
                 }
             )
 
-            // 保存 session ID
+            // 保存/更新 session ID
             if let sid = newSessionId {
                 sessionId = sid
             }
@@ -235,7 +257,8 @@ class VoiceScheduleViewModel: ObservableObject {
             if let items = event.items {
                 schedule = items
                 reasoning = event.reasoning ?? []
-                addMessage(.aiSchedule, content: "已生成时刻表", schedule: items, reasoning: event.reasoning)
+                let isQueryMode = event.isQuery ?? false
+                addMessage(.aiSchedule, content: isQueryMode ? "当前时刻表" : "已生成时刻表", schedule: items, reasoning: event.reasoning, isQuery: isQueryMode)
             }
             progressItems = []  // 清除进度
             state = .idle  // 回到可录音状态，用户可以继续修改
@@ -280,6 +303,13 @@ class VoiceScheduleViewModel: ObservableObject {
                 availableCircles = circles
             }
 
+        case .chat:
+            // 聊天回复（非时刻表操作）
+            let message = event.message ?? "我在这里，有什么可以帮你的？"
+            addMessage(.aiText, content: message)
+            progressItems = []  // 清除进度
+            state = .idle  // 保持可对话状态
+
         case .confirmed:
             addMessage(.system, content: "✓ 已保存！状态将按时刻表自动更新")
             state = .completed
@@ -289,6 +319,84 @@ class VoiceScheduleViewModel: ObservableObject {
             addMessage(.system, content: "错误: \(msg)")
             state = .idle
             progressItems = []
+
+        // ========== 多阶段对话状态机事件处理（新增）==========
+        case .phaseChange:
+            // 阶段转换
+            if let phase = event.phase {
+                currentPhase = phase
+                processingStatus = event.message ?? "阶段: \(phase.rawValue)"
+                print("[VoiceSchedule] 阶段变更: \(event.previousPhase?.rawValue ?? "nil") -> \(phase.rawValue)")
+            }
+
+        case .intentSummary:
+            // 意图理解结果
+            if let summary = event.intentSummary {
+                intentSummary = summary
+                let activities = summary.activities?.joined(separator: "、") ?? ""
+                let message = event.message ?? "理解到：\(activities)"
+                addMessage(.aiText, content: message)
+                if let reasoning = summary.reasoning, !reasoning.isEmpty {
+                    self.reasoning = reasoning
+                }
+            }
+
+        case .discussion:
+            // 讨论消息
+            let message = event.message ?? "需要确认一些信息"
+            if let clarifications = event.clarifications {
+                self.clarifications = clarifications
+                // 转换为旧格式的问题
+                let questions = clarifications.filter { !($0.answered ?? false) }.map { item in
+                    ClarifyQuestion(id: item.id, question: item.question, options: [], allowVoice: true)
+                }
+                if !questions.isEmpty {
+                    addMessage(.aiQuestion, content: message, questions: questions)
+                } else {
+                    addMessage(.aiText, content: message)
+                }
+            } else {
+                addMessage(.aiText, content: message)
+            }
+            state = .discussing
+
+        case .draftPlan:
+            // 计划草案（待审批）
+            if let plan = event.draftPlan {
+                draftPlan = plan
+                if let scheduleItems = plan.schedule {
+                    schedule = scheduleItems
+                }
+                if let planReasoning = plan.reasoning {
+                    reasoning = planReasoning
+                }
+                let summary = plan.summary ?? "已生成时刻表"
+                addMessage(.aiSchedule, content: summary, schedule: plan.schedule, reasoning: plan.reasoning, isQuery: false)
+
+                // 显示变更列表
+                if let changes = plan.changes, !changes.isEmpty {
+                    var changesText = "变更：\n"
+                    for change in changes {
+                        let typeEmoji = change.type == "add" ? "➕" : (change.type == "delete" ? "➖" : "✏️")
+                        changesText += "\(typeEmoji) \(change.description) (\(change.timeRange))\n"
+                    }
+                    addMessage(.system, content: changesText)
+                }
+            }
+            canApprove = event.canApprove ?? true
+            state = .awaitingApproval
+
+        case .approvalPrompt:
+            // 审批提示
+            let message = event.message ?? "确认后将保存时刻表"
+            canApprove = event.canApprove ?? true
+            if let plan = event.draftPlan, let scheduleItems = plan.schedule {
+                schedule = scheduleItems
+                addMessage(.aiSchedule, content: message, schedule: scheduleItems, reasoning: nil, isQuery: false)
+            } else if !schedule.isEmpty {
+                addMessage(.system, content: message)
+            }
+            state = .awaitingApproval
 
         case .none:
             break
@@ -457,6 +565,13 @@ class VoiceScheduleViewModel: ObservableObject {
         showVisibilitySelection = false
         selectedVisibility = .allFriends
         selectedCircleIDs = []
+
+        // 多阶段对话状态机重置
+        currentPhase = .understanding
+        intentSummary = nil
+        draftPlan = nil
+        clarifications = []
+        canApprove = false
     }
 
     // MARK: - Helper
@@ -466,9 +581,10 @@ class VoiceScheduleViewModel: ObservableObject {
         content: String,
         schedule: [ScheduleItem]? = nil,
         questions: [ClarifyQuestion]? = nil,
-        reasoning: [String]? = nil
+        reasoning: [String]? = nil,
+        isQuery: Bool = false
     ) {
-        let message = ChatMessage(
+        var message = ChatMessage(
             type: type,
             content: content,
             timestamp: Date(),
@@ -476,6 +592,7 @@ class VoiceScheduleViewModel: ObservableObject {
             questions: questions,
             reasoning: reasoning
         )
+        message.isQuery = isQuery
         messages.append(message)
     }
 }

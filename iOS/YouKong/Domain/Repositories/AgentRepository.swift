@@ -20,6 +20,9 @@ protocol AgentRepositoryProtocol {
 
     /// 获取宫格数据（所有好友的实时状态）
     func getGridData() async throws -> GridResponse
+
+    /// 获取我的状态时刻表历史（分页）
+    func getMyScheduleHistory(limit: Int, beforeDate: String?) async throws -> MyScheduleHistoryResponse
 }
 
 // MARK: - Status Report Request (按 API 规范分组)
@@ -297,10 +300,90 @@ enum VoiceScheduleEventType: String, Codable {
     case clarify
     case schedule
     case currentStatus = "current_status"
+    case chat               // 聊天回复（非时刻表操作）
     case visibilityPrompt = "visibility_prompt"  // 可见性选择
     case circleList = "circle_list"              // 圈子列表
     case confirmed
     case error
+
+    // ========== 多阶段对话状态机事件（新增）==========
+    case phaseChange = "phase_change"        // 阶段转换
+    case intentSummary = "intent_summary"    // 意图理解结果
+    case discussion = "discussion"           // 讨论消息
+    case draftPlan = "draft_plan"            // 计划草案（待审批）
+    case approvalPrompt = "approval_prompt"  // 审批提示
+}
+
+/// 对话阶段
+enum ConversationPhase: String, Codable {
+    case understanding = "understanding"  // 理解意图
+    case discussing = "discussing"        // 讨论确认
+    case planning = "planning"            // 生成计划
+    case approval = "approval"            // 等待审批
+    case execution = "execution"          // 执行保存
+    case completed = "completed"          // 完成
+    case idle = "idle"                    // 聊天/非时刻表
+}
+
+/// 意图摘要
+struct IntentSummary: Codable {
+    let action: String?
+    let targetDate: String?
+    let activities: [String]?
+    let timeReferences: [String]?
+    let hasAmbiguity: Bool?
+    let ambiguityReasons: [String]?
+    let confidence: Double?
+    let reasoning: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case action
+        case targetDate = "target_date"
+        case activities
+        case timeReferences = "time_references"
+        case hasAmbiguity = "has_ambiguity"
+        case ambiguityReasons = "ambiguity_reasons"
+        case confidence
+        case reasoning
+    }
+}
+
+/// 计划草案
+struct DraftPlan: Codable {
+    let schedule: [ScheduleItem]?
+    let summary: String?
+    let changes: [PlanChange]?
+    let reasoning: [String]?
+    let version: Int?
+    let createdAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case schedule, summary, changes, reasoning, version
+        case createdAt = "created_at"
+    }
+}
+
+/// 计划变更条目
+struct PlanChange: Codable, Identifiable {
+    var id: String { timeRange + type }
+    let type: String       // add/modify/delete
+    let timeRange: String  // "14:00-16:00"
+    let description: String
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case timeRange = "time_range"
+        case description
+    }
+}
+
+/// 待澄清项
+struct ClarificationItem: Codable, Identifiable {
+    let id: String
+    let question: String
+    let reason: String?
+    let answered: Bool?
+    let answer: String?
 }
 
 /// 语音时刻表 SSE 事件
@@ -328,6 +411,17 @@ struct VoiceScheduleEvent: Codable {
     let visibility: String?    // 默认可见性
     let circles: [CircleInfoCompact]?  // 圈子列表
 
+    // 查询模式标识（查询已有时刻表时为 true，不显示确认按钮）
+    let isQuery: Bool?
+
+    // ========== 多阶段对话状态机字段（新增）==========
+    let phase: ConversationPhase?           // 当前阶段
+    let previousPhase: ConversationPhase?   // 上一阶段
+    let intentSummary: IntentSummary?       // 意图摘要
+    let draftPlan: DraftPlan?               // 计划草案
+    let clarifications: [ClarificationItem]? // 待澄清项
+    let canApprove: Bool?                   // 是否可以审批
+
     enum CodingKeys: String, CodingKey {
         case type
         case sessionId = "session_id"
@@ -345,6 +439,13 @@ struct VoiceScheduleEvent: Codable {
         case reasoning
         case visibility
         case circles
+        case isQuery = "is_query"
+        case phase
+        case previousPhase = "previous_phase"
+        case intentSummary = "intent_summary"
+        case draftPlan = "draft_plan"
+        case clarifications
+        case canApprove = "can_approve"
     }
 }
 
@@ -442,5 +543,99 @@ struct VoiceScheduleInteractionData: Encodable {
         self.text = text
         self.visibility = visibility
         self.circleIds = circleIds
+    }
+}
+
+// MARK: - 我的状态时刻表历史
+
+/// 我的时刻表历史响应
+struct MyScheduleHistoryResponse: Codable {
+    let schedules: [DaySchedule]
+    let hasMore: Bool
+    let oldestDate: String?
+
+    enum CodingKeys: String, CodingKey {
+        case schedules
+        case hasMore = "has_more"
+        case oldestDate = "oldest_date"
+    }
+}
+
+/// 按日期分组的时刻表
+struct DaySchedule: Codable, Identifiable {
+    let scheduleDate: String
+    let items: [ScheduleItem]
+    let status: String
+
+    var id: String { scheduleDate }
+
+    enum CodingKeys: String, CodingKey {
+        case scheduleDate = "schedule_date"
+        case items
+        case status
+    }
+
+    /// 获取显示用的日期文本
+    var displayDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let date = formatter.date(from: scheduleDate) else {
+            return scheduleDate
+        }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let scheduleDay = calendar.startOfDay(for: date)
+
+        let daysDifference = calendar.dateComponents([.day], from: scheduleDay, to: today).day ?? 0
+
+        switch daysDifference {
+        case 0:
+            return "今天"
+        case 1:
+            return "昨天"
+        case -1:
+            return "明天"
+        case -2:
+            return "后天"
+        default:
+            let displayFormatter = DateFormatter()
+            displayFormatter.dateFormat = "M月d日"
+            return displayFormatter.string(from: date)
+        }
+    }
+
+    /// 是否为今天或未来的时刻表
+    var isCurrentOrFuture: Bool {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let date = formatter.date(from: scheduleDate) else {
+            return false
+        }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let scheduleDay = calendar.startOfDay(for: date)
+
+        return scheduleDay >= today
+    }
+}
+
+/// 时刻表分组（用于 UI 展示）
+struct ScheduleGroup: Identifiable {
+    let date: String
+    let displayDate: String
+    let items: [ScheduleItem]
+    let status: String
+    let isCurrentOrFuture: Bool
+
+    var id: String { date }
+
+    init(from daySchedule: DaySchedule) {
+        self.date = daySchedule.scheduleDate
+        self.displayDate = daySchedule.displayDate
+        self.items = daySchedule.items
+        self.status = daySchedule.status
+        self.isCurrentOrFuture = daySchedule.isCurrentOrFuture
     }
 }

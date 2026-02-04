@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,19 +64,50 @@ func NewVoiceScheduleService(
 func (s *VoiceScheduleService) ProcessVoiceInput(
 	ctx context.Context,
 	userID string,
+	sessionID string, // 可选，如果提供则尝试恢复会话
 	audioData []byte,
 	audioFormat string,
 	callback func(event *model.VoiceScheduleEvent),
 ) (*model.VoiceScheduleSession, error) {
-	// 1. 创建会话
-	sessionID := uuid.New().String()
-	session := &model.VoiceScheduleSession{
-		UserID:              userID,
-		SessionID:           sessionID,
-		State:               "initial",
-		TranscriptHistory:   []string{},
-		ConversationHistory: []model.ConversationTurn{},
-		CreatedAt:           time.Now(),
+	var session *model.VoiceScheduleSession
+	var isNewSession bool
+
+	// 1. 如果提供了 sessionID，尝试恢复现有会话
+	if sessionID != "" {
+		existingSession, err := s.getSession(ctx, sessionID)
+		if err == nil && existingSession != nil && existingSession.UserID == userID {
+			session = existingSession
+			isNewSession = false
+			fmt.Printf("[VoiceSchedule] 恢复现有会话: %s, TargetDate=%s\n", sessionID, session.TargetDate.Format("2006-01-02"))
+		}
+	}
+
+	// 2. 如果没有现有会话，创建新会话
+	if session == nil {
+		sessionID = uuid.New().String()
+		session = &model.VoiceScheduleSession{
+			UserID:              userID,
+			SessionID:           sessionID,
+			State:               "initial",
+			TranscriptHistory:   []string{},
+			ConversationHistory: []model.ConversationTurn{},
+			CreatedAt:           time.Now(),
+		}
+		isNewSession = true
+	}
+
+	// 1.1 加载用户当前的活跃时刻表（关键：修改时需要知道已有的行程）
+	// 注意：如果 session 有 TargetDate，加载那个日期的时刻表；否则加载今天的
+	scheduleDate := time.Now()
+	if !session.TargetDate.IsZero() {
+		scheduleDate = session.TargetDate
+	}
+	existingSchedule, loadErr := s.scheduleRepo.GetActiveByUserAndDate(ctx, userID, scheduleDate)
+	if loadErr == nil && existingSchedule != nil && len(existingSchedule.Items) > 0 {
+		session.CurrentSchedule = existingSchedule.Items
+		fmt.Printf("[VoiceSchedule] 加载用户已有时刻表: %d 个时段 (日期: %s)\n", len(existingSchedule.Items), scheduleDate.Format("2006-01-02"))
+	} else if isNewSession {
+		fmt.Println("[VoiceSchedule] 用户无已有时刻表")
 	}
 
 	// 发送会话开始事件
@@ -83,21 +116,33 @@ func (s *VoiceScheduleService) ProcessVoiceInput(
 		SessionID: sessionID,
 	})
 
-	// 2. 语音识别
+	// 2. 语音识别（带超时处理）
 	s.sendProgress(callback, model.ProgressRecognizing, "正在识别语音...")
 
 	var transcript string
 	var err error
 
+	// ASR 超时设置：30秒
+	asrCtx, asrCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer asrCancel()
+
 	if s.asrClient != nil && s.asrClient.IsConfigured() {
 		// 获取 Token
-		token, tokenErr := s.asrClient.GetToken(ctx)
+		token, tokenErr := s.asrClient.GetToken(asrCtx)
 		if tokenErr != nil {
 			fmt.Printf("[VoiceSchedule] 获取 ASR Token 失败: %v, 使用模拟识别\n", tokenErr)
 			transcript = s.mockASR(audioData)
 		} else {
-			transcript, err = s.asrClient.RecognizeSpeechWithToken(ctx, audioData, audioFormat, token)
+			transcript, err = s.asrClient.RecognizeSpeechWithToken(asrCtx, audioData, audioFormat, token)
 			if err != nil {
+				if asrCtx.Err() == context.DeadlineExceeded {
+					fmt.Println("[VoiceSchedule] 语音识别超时（30秒），使用模拟识别")
+					callback(&model.VoiceScheduleEvent{
+						Type:    model.VSEventError,
+						Message: "语音识别超时，请重试",
+					})
+					return session, fmt.Errorf("ASR timeout")
+				}
 				fmt.Printf("[VoiceSchedule] 语音识别失败: %v, 使用模拟识别\n", err)
 				transcript = s.mockASR(audioData)
 			}
@@ -163,6 +208,93 @@ func (s *VoiceScheduleService) ProcessVoiceInput(
 	// 6. 保存会话到 Redis
 	if err := s.saveSession(ctx, session); err != nil {
 		fmt.Printf("[VoiceSchedule] 保存会话失败: %v\n", err)
+	}
+
+	return session, nil
+}
+
+// ProcessTextInput 处理文本输入（测试用，跳过语音识别）
+func (s *VoiceScheduleService) ProcessTextInput(
+	ctx context.Context,
+	userID string,
+	sessionID string,
+	text string,
+	callback func(event *model.VoiceScheduleEvent),
+) (*model.VoiceScheduleSession, error) {
+	var session *model.VoiceScheduleSession
+	var isNewSession bool
+
+	// 如果提供了 sessionID，尝试获取现有会话
+	if sessionID != "" {
+		existingSession, err := s.getSession(ctx, sessionID)
+		if err == nil && existingSession != nil && existingSession.UserID == userID {
+			session = existingSession
+			isNewSession = false
+		}
+	}
+
+	// 如果没有现有会话，创建新会话
+	if session == nil {
+		sessionID = uuid.New().String()
+		session = &model.VoiceScheduleSession{
+			UserID:              userID,
+			SessionID:           sessionID,
+			State:               "initial",
+			TranscriptHistory:   []string{},
+			ConversationHistory: []model.ConversationTurn{},
+			CreatedAt:           time.Now(),
+		}
+		isNewSession = true
+
+		// 加载用户当前的活跃时刻表（关键：修改时需要知道已有的行程）
+		existingSchedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, userID, time.Now())
+		if err == nil && existingSchedule != nil && len(existingSchedule.Items) > 0 {
+			session.CurrentSchedule = existingSchedule.Items
+			fmt.Printf("[VoiceSchedule] 加载用户已有时刻表: %d 个时段\n", len(existingSchedule.Items))
+		}
+
+		// 发送会话开始事件
+		callback(&model.VoiceScheduleEvent{
+			Type:      model.VSEventSessionStart,
+			SessionID: sessionID,
+		})
+	}
+
+	// 发送识别结果（直接使用文本）
+	callback(&model.VoiceScheduleEvent{
+		Type: model.VSEventTranscript,
+		Text: text,
+	})
+
+	session.TranscriptHistory = append(session.TranscriptHistory, text)
+	s.addConversationTurn(session, "user", text)
+
+	// 加载用户上下文（仅新会话需要）
+	if isNewSession {
+		s.sendProgress(callback, model.ProgressLoadingContext, "正在了解你的情况...")
+		userCtx := s.BuildUserContext(ctx, userID)
+		compressedCtx := s.CompressUserContext(ctx, userCtx)
+		session.UserContext = compressedCtx
+	}
+
+	// LLM 分析
+	s.sendProgress(callback, model.ProgressAnalyzing, "分析你的意图...")
+
+	result, err := s.analyzeWithLLMAndContext(ctx, userID, text, session, session.UserContext)
+	if err != nil {
+		callback(&model.VoiceScheduleEvent{
+			Type:    model.VSEventError,
+			Message: "分析失败: " + err.Error(),
+		})
+		return nil, err
+	}
+
+	// 处理 LLM 结果
+	s.handleLLMResult(ctx, session, result, callback)
+
+	// 保存会话
+	if err := s.saveSession(ctx, session); err != nil {
+		fmt.Printf("[VoiceScheduleText] 保存会话失败: %v\n", err)
 	}
 
 	return session, nil
@@ -244,7 +376,9 @@ func (s *VoiceScheduleService) handleAnswerAction(
 		answerText.WriteString(" ")
 	}
 
-	session.TranscriptHistory = append(session.TranscriptHistory, "回答: "+answerText.String())
+	answerStr := strings.TrimSpace(answerText.String())
+	session.TranscriptHistory = append(session.TranscriptHistory, "回答: "+answerStr)
+	s.addConversationTurn(session, "user", answerStr)
 
 	// 重新分析
 	callback(&model.VoiceScheduleEvent{
@@ -252,9 +386,8 @@ func (s *VoiceScheduleService) handleAnswerAction(
 		Status: "AI 正在重新分析...",
 	})
 
-	// 构建完整上下文
-	fullTranscript := strings.Join(session.TranscriptHistory, "\n")
-	result, err := s.analyzeWithLLM(ctx, session.UserID, fullTranscript, session)
+	// 使用增强版分析（带完整上下文）
+	result, err := s.analyzeWithLLMAndContext(ctx, session.UserID, answerStr, session, session.UserContext)
 	if err != nil {
 		callback(&model.VoiceScheduleEvent{
 			Type:    model.VSEventError,
@@ -300,6 +433,7 @@ func (s *VoiceScheduleService) handleVoiceAction(
 	})
 
 	session.TranscriptHistory = append(session.TranscriptHistory, transcript)
+	s.addConversationTurn(session, "user", transcript)
 
 	// 重新分析
 	callback(&model.VoiceScheduleEvent{
@@ -307,8 +441,8 @@ func (s *VoiceScheduleService) handleVoiceAction(
 		Status: "AI 正在分析...",
 	})
 
-	fullTranscript := strings.Join(session.TranscriptHistory, "\n")
-	result, err := s.analyzeWithLLM(ctx, session.UserID, fullTranscript, session)
+	// 使用增强版分析（带完整上下文和时间推理规则）
+	result, err := s.analyzeWithLLMAndContext(ctx, session.UserID, transcript, session, session.UserContext)
 	if err != nil {
 		callback(&model.VoiceScheduleEvent{
 			Type:    model.VSEventError,
@@ -336,9 +470,16 @@ func (s *VoiceScheduleService) handleConfirmAction(
 			visibility = model.VisibilityAllFriends
 		}
 
+		// 确定时刻表日期（支持明天、后天等）
+		scheduleDate := time.Now()
+		if !session.TargetDate.IsZero() {
+			scheduleDate = session.TargetDate
+			fmt.Printf("[VoiceSchedule] 保存到指定日期: %s\n", scheduleDate.Format("2006-01-02"))
+		}
+
 		schedule := &model.StatusSchedule{
 			UserID:       session.UserID,
-			ScheduleDate: time.Now(),
+			ScheduleDate: scheduleDate,
 			Items:        session.CurrentSchedule,
 			CurrentIndex: 0,
 			Status:       model.ScheduleStatusActive,
@@ -346,8 +487,8 @@ func (s *VoiceScheduleService) handleConfirmAction(
 			CircleIDs:    session.CircleIDs,
 		}
 
-		// 先取消用户之前的活跃时刻表
-		_ = s.scheduleRepo.CancelUserActiveSchedules(ctx, session.UserID)
+		// 先取消用户该日期的活跃时刻表（而不是所有时刻表）
+		_ = s.scheduleRepo.CancelUserSchedulesByDate(ctx, session.UserID, scheduleDate)
 
 		// 创建新时刻表
 		if err := s.scheduleRepo.Create(ctx, schedule); err != nil {
@@ -360,6 +501,26 @@ func (s *VoiceScheduleService) handleConfirmAction(
 
 		// 保存到状态记忆
 		s.saveToMemory(ctx, session)
+
+		// 格式化日期描述
+		dateDesc := "今天"
+		today := time.Now().Truncate(24 * time.Hour)
+		if scheduleDate.Truncate(24*time.Hour).Equal(today.AddDate(0, 0, 1)) {
+			dateDesc = "明天"
+		} else if scheduleDate.Truncate(24*time.Hour).Equal(today.AddDate(0, 0, 2)) {
+			dateDesc = "后天"
+		} else if !scheduleDate.Truncate(24*time.Hour).Equal(today) {
+			dateDesc = scheduleDate.Format("1月2日")
+		}
+
+		callback(&model.VoiceScheduleEvent{
+			Type:    model.VSEventConfirmed,
+			Message: fmt.Sprintf("%s的时刻表已保存", dateDesc),
+		})
+
+		// 删除会话
+		s.deleteSession(ctx, session.SessionID)
+		return nil
 	} else if session.CurrentStatusGuess != nil {
 		// 保存当前状态猜测到记忆
 		s.saveStatusGuessToMemory(ctx, session)
@@ -450,26 +611,64 @@ func (s *VoiceScheduleService) analyzeWithLLMAndContext(
 		return nil, fmt.Errorf("LLM client not configured")
 	}
 
+	// 如果 compressedCtx 为空，尝试从 session 获取
+	if compressedCtx == nil {
+		compressedCtx = session.UserContext
+	}
+	// 如果还是空，创建一个空的
+	if compressedCtx == nil {
+		compressedCtx = &model.CompressedUserContext{}
+	}
+
 	// 自适应思考模式：判断是否需要深度思考
 	needThinking := s.shouldUseThinking(transcript, compressedCtx, session)
 
-	// 构建 Plan Mode 风格的 Prompt
-	prompt := s.buildPlanModePrompt(transcript, compressedCtx, session)
-
-	var response string
-	var err error
-
+	// 构建 Prompt
+	var prompt string
 	if needThinking {
-		// 复杂场景：使用思考模式（如果 LLM 支持）
-		response, err = s.llmClient.Chat(ctx, prompt)
+		// 复杂场景：添加额外的推理指令
+		prompt = s.buildPlanModePrompt(transcript, compressedCtx, session)
+		prompt = s.addDeepThinkingInstructions(prompt, transcript, session)
 	} else {
-		// 简单场景：快速响应
-		response, err = s.llmClient.Chat(ctx, prompt)
+		// 简单场景：标准 prompt
+		prompt = s.buildPlanModePrompt(transcript, compressedCtx, session)
 	}
 
+	// LLM 超时设置：思考模式180秒，非思考模式60秒
+	var llmTimeout time.Duration
+	if needThinking {
+		llmTimeout = 180 * time.Second // 思考模式：3分钟
+		fmt.Println("[VoiceSchedule] 使用深度思考模式，超时180秒")
+	} else {
+		llmTimeout = 60 * time.Second // 普通模式：1分钟
+	}
+	llmCtx, llmCancel := context.WithTimeout(ctx, llmTimeout)
+	defer llmCancel()
+
+	// 使用 JSON Object 模式，确保输出有效 JSON
+	// 注意：qwen-max 支持 JSON Object 模式
+	messages := []llm.ChatMessage{
+		{Role: "user", Content: prompt},
+	}
+	response, err := s.llmClient.ChatWithOptions(llmCtx, messages, &llm.ChatOptions{
+		EnableJSONMode: true, // 启用 JSON Object 模式
+		Temperature:    0.7,  // 略低的温度，提高结构化输出的稳定性
+	})
 	if err != nil {
+		if llmCtx.Err() == context.DeadlineExceeded {
+			fmt.Printf("[VoiceSchedule] LLM 调用超时（%v）\n", llmTimeout)
+			return nil, fmt.Errorf("LLM timeout: 分析超时，请重试")
+		}
+		fmt.Printf("[VoiceSchedule] LLM 调用失败: %v\n", err)
 		return nil, fmt.Errorf("LLM call failed: %w", err)
 	}
+
+	// 打印 LLM 响应（截断到 500 字符）
+	responsePreview := response
+	if len(responsePreview) > 500 {
+		responsePreview = responsePreview[:500] + "..."
+	}
+	fmt.Printf("[VoiceSchedule] LLM 响应: %s\n", responsePreview)
 
 	// 解析 JSON 响应
 	result, err := s.parseLLMResponse(response)
@@ -477,10 +676,64 @@ func (s *VoiceScheduleService) analyzeWithLLMAndContext(
 		return nil, err
 	}
 
+	// 打印解析结果
+	fmt.Printf("[VoiceSchedule] 解析结果: action=%s, schedule=%d项, message=%s\n",
+		result.Action, len(result.Schedule), truncateStr(result.Message, 50))
+
 	// 标记是否使用了深度思考
 	result.NeedThinking = needThinking
 
 	return result, nil
+}
+
+// addDeepThinkingInstructions 为复杂场景添加深度思考指令
+func (s *VoiceScheduleService) addDeepThinkingInstructions(basePrompt, transcript string, session *model.VoiceScheduleSession) string {
+	// 分析用户输入的复杂性
+	instructions := []string{}
+
+	// 检测睡眠相关
+	sleepWords := []string{"睡觉", "睡眠", "入睡", "睡"}
+	for _, word := range sleepWords {
+		if strings.Contains(transcript, word) {
+			instructions = append(instructions, "【深度分析-睡眠】用户提到睡眠，请推理睡眠结束时间（参考时间推理规则）")
+			break
+		}
+	}
+
+	// 检测修改意图
+	modifyWords := []string{"改", "换成", "改成", "变成", "调整", "修改"}
+	if len(session.CurrentSchedule) > 0 {
+		for _, word := range modifyWords {
+			if strings.Contains(transcript, word) {
+				instructions = append(instructions, fmt.Sprintf("【深度分析-修改】用户要修改已有时刻表，当前有%d个时段，请保留未被修改的时段", len(session.CurrentSchedule)))
+				break
+			}
+		}
+	}
+
+	// 检测时间模糊
+	fuzzyWords := []string{"待会", "一会", "稍后", "晚点", "大概", "左右"}
+	for _, word := range fuzzyWords {
+		if strings.Contains(transcript, word) {
+			instructions = append(instructions, "【深度分析-时间】用户使用模糊时间表达，请根据当前时间和上下文推断具体时间")
+			break
+		}
+	}
+
+	// 检测连续活动
+	sequenceWords := []string{"然后", "接着", "之后", "完了", "完"}
+	for _, word := range sequenceWords {
+		if strings.Contains(transcript, word) {
+			instructions = append(instructions, "【深度分析-衔接】用户描述连续活动，请确保时间衔接正确")
+			break
+		}
+	}
+
+	if len(instructions) == 0 {
+		return basePrompt
+	}
+
+	return basePrompt + "\n\n## 深度分析要求\n" + strings.Join(instructions, "\n")
 }
 
 // shouldUseThinking 判断是否需要深度思考
@@ -490,7 +743,15 @@ func (s *VoiceScheduleService) shouldUseThinking(
 	compressedCtx *model.CompressedUserContext,
 	session *model.VoiceScheduleSession,
 ) bool {
-	// 1. 时间模糊词检测
+	// 1. 睡眠相关（需要推理结束时间）
+	sleepWords := []string{"睡觉", "睡眠", "入睡", "睡了", "睡"}
+	for _, word := range sleepWords {
+		if strings.Contains(transcript, word) {
+			return true
+		}
+	}
+
+	// 2. 时间模糊词检测
 	fuzzyTimeWords := []string{"待会儿", "待会", "一会儿", "一会", "过会儿", "过会",
 		"稍后", "晚点", "早点", "差不多", "大概", "左右"}
 	for _, word := range fuzzyTimeWords {
@@ -499,7 +760,7 @@ func (s *VoiceScheduleService) shouldUseThinking(
 		}
 	}
 
-	// 2. 需要推理的词检测（依赖关系）
+	// 3. 需要推理的词检测（依赖关系）
 	inferenceWords := []string{"完了", "之后", "然后", "接着", "完", "后"}
 	for _, word := range inferenceWords {
 		if strings.Contains(transcript, word) {
@@ -508,18 +769,25 @@ func (s *VoiceScheduleService) shouldUseThinking(
 		}
 	}
 
-	// 3. 检查是否有已有行程（可能有冲突）
+	// 4. 修改相关词汇（需要保留上下文）
+	modifyWords := []string{"改", "换成", "改成", "变成", "调整", "修改", "删掉", "去掉", "不要"}
+	for _, word := range modifyWords {
+		if strings.Contains(transcript, word) {
+			return true
+		}
+	}
+
+	// 5. 检查是否有已有行程（可能有冲突或修改）
 	if len(session.CurrentSchedule) > 0 {
 		return true
 	}
 
-	// 4. 检查今日行程（可能有冲突）
+	// 6. 检查今日行程（可能有冲突）
 	if compressedCtx != nil && compressedCtx.TodayScheduleSummary != "" {
-		// 有已有行程，需要检查冲突
 		return true
 	}
 
-	// 5. 信息不完整检测（没有具体时间）
+	// 7. 信息不完整检测（没有具体时间）
 	hasConcreteTime := false
 	timePatterns := []string{"点", "时", "分", ":", "："}
 	for _, pattern := range timePatterns {
@@ -530,7 +798,7 @@ func (s *VoiceScheduleService) shouldUseThinking(
 	}
 
 	// 如果提到了行程但没有具体时间，需要深度思考
-	scheduleWords := []string{"开会", "吃饭", "午餐", "晚餐", "会议", "约", "见面", "去"}
+	scheduleWords := []string{"开会", "吃饭", "午餐", "晚餐", "会议", "约", "见面", "去", "健身", "运动", "看电影"}
 	hasScheduleIntent := false
 	for _, word := range scheduleWords {
 		if strings.Contains(transcript, word) {
@@ -542,20 +810,19 @@ func (s *VoiceScheduleService) shouldUseThinking(
 		return true
 	}
 
-	// 6. 简单明确的场景：不需要深度思考
-	// - "我在吃饭" - 当前状态
-	// - "下午2点到4点开会" - 时间明确
-	// - "取消下午的安排" - 意图明确
+	// 8. 简单明确的场景：不需要深度思考
+	// - "我在吃饭" - 当前状态描述
+	// - "取消" - 简单操作
 
-	simplePatterns := []string{"我在", "我正在", "现在", "取消"}
+	simplePatterns := []string{"我在", "我正在", "现在"}
 	for _, pattern := range simplePatterns {
 		if strings.HasPrefix(transcript, pattern) {
 			return false
 		}
 	}
 
-	// 默认：简单响应
-	return false
+	// 默认：如果有具体时间且没有复杂词汇，不需要深度思考
+	return !hasConcreteTime
 }
 
 // parseLLMResponse 解析 LLM 响应
@@ -617,7 +884,7 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
 		contextStr = "暂无上下文信息"
 	}
 
-	// 构建会话历史
+	// 构建会话历史（包含修改链摘要）
 	historyStr := ""
 	if len(session.ConversationHistory) > 1 {
 		historyParts := []string{}
@@ -625,78 +892,283 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
 			role := "用户"
 			if turn.Role == "assistant" {
 				role = "AI"
+			} else if turn.Role == "system" {
+				role = "系统"
 			}
 			historyParts = append(historyParts, fmt.Sprintf("%s: %s", role, turn.Content))
 		}
 		historyStr = fmt.Sprintf("\n## 对话历史\n%s\n", strings.Join(historyParts, "\n"))
 	}
 
-	// 构建当前时刻表上下文（如果有修改意图）
+	// 构建当前时刻表上下文（关键：修改时必须基于此）
 	scheduleContext := ""
 	if len(session.CurrentSchedule) > 0 {
 		scheduleLines := []string{}
 		for _, item := range session.CurrentSchedule {
-			scheduleLines = append(scheduleLines, fmt.Sprintf("- %s-%s %s %s", item.StartTime, item.EndTime, item.Emoji, item.Status))
+			executedMark := ""
+			if item.Executed {
+				executedMark = " [已执行]"
+			}
+			scheduleLines = append(scheduleLines, fmt.Sprintf("- %s-%s %s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status, executedMark))
 		}
-		scheduleContext = fmt.Sprintf("\n## 当前时刻表（用户可能在修改）\n%s\n", strings.Join(scheduleLines, "\n"))
+		scheduleContext = fmt.Sprintf("\n## 当前完整时刻表【修改/删除时必须基于此表】\n%s\n【注意】修改时保留未提及的时段；删除时移除指定时段\n", strings.Join(scheduleLines, "\n"))
+		fmt.Printf("[VoiceSchedule] 传递给LLM的时刻表:\n%s\n", scheduleContext)
+	} else {
+		fmt.Println("[VoiceSchedule] 用户无已有时刻表")
 	}
 
-	return fmt.Sprintf(`你是一个智能生活助手，帮助用户规划状态时刻表。你的工作方式类似于一个贴心的秘书：
-先理解用户的意图，结合上下文信息，然后给出建议。
+	// 计算明天的日期
+	tomorrow := now.AddDate(0, 0, 1)
+	dayAfterTomorrow := now.AddDate(0, 0, 2)
+
+	// 会话已确定的目标日期（用于多轮对话保持一致）
+	sessionTargetDateHint := ""
+	todayDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	if !session.TargetDate.IsZero() {
+		if session.TargetDate.Equal(todayDate.AddDate(0, 0, 1)) {
+			sessionTargetDateHint = fmt.Sprintf("\n\n## 【重要】当前会话已确定的目标日期\n本次对话正在讨论【明天 %s】的时刻表，除非用户明确说要改成其他日期，否则继续使用 target_date=\"%s\"\n", session.TargetDate.Format("2006-01-02"), session.TargetDate.Format("2006-01-02"))
+			fmt.Printf("[VoiceSchedule] 会话目标日期: 明天 (%s)\n", session.TargetDate.Format("2006-01-02"))
+		} else if session.TargetDate.Equal(todayDate.AddDate(0, 0, 2)) {
+			sessionTargetDateHint = fmt.Sprintf("\n\n## 【重要】当前会话已确定的目标日期\n本次对话正在讨论【后天 %s】的时刻表，除非用户明确说要改成其他日期，否则继续使用 target_date=\"%s\"\n", session.TargetDate.Format("2006-01-02"), session.TargetDate.Format("2006-01-02"))
+			fmt.Printf("[VoiceSchedule] 会话目标日期: 后天 (%s)\n", session.TargetDate.Format("2006-01-02"))
+		} else if !session.TargetDate.Equal(todayDate) {
+			sessionTargetDateHint = fmt.Sprintf("\n\n## 【重要】当前会话已确定的目标日期\n本次对话正在讨论【%s】的时刻表，除非用户明确说要改成其他日期，否则继续使用 target_date=\"%s\"\n", session.TargetDate.Format("1月2日"), session.TargetDate.Format("2006-01-02"))
+			fmt.Printf("[VoiceSchedule] 会话目标日期: %s\n", session.TargetDate.Format("2006-01-02"))
+		}
+	}
+
+	return fmt.Sprintf(`你是一个智能生活助手，帮助用户规划状态时刻表。你需要像一个聪明的秘书一样理解用户的真实意图，进行合理推理。
 
 ## 当前时间
-%s %02d:%02d
+%s %s %02d:%02d
+明天是 %s
+后天是 %s
 
 ## 用户上下文
 %s
 %s%s
-## 用户最新语音
+## 用户最新输入
 "%s"
 
-## 任务
-分析用户输入，返回 JSON 格式结果。
+## 日期识别规则【最重要】
 
-### 输出格式
+### 今日参考日期（直接复制使用）
+- **今天** = %s（%s）
+- **明天** = %s
+- **后天** = %s
 
-1. 如果可以生成时刻表：
+### 核心规则
+1. target_date 必须是 YYYY-MM-DD 格式
+2. 用户说"今天" → 直接使用 **%s**
+3. 用户说"明天" → 直接使用 **%s**
+4. 用户说"后天" → 直接使用 **%s**
+5. 用户说"今天晚上"/"今晚" → 使用 **%s**
+6. 用户没说日期 → 使用会话当前目标日期
+
+### 【极其重要】用户说"今天"时
+如果用户说了"今天"/"今晚"/"今天的"等词，**必须**返回 target_date="%s"，不要返回其他日期！
+
+### 日期切换规则
+- 用户说"今天" → target_date="%s"
+- 用户说"明天" → target_date="%s"
+- 即使会话已有目标日期，用户明确说了不同日期，也必须覆盖
+%s
+### 跨天时刻表
+- 用户说"明天的行程"时，返回的是明天整天的安排
+- "明天全天外出"意味着：明天从起床到某个时间都在外面
+- "明天晚上八点回来"意味着：明天20:00之前都在外面，20:00之后在家
+
+## 时间推理规则【必须严格遵守】
+
+### 1. 睡眠推理【核心规则】
+- "X点睡觉"/"X点入睡"表示【开始】睡觉的时间
+- **时间范围处理**：当用户说"A-B点睡觉"时，意思是"在A到B点之间入睡"
+  - 【必须】取范围的【结束时间B】作为入睡时间（取较晚的那个）
+  - 原因：用户表达的是入睡时间区间，取末尾更准确
+  - 示例：
+    - "1-2点睡觉" → start_time="02:00"（取范围末尾2点）
+    - "11-12点睡" → start_time="00:00"（12点=凌晨0点）
+    - "10点到11点睡觉" → start_time="23:00"（取11点）
+- 睡眠结束时间推断：
+  - 凌晨(0:00-4:00)入睡 → 睡到 09:00
+  - 深夜(22:00-24:00)入睡 → 睡到第二天 09:00
+- 完整示例：
+  - "1-2点睡觉" → {"start_time":"02:00","end_time":"09:00","emoji":"😴","status":"睡觉"}
+  - "12点睡" → {"start_time":"00:00","end_time":"09:00","emoji":"😴","status":"睡觉"}
+  - "晚上11点睡觉" → {"start_time":"23:00","end_time":"09:00","emoji":"😴","status":"睡觉"}
+
+### 2. 时间歧义处理
+- 基础规则：
+  - "1点-6点" → 凌晨（01:00-06:00）
+  - "7点-11点" → 早上（07:00-11:00）
+  - "12点" → 中午（12:00），除非上下文明确是凌晨
+  - "1点-5点"（下午语境）→ 下午（13:00-17:00）
+- 明确词汇：
+  - "下午X点"/"晚上X点" → 12小时制转24小时制
+  - "凌晨X点" → 00:00-06:00
+- **活动类型影响时间推断**【重要】：
+  - 健身/运动/跑步 → 通常是下午或晚上（6点=18:00，7点=19:00）
+  - 晚餐/晚饭/吃饭（无午餐标记）→ 通常是傍晚（6点=18:00，7点=19:00）
+  - 洗澡 → 通常是晚上（跟在健身后）
+  - 约会/看电影/聚餐 → 通常是晚上
+  - 示例："7点健身" → 19:00-20:30（不是07:00）
+  - 示例："6点吃饭" → 18:00-19:00（晚餐时间）
+
+### 3. 活动时长常识
+- 未指定结束时间时的默认时长：
+  - 会议/开会：2小时
+  - 午餐/晚餐/吃饭：1小时
+  - 健身/运动：1.5小时
+  - 午休/小憩：1小时
+  - 看电影：2.5小时
+  - 逛街/购物：2-3小时
+  - 外出/出门：如果说"全天"则从09:00到指定返回时间
+
+### 4. 修改时保留上下文【极其重要】
+- 用户修改某个时段时，【必须保留】其他未提及的时段
+- 例如：原有 [09:00-12:00 工作, 12:00-13:00 午餐, 14:00-18:00 工作]
+- 用户说"把下午改成开会"
+- 正确结果：[09:00-12:00 工作, 12:00-13:00 午餐, 14:00-18:00 开会]
+- 错误结果：[14:00-18:00 开会]（丢失了其他时段）
+
+### 5. 替换整个时刻表（"覆盖"/"重新安排"/"按新计划"）
+- 当用户说"覆盖掉"/"重新安排"/"按我新的计划"/"全部改成"时
+- 使用 action="replace"，表示完全替换旧时刻表
+- 示例：用户说"明天全天外出，晚上八点回来"
+  - 正确：{"action":"replace","target_date":"tomorrow","schedule":[{"start_time":"09:00","end_time":"20:00","emoji":"🚶","status":"外出"}]}
+
+### 6. 修正场景（"不对/错了/应该是"）
+- 当用户说"不对/错了/应该是X点"时，表示【完全替换】之前的时间
+- 不需要保留被替换的原时间段
+- 示例：
+  - 原有：14:00-16:00 开会
+  - 用户说："不对，是3点开会"
+  - 正确结果：15:00-17:00 开会（完全替换，不保留14-15点）
+
+### 7. 时间衔接
+- 连续活动自动衔接：
+  - "开完会去吃饭" → 会议结束时间 = 吃饭开始时间
+  - "然后"/"接着"/"之后" → 前一活动结束 = 后一活动开始
+
+## 输出格式（必须返回有效的 JSON 格式）
+
+1. 创建/修改时刻表（有具体行程信息时）：
 {
   "action": "create",
+  "target_date": "2026-02-04",
+  "date_reasoning": "用户没有提及具体日期，默认使用今天",
   "schedule": [
-    {"start_time": "12:00", "end_time": "13:00", "emoji": "🏨🍚", "status": "在酒店午餐"}
+    {"start_time": "09:00", "end_time": "12:00", "emoji": "💼", "status": "工作"},
+    {"start_time": "12:00", "end_time": "13:00", "emoji": "🍚", "status": "午餐"}
   ],
-  "reasoning": ["推理依据1", "推理依据2"]
+  "reasoning": ["推理过程1", "推理过程2"]
 }
 
-2. 如果需要修改已有时刻表：
+2. 替换整个时刻表（用户说"覆盖"/"重新"/"按新计划"）：
 {
-  "action": "modify",
-  "schedule": [更新后的完整时刻表],
-  "reasoning": ["修改原因"]
+  "action": "replace",
+  "target_date": "2026-02-05",
+  "date_reasoning": "用户说'明天'，今天是2026-02-04",
+  "schedule": [全新的时刻表],
+  "reasoning": ["用户要求完全替换原有时刻表"]
 }
 
-3. 如果需要澄清信息：
+3. 查询已有时刻表（"调出"/"查看"/"显示"某天的时刻表）：
+{
+  "action": "query",
+  "target_date": "2026-02-05",
+  "date_reasoning": "用户说'明天的行程'，今天是2026-02-04，所以是2026-02-05"
+}
+
+4. 需要澄清（信息确实不足时才问，能推理就不要问）：
 {
   "action": "clarify",
+  "target_date": "2026-02-04",
+  "date_reasoning": "默认今天",
   "questions": [
-    {"id": "q1", "question": "开会是几点开始？", "options": ["14:00", "15:00", "其他"], "allow_voice": true}
+    {"id": "q1", "question": "会议几点开始？", "options": ["14:00", "15:00", "其他"], "allow_voice": true}
   ]
 }
 
-4. 如果无行程信息，猜测当前状态：
+5. 描述当前状态（仅当用户明确说"我在..."/"我正在..."/"现在在..."时）：
 {
   "action": "guess",
-  "current_status": {"emoji": "🏠📱", "status": "在家刷手机"},
-  "reasoning": ["位置在家", "当前时间是休息时段"]
+  "target_date": "2026-02-04",
+  "date_reasoning": "当前状态默认今天",
+  "current_status": {"emoji": "🏠📱", "status": "在家休息"},
+  "reasoning": ["用户描述了当前状态"]
 }
+
+6. 删除已有行程（用户说"去掉..."/"删掉..."/"取消..."某个行程）：
+{
+  "action": "create",
+  "target_date": "2026-02-04",
+  "date_reasoning": "修改当前时刻表，使用今天日期",
+  "schedule": [保留的其他时段],
+  "reasoning": ["根据用户要求删除了XX时段，保留了其他时段"]
+}
+
+7. 聊天/闲聊/问答（用户不是在说行程，而是在聊天或问问题）：
+{
+  "action": "chat",
+  "message": "你的回复内容",
+  "reasoning": ["这是一个闲聊/问答，不是时刻表操作"]
+}
+
+## 意图识别规则【最重要】
+
+### 用户反馈优先处理【最高优先级】
+如果用户表达了以下任何一种情况，**必须**使用 action="chat" 回应，不要执行时刻表操作：
+- 不满/抱怨："你错了"/"不对"/"又..."/"一直..."
+- 要求讨论："先讨论"/"先确认"/"先商量"/"不要急着执行"
+- 日期纠正："我说的是今天"/"不是明天"/"你搞错日期了"
+
+回应示例：
+{
+  "action": "chat",
+  "message": "抱歉给您带来困扰。让我们先确认一下您的需求：您是想修改今天的时刻表对吗？请告诉我具体想怎么调整。"
+}
+
+### 区分"聊天"和"时刻表操作"
+- 聊天/问答场景（使用 action="chat"）：
+  - 打招呼："你好"/"嗨"/"在吗"
+  - 问问题："现在几点"/"今天星期几"/"天气怎么样"
+  - 闲聊："无聊"/"陪我聊聊"/"你是谁"
+  - 感谢/道别："谢谢"/"拜拜"/"好的"
+  - 询问功能："你能做什么"/"怎么用"
+  - **用户反馈/投诉**："你错了"/"不对"/"又..."
+
+- 时刻表操作场景（使用其他 action）：
+  - 明确说行程："下午开会"/"明天出差"
+  - 修改请求："把下午改成..."/"加一个..."
+  - 查询请求："调出明天的时刻表"/"看看我今天的安排"
+
+### 关键判断原则
+- **用户反馈优先**：用户表达不满时，先道歉确认，不要继续执行
+- **默认是聊天**：如果用户输入不明确包含时间+活动，优先当作聊天处理
+- **不要强行创建时刻表**：用户说"你好"不需要创建时刻表
+- **保持友好对话**：用简洁自然的语言回复
 
 ## 规则
 1. emoji 用 1-2 个表达场所+行为
 2. status 描述 2-6 字
-3. 时刻表按时间顺序排列
-4. 充分利用上下文（用户画像、历史习惯、设备状态）
-5. reasoning 要说明推理依据，让用户理解你的判断
-6. 如果有已有行程，注意检查时间冲突
-7. 只返回 JSON，不要解释`, weekday, now.Hour(), now.Minute(), contextStr, scheduleContext, historyStr, transcript)
+3. 时刻表按时间顺序排列，时间不能重叠
+4. 【最重要】区分聊天和时刻表操作！不确定时用 chat 回复
+5. 【重要】只有当用户说"我在..."/"我正在..."时才返回 guess 类型
+6. 如果用户输入不明确或没有具体行程，用 chat 友好回复，不要 clarify
+7. reasoning 要说明推理依据
+8. 修改时【必须】输出完整时刻表，包含所有时段（包括未修改的）
+9. 删除时也要输出修改后的完整时刻表
+10. 只返回 JSON，不要其他内容
+11. 【重要】如果用户提到"明天"/"后天"，必须在返回中包含 target_date 和 date_reasoning 字段！
+12. 【重要】target_date 必须是 YYYY-MM-DD 格式，date_reasoning 解释推理过程`,
+		weekday, now.Format("2006-01-02"), now.Hour(), now.Minute(),
+		tomorrow.Format("2006-01-02"), dayAfterTomorrow.Format("2006-01-02"),
+		contextStr, scheduleContext, historyStr, transcript,
+		now.Format("2006-01-02"), weekday, tomorrow.Format("2006-01-02"), dayAfterTomorrow.Format("2006-01-02"),
+		now.Format("2006-01-02"), tomorrow.Format("2006-01-02"), dayAfterTomorrow.Format("2006-01-02"), now.Format("2006-01-02"),
+		now.Format("2006-01-02"), now.Format("2006-01-02"), tomorrow.Format("2006-01-02"),
+		sessionTargetDateHint)
 }
 
 // buildAnalysisPrompt 构建 LLM 分析 Prompt
@@ -804,6 +1276,249 @@ func (s *VoiceScheduleService) buildAnalysisPrompt(
 7. 只返回 JSON，不要解释`, profileName, weekday, now.Hour(), now.Minute(), memoryContext, sessionContext, transcript)
 }
 
+// smartParseDateFromInput 智能日期解析器（第二层防守）
+// 不是简单的关键字匹配，而是理解语义
+// 返回值: (解析出的日期, 推理原因, 是否解析成功)
+func (s *VoiceScheduleService) smartParseDateFromInput(input string, currentDate time.Time) (time.Time, string, bool) {
+	input = strings.ToLower(input)
+	today := time.Date(currentDate.Year(), currentDate.Month(), currentDate.Day(), 0, 0, 0, 0, currentDate.Location())
+
+	// 1. 尝试提取 YYYY-MM-DD 格式
+	dateRegex := regexp.MustCompile(`(\d{4})-(\d{2})-(\d{2})`)
+	if match := dateRegex.FindString(input); match != "" {
+		if parsed, err := time.Parse("2006-01-02", match); err == nil {
+			return parsed, fmt.Sprintf("从输入中提取到日期: %s", match), true
+		}
+	}
+
+	// 2. 尝试提取 X月X日 格式
+	monthDayRegex := regexp.MustCompile(`(\d{1,2})月(\d{1,2})[日号]`)
+	if match := monthDayRegex.FindStringSubmatch(input); len(match) == 3 {
+		month, _ := strconv.Atoi(match[1])
+		day, _ := strconv.Atoi(match[2])
+		year := currentDate.Year()
+		// 如果日期已过，假设是明年
+		targetDate := time.Date(year, time.Month(month), day, 0, 0, 0, 0, currentDate.Location())
+		if targetDate.Before(today) {
+			targetDate = targetDate.AddDate(1, 0, 0)
+		}
+		return targetDate, fmt.Sprintf("解析 %d月%d日 为 %s", month, day, targetDate.Format("2006-01-02")), true
+	}
+
+	// 3. 语义理解相对日期（这不是简单关键字，而是理解整句话的意图）
+	// 注意：这里的顺序很重要，先检查更长的短语
+	relativePatterns := []struct {
+		patterns []string
+		offset   int
+		name     string
+	}{
+		{[]string{"大后天", "大后日"}, 3, "大后天"},
+		{[]string{"后天", "后日", "后儿"}, 2, "后天"},
+		{[]string{"明天", "明日", "明儿", "第二天"}, 1, "明天"},
+		{[]string{"今天", "今日", "今儿", "当天", "本日"}, 0, "今天"},
+	}
+
+	for _, rp := range relativePatterns {
+		for _, pattern := range rp.patterns {
+			if strings.Contains(input, pattern) {
+				targetDate := today.AddDate(0, 0, rp.offset)
+				return targetDate, fmt.Sprintf("识别到'%s'，转换为 %s", rp.name, targetDate.Format("2006-01-02")), true
+			}
+		}
+	}
+
+	// 4. 星期几的解析
+	weekdayPatterns := map[string]time.Weekday{
+		"周一": time.Monday, "星期一": time.Monday,
+		"周二": time.Tuesday, "星期二": time.Tuesday,
+		"周三": time.Wednesday, "星期三": time.Wednesday,
+		"周四": time.Thursday, "星期四": time.Thursday,
+		"周五": time.Friday, "星期五": time.Friday,
+		"周六": time.Saturday, "星期六": time.Saturday,
+		"周日": time.Sunday, "星期日": time.Sunday, "周天": time.Sunday,
+	}
+
+	isNextWeek := strings.Contains(input, "下周") || strings.Contains(input, "下星期")
+	for pattern, targetWeekday := range weekdayPatterns {
+		if strings.Contains(input, pattern) {
+			// 计算到目标星期几的天数
+			daysUntil := int(targetWeekday - currentDate.Weekday())
+			if daysUntil <= 0 {
+				daysUntil += 7
+			}
+			if isNextWeek {
+				daysUntil += 7
+			}
+			targetDate := today.AddDate(0, 0, daysUntil)
+			return targetDate, fmt.Sprintf("识别到'%s'，转换为 %s", pattern, targetDate.Format("2006-01-02")), true
+		}
+	}
+
+	// 5. 未能解析
+	return time.Time{}, "", false
+}
+
+// sanitizeLLMDateString 清理 LLM 返回的畸形日期字符串
+// LLM 有时会返回 Unicode 字符如 ½（分数）、Ⅵ（罗马数字）代替正常数字
+func sanitizeLLMDateString(dateStr string) string {
+	// Unicode 分数符号到数字的映射
+	fractionMap := map[rune]string{
+		'½': "5", // 有时 LLM 会把 6 错误输出为 ½
+		'⅓': "3",
+		'⅔': "6",
+		'¼': "4",
+		'¾': "7",
+		'⅕': "5",
+		'⅖': "4",
+		'⅗': "6",
+		'⅘': "8",
+		'⅙': "6",
+		'⅚': "8",
+		'⅐': "7",
+		'⅛': "8",
+		'⅜': "3",
+		'⅝': "6",
+		'⅞': "8",
+		'⅑': "9",
+		'⅒': "1",
+	}
+
+	// 罗马数字到阿拉伯数字的映射（单个字符形式）
+	romanMap := map[rune]string{
+		'Ⅰ': "1", 'ⅰ': "1",
+		'Ⅱ': "2", 'ⅱ': "2",
+		'Ⅲ': "3", 'ⅲ': "3",
+		'Ⅳ': "4", 'ⅳ': "4",
+		'Ⅴ': "5", 'ⅴ': "5",
+		'Ⅵ': "6", 'ⅵ': "6",
+		'Ⅶ': "7", 'ⅶ': "7",
+		'Ⅷ': "8", 'ⅷ': "8",
+		'Ⅸ': "9", 'ⅸ': "9",
+		'Ⅹ': "10", 'ⅹ': "10",
+		'Ⅺ': "11", 'ⅺ': "11",
+		'Ⅻ': "12", 'ⅻ': "12",
+	}
+
+	// 全角数字到半角数字的映射
+	fullwidthMap := map[rune]string{
+		'０': "0", '１': "1", '２': "2", '３': "3", '４': "4",
+		'５': "5", '６': "6", '７': "7", '８': "8", '９': "9",
+	}
+
+	result := strings.Builder{}
+	for _, r := range dateStr {
+		if replacement, ok := fractionMap[r]; ok {
+			result.WriteString(replacement)
+			fmt.Printf("[VoiceSchedule] 清理畸形日期: 将 '%c' 替换为 '%s'\n", r, replacement)
+		} else if replacement, ok := romanMap[r]; ok {
+			result.WriteString(replacement)
+			fmt.Printf("[VoiceSchedule] 清理畸形日期: 将罗马数字 '%c' 替换为 '%s'\n", r, replacement)
+		} else if replacement, ok := fullwidthMap[r]; ok {
+			result.WriteString(replacement)
+		} else {
+			result.WriteRune(r)
+		}
+	}
+
+	sanitized := result.String()
+	if sanitized != dateStr {
+		fmt.Printf("[VoiceSchedule] 日期清理: '%s' -> '%s'\n", dateStr, sanitized)
+	}
+	return sanitized
+}
+
+// sanitizeLLMTimeString 清理 LLM 返回的畸形时间字符串
+// 处理时间格式如 "0 9:00" -> "09:00", "13:½" -> "13:00", "1˜9:00" -> "19:00"
+func sanitizeLLMTimeString(timeStr string) string {
+	if timeStr == "" {
+		return timeStr
+	}
+
+	// 先使用通用的字符清理（复用 sanitizeLLMDateString 的逻辑）
+	result := sanitizeLLMDateString(timeStr)
+
+	// 额外处理时间特有的问题
+
+	// 0. 先将不间断空格（U+00A0）转为普通空格
+	result = strings.ReplaceAll(result, "\u00A0", " ")
+
+	// 1. 移除数字之间的空格（"0 9:00" -> "09:00"）
+	// 使用正则：数字+空格+数字 -> 数字数字
+	spacePattern := regexp.MustCompile(`(\d)\s+(\d)`)
+	result = spacePattern.ReplaceAllString(result, "$1$2")
+
+	// 2. 移除波浪号和其他特殊符号（"1˜9:00" -> "19:00"）
+	specialChars := []string{"˜", "~", "～", "‾", "⁓"}
+	for _, char := range specialChars {
+		result = strings.ReplaceAll(result, char, "")
+	}
+
+	// 3. 标准化时间格式（确保是 HH:MM 格式）
+	// 如果只有一位小时数，补零
+	timePattern := regexp.MustCompile(`^(\d):(\d{2})$`)
+	if timePattern.MatchString(result) {
+		result = "0" + result
+	}
+
+	// 4. 处理可能的中文冒号
+	result = strings.ReplaceAll(result, "：", ":")
+
+	if result != timeStr {
+		fmt.Printf("[VoiceSchedule] 时间清理: '%s' -> '%s'\n", timeStr, result)
+	}
+
+	return result
+}
+
+// sanitizeScheduleItems 净化时刻表项目中的时间字段
+func sanitizeScheduleItems(items []model.ScheduleItem) []model.ScheduleItem {
+	if len(items) == 0 {
+		return items
+	}
+
+	sanitized := make([]model.ScheduleItem, len(items))
+	for i, item := range items {
+		sanitized[i] = model.ScheduleItem{
+			StartTime: sanitizeLLMTimeString(item.StartTime),
+			EndTime:   sanitizeLLMTimeString(item.EndTime),
+			Emoji:     item.Emoji,
+			Status:    item.Status,
+			Executed:  item.Executed,
+		}
+	}
+	return sanitized
+}
+
+// parseTargetDate 解析目标日期
+func (s *VoiceScheduleService) parseTargetDate(targetDateStr string) time.Time {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	if targetDateStr == "" {
+		return today
+	}
+
+	// 先清理可能的畸形字符
+	sanitizedDate := sanitizeLLMDateString(targetDateStr)
+
+	switch sanitizedDate {
+	case "tomorrow":
+		return today.AddDate(0, 0, 1)
+	case "day_after_tomorrow":
+		return today.AddDate(0, 0, 2)
+	case "today":
+		return today
+	default:
+		// 尝试解析 YYYY-MM-DD 格式
+		if parsed, err := time.Parse("2006-01-02", sanitizedDate); err == nil {
+			return parsed
+		}
+		// 如果清理后仍无法解析，打印警告
+		fmt.Printf("[VoiceSchedule] 警告：无法解析日期 '%s' (清理后: '%s')，使用今天\n", targetDateStr, sanitizedDate)
+		return today
+	}
+}
+
 // handleLLMResult 处理 LLM 分析结果
 func (s *VoiceScheduleService) handleLLMResult(
 	ctx context.Context,
@@ -811,13 +1526,95 @@ func (s *VoiceScheduleService) handleLLMResult(
 	result *model.LLMVoiceAnalysisResult,
 	callback func(event *model.VoiceScheduleEvent),
 ) {
+	// 【重要】净化 LLM 返回的时刻表中的畸形时间字符
+	// LLM 有时会返回 "0 9:00"、"13:½"、"1˜9:00" 等畸形格式
+	if len(result.Schedule) > 0 {
+		result.Schedule = sanitizeScheduleItems(result.Schedule)
+	}
+	if len(result.PartialSchedule) > 0 {
+		result.PartialSchedule = sanitizeScheduleItems(result.PartialSchedule)
+	}
+
 	// 保存推理依据
 	session.LastReasoning = result.Reasoning
+
+	// 【分层防守】日期解析
+	var targetDate time.Time
+	var dateReason string
+	now := time.Now()
+
+	// 第一层：LLM 返回了日期，尝试解析
+	if result.TargetDate != "" {
+		parsed := s.parseTargetDate(result.TargetDate)
+		if !parsed.IsZero() {
+			targetDate = parsed
+			dateReason = result.DateReasoning
+			if dateReason == "" {
+				dateReason = fmt.Sprintf("LLM 返回日期: %s", result.TargetDate)
+			}
+			fmt.Printf("[VoiceSchedule] 第一层(LLM): 日期=%s, 原因=%s\n", targetDate.Format("2006-01-02"), dateReason)
+		}
+	}
+
+	// 第二层：智能日期解析器
+	if targetDate.IsZero() && len(session.TranscriptHistory) > 0 {
+		latestTranscript := session.TranscriptHistory[len(session.TranscriptHistory)-1]
+		parsed, reason, ok := s.smartParseDateFromInput(latestTranscript, now)
+		if ok {
+			targetDate = parsed
+			dateReason = fmt.Sprintf("[智能解析] %s", reason)
+			fmt.Printf("[VoiceSchedule] 第二层(智能解析): 日期=%s, 原因=%s (from: %s)\n",
+				targetDate.Format("2006-01-02"), reason, truncateStr(latestTranscript, 30))
+		}
+	}
+
+	// 第三层：保持会话原有日期
+	if targetDate.IsZero() && !session.TargetDate.IsZero() {
+		targetDate = session.TargetDate
+		dateReason = "保持会话原有日期"
+		fmt.Printf("[VoiceSchedule] 第三层(会话保持): 日期=%s\n", targetDate.Format("2006-01-02"))
+	}
+
+	// 第四层：默认今天
+	if targetDate.IsZero() {
+		targetDate = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		dateReason = "默认使用今天"
+		fmt.Printf("[VoiceSchedule] 第四层(默认): 日期=%s\n", targetDate.Format("2006-01-02"))
+	}
+
+	// 更新 result.TargetDate 为 YYYY-MM-DD 格式，供后续使用
+	result.TargetDate = targetDate.Format("2006-01-02")
+	result.DateReasoning = dateReason
+
+	// 打印最终日期推理信息
+	fmt.Printf("[VoiceSchedule] 最终日期: %s (reason: %s)\n", targetDate.Format("2006-01-02"), dateReason)
+
+	// 处理目标日期：如果目标日期变了，需要重新加载该日期的时刻表
+	if session.TargetDate.IsZero() || !session.TargetDate.Equal(targetDate) {
+		session.TargetDate = targetDate
+		fmt.Printf("[VoiceSchedule] 会话目标日期更新: %s\n", session.TargetDate.Format("2006-01-02"))
+
+		// 加载目标日期的时刻表（如果不是 query 动作，因为 query 会自己加载）
+		if result.Action != "query" {
+			existingSchedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, session.UserID, targetDate)
+			if err == nil && existingSchedule != nil && len(existingSchedule.Items) > 0 {
+				// 如果 LLM 没有返回时刻表，使用数据库中的
+				if len(result.Schedule) == 0 {
+					session.CurrentSchedule = existingSchedule.Items
+					fmt.Printf("[VoiceSchedule] 加载%s的时刻表: %d 个时段\n", result.TargetDate, len(existingSchedule.Items))
+				}
+			} else {
+				fmt.Printf("[VoiceSchedule] %s暂无时刻表\n", result.TargetDate)
+			}
+		}
+	}
 
 	// 添加 AI 回复到对话历史
 	if result.Thinking != "" {
 		s.addConversationTurn(session, "assistant", result.Thinking)
 	}
+
+	fmt.Printf("[VoiceSchedule] handleLLMResult: action=%s\n", result.Action)
 
 	switch result.Action {
 	case "create", "modify":
@@ -828,6 +1625,37 @@ func (s *VoiceScheduleService) handleLLMResult(
 			Items:     result.Schedule,
 			Reasoning: result.Reasoning,
 		})
+
+	case "replace":
+		// 完全替换时刻表（用户说"覆盖"/"重新安排"）
+		session.CurrentSchedule = result.Schedule
+		session.State = "schedule_ready"
+		callback(&model.VoiceScheduleEvent{
+			Type:      model.VSEventSchedule,
+			Items:     result.Schedule,
+			Reasoning: append([]string{"完全替换原有时刻表"}, result.Reasoning...),
+		})
+
+	case "query":
+		// 查询指定日期的时刻表（targetDate 已在分层防守中解析）
+		existingSchedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, session.UserID, targetDate)
+		if err != nil || existingSchedule == nil || len(existingSchedule.Items) == 0 {
+			// 没有找到该日期的时刻表，直接告知用户"没有"
+			callback(&model.VoiceScheduleEvent{
+				Type:    model.VSEventChat,
+				Message: fmt.Sprintf("%s没有行程安排。", targetDate.Format("1月2日")),
+			})
+		} else {
+			// 找到了，展示给用户（设置 IsQuery=true，前端不显示确认按钮）
+			session.CurrentSchedule = existingSchedule.Items
+			session.State = "schedule_ready"
+			callback(&model.VoiceScheduleEvent{
+				Type:      model.VSEventSchedule,
+				Items:     existingSchedule.Items,
+				Reasoning: []string{fmt.Sprintf("这是%s的时刻表", targetDate.Format("1月2日"))},
+				IsQuery:   true, // 标记为查询模式，前端不显示确认按钮
+			})
+		}
 
 	case "cancel":
 		session.CurrentSchedule = result.Schedule
@@ -857,6 +1685,16 @@ func (s *VoiceScheduleService) handleLLMResult(
 			Type:      model.VSEventClarify,
 			Questions: result.Questions,
 			Items:     result.PartialSchedule,
+		})
+
+	case "chat":
+		// 聊天/问答回复（非时刻表操作）
+		fmt.Printf("[VoiceSchedule] 发送 chat 事件: message=%s\n", truncateStr(result.Message, 50))
+		session.State = "idle" // 保持 idle 状态，可以继续对话
+		callback(&model.VoiceScheduleEvent{
+			Type:      model.VSEventChat,
+			Message:   result.Message,
+			Reasoning: result.Reasoning,
 		})
 	}
 }
@@ -1116,25 +1954,44 @@ func (s *VoiceScheduleService) CompressUserContext(ctx context.Context, userCtx 
 	return compressed
 }
 
-// CompressConversationHistory 压缩对话历史
+// CompressConversationHistory 压缩对话历史（保留关键信息）
 func (s *VoiceScheduleService) CompressConversationHistory(history []model.ConversationTurn) []model.ConversationTurn {
 	if len(history) <= maxConversationTurns {
 		return history
 	}
 
-	// 保留：第1轮（初始意图）+ 最后5轮（近期上下文）
-	compressed := make([]model.ConversationTurn, 0, 7)
-	compressed = append(compressed, history[0]) // 首轮
+	// 智能压缩策略：
+	// 1. 保留第1轮（用户初始意图）
+	// 2. 生成中间对话的智能摘要（提取用户的所有修改请求）
+	// 3. 保留最后4轮（最近上下文）
 
-	// 中间部分生成摘要
-	middleCount := len(history) - 6
+	compressed := make([]model.ConversationTurn, 0, 7)
+	compressed = append(compressed, history[0]) // 首轮（用户初始输入）
+
+	// 提取中间对话中的用户请求摘要
+	middleTurns := history[1 : len(history)-4]
+	userRequests := []string{}
+	for _, turn := range middleTurns {
+		if turn.Role == "user" {
+			userRequests = append(userRequests, turn.Content)
+		}
+	}
+
+	// 生成有意义的摘要
+	summaryContent := ""
+	if len(userRequests) > 0 {
+		summaryContent = fmt.Sprintf("[历史修改记录] 用户依次进行了以下操作：%s", strings.Join(userRequests, " → "))
+	} else {
+		summaryContent = fmt.Sprintf("[省略中间 %d 轮对话]", len(middleTurns))
+	}
+
 	compressed = append(compressed, model.ConversationTurn{
 		Role:    "system",
-		Content: fmt.Sprintf("[省略中间 %d 轮对话...]", middleCount),
+		Content: summaryContent,
 	})
 
-	// 最后5轮
-	compressed = append(compressed, history[len(history)-5:]...)
+	// 最后4轮
+	compressed = append(compressed, history[len(history)-4:]...)
 
 	return compressed
 }
@@ -1186,4 +2043,308 @@ func (s *VoiceScheduleService) sendProgressDetail(callback func(event *model.Voi
 		Type:   model.VSEventProgress,
 		Detail: detail,
 	})
+}
+
+// ========== 多阶段对话状态机 ==========
+
+// PhaseManager 阶段管理器
+type PhaseManager struct {
+	service           *VoiceScheduleService
+	understandingHandler *UnderstandingHandler
+	discussingHandler    *DiscussingHandler
+	planningHandler      *PlanningHandler
+	approvalHandler      *ApprovalHandler
+	executionHandler     *ExecutionHandler
+	idleHandler          *IdleHandler
+}
+
+// NewPhaseManager 创建阶段管理器
+func (s *VoiceScheduleService) NewPhaseManager() *PhaseManager {
+	return &PhaseManager{
+		service:              s,
+		understandingHandler: NewUnderstandingHandler(s.llmClient),
+		discussingHandler:    NewDiscussingHandler(s.llmClient),
+		planningHandler:      NewPlanningHandler(s.llmClient),
+		approvalHandler:      NewApprovalHandler(),
+		executionHandler:     NewExecutionHandler(s.scheduleRepo),
+		idleHandler:          NewIdleHandler(s.llmClient),
+	}
+}
+
+// ProcessWithStateMachine 使用状态机处理输入
+func (s *VoiceScheduleService) ProcessWithStateMachine(
+	ctx context.Context,
+	userID string,
+	sessionID string,
+	input string,
+	callback func(event *model.VoiceScheduleEvent),
+) (*model.VoiceScheduleSession, error) {
+	pm := s.NewPhaseManager()
+
+	// 获取或创建会话
+	var session *model.VoiceScheduleSession
+	var isNewSession bool
+
+	if sessionID != "" {
+		existingSession, err := s.getSession(ctx, sessionID)
+		if err == nil && existingSession != nil && existingSession.UserID == userID {
+			session = existingSession
+			isNewSession = false
+		}
+	}
+
+	if session == nil {
+		sessionID = uuid.New().String()
+		session = &model.VoiceScheduleSession{
+			UserID:              userID,
+			SessionID:           sessionID,
+			State:               "initial",
+			Phase:               model.PhaseUnderstanding, // 初始阶段
+			TranscriptHistory:   []string{},
+			ConversationHistory: []model.ConversationTurn{},
+			PhaseHistory:        []model.PhaseTransition{},
+			CreatedAt:           time.Now(),
+		}
+		isNewSession = true
+
+		// 加载用户已有时刻表
+		existingSchedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, userID, time.Now())
+		if err == nil && existingSchedule != nil && len(existingSchedule.Items) > 0 {
+			session.CurrentSchedule = existingSchedule.Items
+			fmt.Printf("[StateMachine] 加载用户已有时刻表: %d 个时段\n", len(existingSchedule.Items))
+		}
+
+		// 发送会话开始事件
+		callback(&model.VoiceScheduleEvent{
+			Type:      model.VSEventSessionStart,
+			SessionID: sessionID,
+		})
+	}
+
+	// 发送识别结果
+	callback(&model.VoiceScheduleEvent{
+		Type: model.VSEventTranscript,
+		Text: input,
+	})
+
+	// 记录用户输入
+	session.TranscriptHistory = append(session.TranscriptHistory, input)
+	s.addConversationTurn(session, "user", input)
+
+	// 加载用户上下文（仅新会话）
+	if isNewSession {
+		s.sendProgress(callback, model.ProgressLoadingContext, "正在了解你的情况...")
+		userCtx := s.BuildUserContext(ctx, userID)
+		session.UserContext = s.CompressUserContext(ctx, userCtx)
+	}
+
+	// 使用状态机处理
+	err := pm.Process(ctx, session, input, callback)
+	if err != nil {
+		callback(&model.VoiceScheduleEvent{
+			Type:    model.VSEventError,
+			Message: "处理失败: " + err.Error(),
+		})
+		return nil, err
+	}
+
+	// 保存会话
+	if err := s.saveSession(ctx, session); err != nil {
+		fmt.Printf("[StateMachine] 保存会话失败: %v\n", err)
+	}
+
+	return session, nil
+}
+
+// Process 状态机主处理流程
+func (pm *PhaseManager) Process(
+	ctx context.Context,
+	session *model.VoiceScheduleSession,
+	input string,
+	callback EventCallback,
+) error {
+	// 获取当前阶段（如果为空，默认为 Understanding）
+	currentPhase := session.Phase
+	if currentPhase == "" {
+		currentPhase = model.PhaseUnderstanding
+	}
+
+	fmt.Printf("[StateMachine] 当前阶段: %s, 输入: %s\n", currentPhase, truncateStr(input, 50))
+
+	// 根据当前阶段处理
+	var err error
+	var nextPhase model.ConversationPhase
+
+	switch currentPhase {
+	case model.PhaseUnderstanding:
+		err = pm.understandingHandler.Handle(ctx, session, input, callback)
+		if err == nil {
+			nextPhase = pm.understandingHandler.NextPhase(session)
+		}
+
+	case model.PhaseDiscussing:
+		err = pm.discussingHandler.Handle(ctx, session, input, callback)
+		if err == nil {
+			nextPhase = pm.discussingHandler.NextPhase(session)
+		}
+
+	case model.PhasePlanning:
+		err = pm.planningHandler.Handle(ctx, session, input, callback)
+		if err == nil {
+			nextPhase = pm.planningHandler.NextPhase(session)
+		}
+
+	case model.PhaseApproval:
+		// 先分析用户决策
+		decision := pm.approvalHandler.analyzeUserDecision(input)
+
+		switch decision {
+		case "approve":
+			// 执行保存
+			nextPhase = model.PhaseExecution
+			err = pm.executionHandler.Handle(ctx, session, input, callback)
+			if err == nil {
+				nextPhase = pm.executionHandler.NextPhase(session)
+			}
+		case "reject":
+			// 取消，返回 Idle
+			nextPhase = model.PhaseCompleted
+			callback(&model.VoiceScheduleEvent{
+				Type:    model.VSEventChat,
+				Message: "好的，已取消。",
+			})
+		case "modify":
+			// 用户要修改，回到讨论阶段
+			nextPhase = model.PhaseDiscussing
+			err = pm.discussingHandler.Handle(ctx, session, input, callback)
+		default:
+			// 不确定，继续等待
+			err = pm.approvalHandler.Handle(ctx, session, input, callback)
+			nextPhase = model.PhaseApproval
+		}
+
+	case model.PhaseExecution:
+		err = pm.executionHandler.Handle(ctx, session, input, callback)
+		if err == nil {
+			nextPhase = model.PhaseCompleted
+		}
+
+	case model.PhaseIdle:
+		err = pm.idleHandler.Handle(ctx, session, input, callback)
+		nextPhase = model.PhaseIdle
+
+	case model.PhaseCompleted:
+		// 完成状态，可以开始新的对话
+		session.Phase = model.PhaseUnderstanding
+		err = pm.understandingHandler.Handle(ctx, session, input, callback)
+		if err == nil {
+			nextPhase = pm.understandingHandler.NextPhase(session)
+		}
+
+	default:
+		// 默认进入理解阶段
+		err = pm.understandingHandler.Handle(ctx, session, input, callback)
+		if err == nil {
+			nextPhase = pm.understandingHandler.NextPhase(session)
+		}
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// 自动推进到下一阶段
+	if nextPhase != currentPhase && nextPhase != "" {
+		return pm.transitionAndProcess(ctx, session, input, currentPhase, nextPhase, callback)
+	}
+
+	return nil
+}
+
+// transitionAndProcess 转换阶段并继续处理
+func (pm *PhaseManager) transitionAndProcess(
+	ctx context.Context,
+	session *model.VoiceScheduleSession,
+	input string,
+	fromPhase model.ConversationPhase,
+	toPhase model.ConversationPhase,
+	callback EventCallback,
+) error {
+	// 记录阶段转换
+	session.PhaseHistory = append(session.PhaseHistory, model.PhaseTransition{
+		From:      fromPhase,
+		To:        toPhase,
+		Reason:    fmt.Sprintf("从 %s 转换到 %s", fromPhase, toPhase),
+		Timestamp: time.Now(),
+	})
+	session.Phase = toPhase
+
+	fmt.Printf("[StateMachine] 阶段转换: %s -> %s\n", fromPhase, toPhase)
+
+	// 某些阶段需要自动继续处理
+	switch toPhase {
+	case model.PhasePlanning:
+		// 进入规划阶段后自动生成计划
+		return pm.planningHandler.Handle(ctx, session, input, callback)
+
+	case model.PhaseApproval:
+		// 进入审批阶段后发送审批提示
+		callback(&model.VoiceScheduleEvent{
+			Type:       model.VSEventApprovalPrompt,
+			Message:    "这是生成的时刻表，确认后将保存。说「确定」保存，或告诉我要修改的内容。",
+			DraftPlan:  session.DraftPlan,
+			Items:      session.DraftPlan.Schedule,
+			CanApprove: true,
+		})
+		return nil
+
+	case model.PhaseExecution:
+		// 进入执行阶段后自动保存
+		return pm.executionHandler.Handle(ctx, session, input, callback)
+
+	case model.PhaseDiscussing:
+		// 进入讨论阶段，等待用户输入
+		// 生成初始澄清问题
+		if session.IntentSummary != nil && len(session.IntentSummary.AmbiguityReasons) > 0 {
+			clarifications := []model.ClarificationItem{}
+			for i, reason := range session.IntentSummary.AmbiguityReasons {
+				clarifications = append(clarifications, model.ClarificationItem{
+					ID:       fmt.Sprintf("q%d", i+1),
+					Question: reason,
+					Reason:   "需要确认",
+					Answered: false,
+				})
+			}
+			session.Clarifications = clarifications
+
+			callback(&model.VoiceScheduleEvent{
+				Type:           model.VSEventDiscussion,
+				Message:        "有几个问题想确认一下：",
+				Clarifications: clarifications,
+			})
+		}
+		return nil
+
+	case model.PhaseIdle:
+		// 闲置状态，直接处理聊天
+		return pm.idleHandler.Handle(ctx, session, input, callback)
+
+	case model.PhaseCompleted:
+		// 完成状态，可以删除会话或保持
+		return nil
+
+	default:
+		return nil
+	}
+}
+
+// ProcessTextInputStateMachine 使用状态机处理文本输入（供外部调用）
+func (s *VoiceScheduleService) ProcessTextInputStateMachine(
+	ctx context.Context,
+	userID string,
+	sessionID string,
+	text string,
+	callback func(event *model.VoiceScheduleEvent),
+) (*model.VoiceScheduleSession, error) {
+	return s.ProcessWithStateMachine(ctx, userID, sessionID, text, callback)
 }

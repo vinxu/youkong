@@ -29,17 +29,38 @@ struct VoiceScheduleSheet: View {
 
                         // 消息列表
                         ForEach(viewModel.messages) { message in
-                            MessageBubble(message: message)
-                                .id(message.id)
+                            MessageBubble(
+                                message: message,
+                                onConfirm: {
+                                    Task {
+                                        await viewModel.confirmSchedule()
+                                    }
+                                },
+                                onCancel: {
+                                    Task {
+                                        await viewModel.cancelSession()
+                                    }
+                                }
+                            )
+                            .id(message.id)
                         }
 
                         // 处理中状态 - 显示进度反馈
+                        // 只在首次对话（没有历史消息）时显示详细进度，后续只显示简单的处理中
                         if viewModel.state == .processing || !viewModel.progressItems.isEmpty {
-                            ProgressFeedbackView(
-                                progressItems: viewModel.progressItems,
-                                isProcessing: viewModel.state == .processing,
-                                processingStatus: viewModel.processingStatus
-                            )
+                            if viewModel.messages.isEmpty {
+                                // 首次对话：显示详细进度步骤
+                                ProgressFeedbackView(
+                                    progressItems: viewModel.progressItems,
+                                    isProcessing: viewModel.state == .processing,
+                                    processingStatus: viewModel.processingStatus
+                                )
+                                .id("progressFeedback")
+                            } else {
+                                // 后续对话：只显示简单的处理中
+                                SimpleProcessingView(isProcessing: viewModel.state == .processing)
+                                    .id("progressFeedback")
+                            }
                         }
 
                         // 可见性选择
@@ -61,9 +82,27 @@ struct VoiceScheduleSheet: View {
                 }
                 .onChange(of: viewModel.messages.count) { _ in
                     // 新消息时滚动到底部
-                    if let lastMessage = viewModel.messages.last {
-                        withAnimation {
+                    withAnimation {
+                        if viewModel.state == .processing || !viewModel.progressItems.isEmpty {
+                            proxy.scrollTo("progressFeedback", anchor: .bottom)
+                        } else if let lastMessage = viewModel.messages.last {
                             proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                        }
+                    }
+                }
+                .onChange(of: viewModel.progressItems.count) { _ in
+                    // 进度更新时滚动到底部
+                    withAnimation {
+                        proxy.scrollTo("progressFeedback", anchor: .bottom)
+                    }
+                }
+                .onChange(of: viewModel.state) { newState in
+                    // 状态变化时滚动到底部（如开始处理）
+                    if newState == .processing {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            withAnimation {
+                                proxy.scrollTo("progressFeedback", anchor: .bottom)
+                            }
                         }
                     }
                 }
@@ -91,6 +130,8 @@ struct VoiceScheduleSheet: View {
         }
         .onAppear {
             checkPermission()
+            // 预热音频会话，避免首次录音卡顿
+            viewModel.prepareAudioSession()
         }
         .onChange(of: viewModel.state) { newState in
             if newState == .completed {
@@ -165,12 +206,12 @@ struct VoiceScheduleSheet: View {
 
     private var bottomActionBar: some View {
         VStack(spacing: 12) {
-            // 如果有时刻表，显示确认区域
-            if viewModel.hasSchedule {
-                scheduleConfirmBar
+            // 在等待审批状态时显示确认/修改按钮
+            if viewModel.state == .awaitingApproval && viewModel.canApprove {
+                approvalButtons
             }
 
-            // 语音输入按钮（微信风格）
+            // 语音输入按钮（微信风格）- 始终显示
             WechatStyleVoiceButton(
                 isRecording: viewModel.isRecording,
                 isCancelling: viewModel.isCancelling,
@@ -185,10 +226,57 @@ struct VoiceScheduleSheet: View {
                     viewModel.cancelRecording()
                 }
             )
+
+            // 在等待审批状态时显示提示
+            if viewModel.state == .awaitingApproval {
+                Text("说「确定」保存，或说出修改内容")
+                    .font(.cliCaption)
+                    .foregroundColor(CLIColors.textWeak)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(CLIColors.background)
+    }
+
+    // MARK: - Approval Buttons
+
+    private var approvalButtons: some View {
+        HStack(spacing: 12) {
+            // 取消按钮
+            Button {
+                Task {
+                    await viewModel.cancelSession()
+                }
+            } label: {
+                Text("取消")
+                    .font(.cliBody)
+                    .foregroundColor(CLIColors.textSecondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .overlay(
+                        Rectangle()
+                            .stroke(CLIColors.border, lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.borderless)
+
+            // 确认按钮
+            Button {
+                Task {
+                    await viewModel.confirmSchedule()
+                }
+            } label: {
+                Text("✓ 确认保存")
+                    .font(.cliBody)
+                    .foregroundColor(CLIColors.background)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(CLIColors.green)
+            }
+            .buttonStyle(.borderless)
+            .disabled(viewModel.state == .confirming)
+        }
     }
 
     // MARK: - Schedule Confirm Bar
@@ -257,6 +345,7 @@ struct ChatMessage: Identifiable, Equatable {
     var schedule: [ScheduleItem]?
     var questions: [ClarifyQuestion]?
     var reasoning: [String]?
+    var isQuery: Bool = false  // 是否为查询模式（查询已有时刻表不显示确认按钮）
 
     enum MessageType {
         case user          // 用户语音转文字
@@ -276,6 +365,8 @@ struct ChatMessage: Identifiable, Equatable {
 
 struct MessageBubble: View {
     let message: ChatMessage
+    var onConfirm: (() -> Void)? = nil
+    var onCancel: (() -> Void)? = nil
 
     var body: some View {
         HStack {
@@ -322,7 +413,13 @@ struct MessageBubble: View {
 
         case .aiSchedule:
             if let schedule = message.schedule {
-                SchedulePreview(schedule: schedule, reasoning: message.reasoning ?? [])
+                SchedulePreview(
+                    schedule: schedule,
+                    reasoning: message.reasoning ?? [],
+                    isQuery: message.isQuery,  // 传递查询模式标识
+                    onConfirm: onConfirm,
+                    onCancel: onCancel
+                )
             } else {
                 Text(message.content)
                     .font(.cliBody)
@@ -360,11 +457,15 @@ struct MessageBubble: View {
 struct SchedulePreview: View {
     let schedule: [ScheduleItem]
     var reasoning: [String] = []
+    var isQuery: Bool = false  // 是否为查询模式（查询已有时刻表不显示确认按钮）
+    var onConfirm: (() -> Void)? = nil
+    var onCancel: (() -> Void)? = nil
     @State private var showReasoning = false
+    @State private var showConfirmOptions = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("📋 生成的时刻表：")
+            Text(isQuery ? "📋 当前时刻表：" : "📋 生成的时刻表：")
                 .font(.cliCaption)
                 .foregroundColor(CLIColors.cyan)
 
@@ -402,7 +503,7 @@ struct SchedulePreview: View {
                     withAnimation { showReasoning.toggle() }
                 } label: {
                     HStack(spacing: 4) {
-                        Text("推理依据")
+                        Text(isQuery ? "说明" : "推理依据")
                             .font(.cliCaption)
                             .foregroundColor(CLIColors.textWeak)
                         Image(systemName: showReasoning ? "chevron.up" : "chevron.down")
@@ -429,10 +530,75 @@ struct SchedulePreview: View {
                 }
             }
 
-            Text("可以继续说话修改，或点击\"确认执行\"")
-                .font(.cliCaption)
-                .foregroundColor(CLIColors.textWeak)
-                .padding(.top, 4)
+            // 操作区域（仅在非查询模式显示）
+            if !isQuery {
+                Rectangle()
+                    .fill(CLIColors.border)
+                    .frame(height: 1)
+                    .padding(.vertical, 4)
+
+                if showConfirmOptions {
+                    // 展开确认选项
+                    VStack(spacing: 8) {
+                        HStack(spacing: 12) {
+                            Button {
+                                onCancel?()
+                            } label: {
+                                Text("放弃")
+                                    .font(.cliCaption)
+                                    .foregroundColor(CLIColors.textSecondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                                    .overlay(
+                                        Rectangle()
+                                            .stroke(CLIColors.border, lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                onConfirm?()
+                            } label: {
+                                Text("✓ 确认执行")
+                                    .font(.cliCaption)
+                                    .foregroundColor(CLIColors.background)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                                    .background(CLIColors.green)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Button {
+                            withAnimation { showConfirmOptions = false }
+                        } label: {
+                            Text("继续修改")
+                                .font(.cliCaption)
+                                .foregroundColor(CLIColors.textWeak)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                } else {
+                    // 折叠状态：显示提示
+                    HStack {
+                        Text("继续说话修改")
+                            .font(.cliCaption)
+                            .foregroundColor(CLIColors.textWeak)
+
+                        Spacer()
+
+                        Button {
+                            withAnimation { showConfirmOptions = true }
+                        } label: {
+                            Text("[满意了？确认]")
+                                .font(.cliCaption)
+                                .foregroundColor(CLIColors.green)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
         }
         .padding(12)
         .background(CLIColors.backgroundSecondary)
@@ -505,12 +671,14 @@ struct WechatStyleVoiceButton: View {
 
     @State private var dragOffset: CGFloat = 0
     @State private var isInCancelZone = false
-    private let cancelThreshold: CGFloat = -60
+    @State private var showCancelZone = false
+    private let cancelThreshold: CGFloat = -80      // 进入取消区域的阈值
+    private let showCancelZoneThreshold: CGFloat = -30  // 显示取消区域的安全距离
 
     var body: some View {
         ZStack {
-            // 取消区域（录音时显示在上方）
-            if isRecording {
+            // 取消区域（滑动超过安全距离后显示，无动画）
+            if isRecording && showCancelZone {
                 VStack {
                     // 取消区域
                     cancelZone
@@ -519,7 +687,6 @@ struct WechatStyleVoiceButton: View {
 
                     Spacer()
                 }
-                .transition(.opacity)
             }
 
             VStack(spacing: 8) {
@@ -535,9 +702,11 @@ struct WechatStyleVoiceButton: View {
                             .font(.cliBodySmall)
                             .foregroundColor(CLIColors.green)
 
-                        Text("↑ 上滑取消")
-                            .font(.cliCaption)
-                            .foregroundColor(CLIColors.textWeak)
+                        if !showCancelZone {
+                            Text("↑ 上滑取消")
+                                .font(.cliCaption)
+                                .foregroundColor(CLIColors.textWeak)
+                        }
                     }
                     .frame(height: 24)
                     .transition(.opacity)
@@ -547,7 +716,7 @@ struct WechatStyleVoiceButton: View {
                 voiceButton
             }
         }
-        .frame(height: isRecording ? 180 : 50)
+        .frame(height: (isRecording && showCancelZone) ? 180 : (isRecording ? 80 : 50))
         .animation(.easeInOut(duration: 0.2), value: isRecording)
         .animation(.easeInOut(duration: 0.15), value: isInCancelZone)
     }
@@ -610,6 +779,11 @@ struct WechatStyleVoiceButton: View {
                             onStart()
                         }
                         dragOffset = value.translation.height
+                        // 超过安全距离后显示取消区域
+                        if dragOffset < showCancelZoneThreshold {
+                            showCancelZone = true
+                        }
+                        // 进入取消区域
                         isInCancelZone = dragOffset < cancelThreshold
                     }
                     .onEnded { _ in
@@ -624,6 +798,7 @@ struct WechatStyleVoiceButton: View {
                         }
                         dragOffset = 0
                         isInCancelZone = false
+                        showCancelZone = false
                     }
                 )
         }
@@ -708,6 +883,33 @@ struct FlowLayout: Layout {
             }
 
             self.size.height = y + lineHeight
+        }
+    }
+}
+
+// MARK: - Simple Processing View (后续对话使用的简化版)
+
+struct SimpleProcessingView: View {
+    let isProcessing: Bool
+
+    var body: some View {
+        if isProcessing {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .progressViewStyle(CircularProgressViewStyle(tint: CLIColors.cyan))
+                    .scaleEffect(0.7)
+
+                Text("处理中...")
+                    .font(.cliCaption)
+                    .foregroundColor(CLIColors.textSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(CLIColors.backgroundSecondary)
+            .overlay(
+                Rectangle()
+                    .stroke(CLIColors.cyan.opacity(0.3), lineWidth: 1)
+            )
         }
     }
 }

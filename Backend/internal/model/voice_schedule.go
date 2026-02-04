@@ -112,15 +112,15 @@ type UserSchedulePreference struct {
 
 // VoiceScheduleSession 语音时刻表会话（Redis 存储）
 type VoiceScheduleSession struct {
-	UserID            string         `json:"user_id"`
-	SessionID         string         `json:"session_id"`
-	CurrentSchedule   []ScheduleItem `json:"current_schedule"`
+	UserID            string            `json:"user_id"`
+	SessionID         string            `json:"session_id"`
+	CurrentSchedule   []ScheduleItem    `json:"current_schedule"`
 	PendingQuestions  []ClarifyQuestion `json:"pending_questions,omitempty"`
-	PartialSchedule   []ScheduleItem `json:"partial_schedule,omitempty"`
-	TranscriptHistory []string       `json:"transcript_history"`
-	State             string         `json:"state"` // initial, clarifying, schedule_ready, confirmed
+	PartialSchedule   []ScheduleItem    `json:"partial_schedule,omitempty"`
+	TranscriptHistory []string          `json:"transcript_history"`
+	State             string            `json:"state"` // initial, clarifying, schedule_ready, confirmed (旧字段，保持兼容)
 	CurrentStatusGuess *CurrentStatusGuess `json:"current_status_guess,omitempty"`
-	CreatedAt         time.Time      `json:"created_at"`
+	CreatedAt         time.Time         `json:"created_at"`
 
 	// Plan Mode 上下文
 	UserContext         *CompressedUserContext `json:"user_context,omitempty"`         // 压缩后的用户上下文
@@ -130,6 +130,16 @@ type VoiceScheduleSession struct {
 	// 可见性设置
 	Visibility ScheduleVisibility `json:"visibility,omitempty"` // 可见性
 	CircleIDs  []string           `json:"circle_ids,omitempty"` // 指定圈子 ID
+
+	// 目标日期（支持"明天"、"后天"等）
+	TargetDate time.Time `json:"target_date,omitempty"` // 时刻表对应的日期，默认为今天
+
+	// ========== 多阶段对话状态机字段（新增）==========
+	Phase          ConversationPhase   `json:"phase,omitempty"`           // 当前阶段
+	IntentSummary  *IntentSummary      `json:"intent_summary,omitempty"`  // 意图摘要
+	DraftPlan      *DraftPlan          `json:"draft_plan,omitempty"`      // 计划草案
+	Clarifications []ClarificationItem `json:"clarifications,omitempty"` // 待澄清项列表
+	PhaseHistory   []PhaseTransition   `json:"phase_history,omitempty"`   // 阶段转换历史
 }
 
 // ClarifyQuestion 澄清问题
@@ -151,18 +161,26 @@ type CurrentStatusGuess struct {
 type VoiceScheduleEventType string
 
 const (
-	VSEventSessionStart   VoiceScheduleEventType = "session_start"
-	VSEventRecognizing    VoiceScheduleEventType = "recognizing"
-	VSEventTranscript     VoiceScheduleEventType = "transcript"
-	VSEventProgress       VoiceScheduleEventType = "progress"       // 过程反馈
-	VSEventThinking       VoiceScheduleEventType = "thinking"
-	VSEventClarify        VoiceScheduleEventType = "clarify"
-	VSEventSchedule       VoiceScheduleEventType = "schedule"
-	VSEventCurrentStatus  VoiceScheduleEventType = "current_status"
+	VSEventSessionStart     VoiceScheduleEventType = "session_start"
+	VSEventRecognizing      VoiceScheduleEventType = "recognizing"
+	VSEventTranscript       VoiceScheduleEventType = "transcript"
+	VSEventProgress         VoiceScheduleEventType = "progress"         // 过程反馈
+	VSEventThinking         VoiceScheduleEventType = "thinking"
+	VSEventClarify          VoiceScheduleEventType = "clarify"
+	VSEventSchedule         VoiceScheduleEventType = "schedule"
+	VSEventCurrentStatus    VoiceScheduleEventType = "current_status"
+	VSEventChat             VoiceScheduleEventType = "chat"             // 聊天回复（非时刻表操作）
 	VSEventVisibilityPrompt VoiceScheduleEventType = "visibility_prompt" // 可见性选择
-	VSEventCircleList     VoiceScheduleEventType = "circle_list"     // 圈子列表
-	VSEventConfirmed      VoiceScheduleEventType = "confirmed"
-	VSEventError          VoiceScheduleEventType = "error"
+	VSEventCircleList       VoiceScheduleEventType = "circle_list"       // 圈子列表
+	VSEventConfirmed        VoiceScheduleEventType = "confirmed"
+	VSEventError            VoiceScheduleEventType = "error"
+
+	// ========== 多阶段对话状态机事件（新增）==========
+	VSEventPhaseChange    VoiceScheduleEventType = "phase_change"    // 阶段转换
+	VSEventIntentSummary  VoiceScheduleEventType = "intent_summary"  // 意图理解结果
+	VSEventDiscussion     VoiceScheduleEventType = "discussion"      // 讨论消息
+	VSEventDraftPlan      VoiceScheduleEventType = "draft_plan"      // 计划草案（待审批）
+	VSEventApprovalPrompt VoiceScheduleEventType = "approval_prompt" // 审批提示
 )
 
 // VoiceScheduleEvent SSE 事件
@@ -189,6 +207,17 @@ type VoiceScheduleEvent struct {
 	// 可见性相关字段
 	Visibility string              `json:"visibility,omitempty"` // 默认可见性
 	Circles    []CircleInfoCompact `json:"circles,omitempty"`    // 圈子列表
+
+	// 查询模式标识（查询已有时刻表时为 true，前端不显示确认按钮）
+	IsQuery bool `json:"is_query,omitempty"`
+
+	// ========== 多阶段对话状态机字段（新增）==========
+	Phase          ConversationPhase   `json:"phase,omitempty"`           // 当前阶段
+	PreviousPhase  ConversationPhase   `json:"previous_phase,omitempty"`  // 上一阶段
+	IntentSummary  *IntentSummary      `json:"intent_summary,omitempty"`  // 意图摘要
+	DraftPlan      *DraftPlan          `json:"draft_plan,omitempty"`      // 计划草案
+	Clarifications []ClarificationItem `json:"clarifications,omitempty"` // 待澄清项
+	CanApprove     bool                `json:"can_approve,omitempty"`     // 是否可以审批
 }
 
 // CircleInfoCompact 圈子信息（用于语音时刻表可见性选择）
@@ -229,16 +258,19 @@ type VoiceScheduleInteractionData struct {
 
 // LLMVoiceAnalysisResult LLM 分析结果
 type LLMVoiceAnalysisResult struct {
-	Action          string              `json:"action"` // create, modify, cancel, guess, clarify
+	Action          string              `json:"action"` // create, modify, cancel, guess, clarify, query, replace, chat
 	Schedule        []ScheduleItem      `json:"schedule,omitempty"`
 	CancelledItems  []string            `json:"cancelled_items,omitempty"`
 	Questions       []ClarifyQuestion   `json:"questions,omitempty"`
 	PartialSchedule []ScheduleItem      `json:"partial_schedule,omitempty"`
 	CurrentStatus   *CurrentStatusGuess `json:"current_status,omitempty"`
+	Message         string              `json:"message,omitempty"`        // chat 动作的回复内容
 	Reason          string              `json:"reason,omitempty"`
-	Reasoning       []string            `json:"reasoning,omitempty"` // 推理依据
-	Thinking        string              `json:"thinking,omitempty"`  // 思考过程
-	NeedThinking    bool                `json:"need_thinking,omitempty"` // 是否需要深度思考
+	Reasoning       []string            `json:"reasoning,omitempty"`      // 推理依据
+	Thinking        string              `json:"thinking,omitempty"`       // 思考过程
+	NeedThinking    bool                `json:"need_thinking,omitempty"`  // 是否需要深度思考
+	TargetDate      string              `json:"target_date,omitempty"`    // 目标日期：YYYY-MM-DD 格式（兼容 today/tomorrow 等旧格式）
+	DateReasoning   string              `json:"date_reasoning,omitempty"` // 日期推理过程（调试用）
 }
 
 // ========== Plan Mode 上下文数据结构 ==========
@@ -340,3 +372,64 @@ const (
 	VisibilityCircles    ScheduleVisibility = "circles"     // 指定圈子可见
 	VisibilityPrivate    ScheduleVisibility = "private"     // 仅自己可见
 )
+
+// ========== 多阶段对话状态机 ==========
+
+// ConversationPhase 对话阶段
+type ConversationPhase string
+
+const (
+	PhaseUnderstanding ConversationPhase = "understanding" // 理解意图
+	PhaseDiscussing    ConversationPhase = "discussing"    // 讨论确认
+	PhasePlanning      ConversationPhase = "planning"      // 生成计划
+	PhaseApproval      ConversationPhase = "approval"      // 等待审批
+	PhaseExecution     ConversationPhase = "execution"     // 执行保存
+	PhaseCompleted     ConversationPhase = "completed"     // 完成
+	PhaseIdle          ConversationPhase = "idle"          // 聊天/非时刻表
+)
+
+// IntentSummary 意图摘要（Understanding 阶段输出）
+type IntentSummary struct {
+	Action           string   `json:"action"`            // create/modify/query/cancel/chat
+	TargetDate       string   `json:"target_date"`       // YYYY-MM-DD
+	Activities       []string `json:"activities"`        // 提取的活动列表
+	TimeReferences   []string `json:"time_references"`   // 时间引用 ["下午", "晚上8点"]
+	HasAmbiguity     bool     `json:"has_ambiguity"`     // 是否有模糊信息
+	AmbiguityReasons []string `json:"ambiguity_reasons"` // 模糊原因列表
+	Confidence       float64  `json:"confidence"`        // 置信度 0.0-1.0
+	Reasoning        []string `json:"reasoning"`         // 推理过程
+}
+
+// DraftPlan 计划草案（Planning 阶段输出）
+type DraftPlan struct {
+	Schedule  []ScheduleItem `json:"schedule"`   // 完整时刻表
+	Summary   string         `json:"summary"`    // 一句话总结
+	Changes   []PlanChange   `json:"changes"`    // 变更列表（对比已有时刻表）
+	Reasoning []string       `json:"reasoning"`  // 推理过程
+	Version   int            `json:"version"`    // 版本号（用于多次修改）
+	CreatedAt time.Time      `json:"created_at"` // 创建时间
+}
+
+// PlanChange 计划变更条目
+type PlanChange struct {
+	Type        string `json:"type"`        // add/modify/delete
+	TimeRange   string `json:"time_range"`  // "14:00-16:00"
+	Description string `json:"description"` // "新增开会"
+}
+
+// ClarificationItem 待澄清项（Discussing 阶段使用）
+type ClarificationItem struct {
+	ID       string `json:"id"`               // 唯一标识
+	Question string `json:"question"`         // 问题内容
+	Reason   string `json:"reason"`           // 为什么需要澄清
+	Answered bool   `json:"answered"`         // 是否已回答
+	Answer   string `json:"answer,omitempty"` // 用户的回答
+}
+
+// PhaseTransition 阶段转换记录
+type PhaseTransition struct {
+	From      ConversationPhase `json:"from"`      // 起始阶段
+	To        ConversationPhase `json:"to"`        // 目标阶段
+	Reason    string            `json:"reason"`    // 转换原因
+	Timestamp time.Time         `json:"timestamp"` // 转换时间
+}
