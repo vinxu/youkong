@@ -16,8 +16,17 @@ type BuiltinToolDeps struct {
 	CreateStatusScheduleFunc   func(ctx context.Context, userID string, items []ScheduleItemInfo, visibility string) error
 	GetFriendListFunc          func(ctx context.Context, userID string) ([]FriendInfo, error)
 
+	// 语音时刻表相关
+	ConfirmScheduleFunc      func(ctx context.Context, userID string, sessionID string) error
+	CancelSessionFunc        func(ctx context.Context, userID string, sessionID string) error
+	UpdateCurrentStatusFunc  func(ctx context.Context, userID string, emoji string, status string) error
+	GetCurrentScheduleFunc   func(ctx context.Context, userID string) ([]ScheduleItemInfo, error)
+
 	// 当前用户 ID（从上下文获取）
 	CurrentUserID string
+
+	// 当前会话 ID（语音时刻表用）
+	CurrentSessionID string
 }
 
 // FriendStatusInfo 好友状态信息
@@ -193,6 +202,60 @@ func RegisterBuiltinTools(registry *ToolRegistry, deps *BuiltinToolDeps) {
 			Properties: map[string]ToolParam{},
 		},
 		Handler: createGetCurrentTimeHandler(),
+	})
+
+	// 8. 确认保存时刻表（用户说"确认"/"好的"/"是的"/"没问题"时调用）
+	registry.MustRegister(&Tool{
+		Name:        "confirm_schedule",
+		Description: "确认并保存当前的时刻表。当用户表示同意、确认、肯定时调用此工具。例如用户说：确认、好的、是的、没问题、可以、行、对、保存吧、就这样。",
+		Parameters: ToolParameters{
+			Type:       "object",
+			Properties: map[string]ToolParam{},
+		},
+		Handler: createConfirmScheduleHandler(deps),
+	})
+
+	// 9. 取消当前会话（用户说"取消"/"不要了"/"算了"时调用）
+	registry.MustRegister(&Tool{
+		Name:        "cancel_session",
+		Description: "取消当前操作或会话。当用户表示取消、放弃、不要时调用此工具。例如用户说：取消、不要了、算了、不用了、放弃。",
+		Parameters: ToolParameters{
+			Type:       "object",
+			Properties: map[string]ToolParam{},
+		},
+		Handler: createCancelSessionHandler(deps),
+	})
+
+	// 10. 更新当前时段状态（用户说"更新到首页"/"帮我更新状态"时调用）
+	registry.MustRegister(&Tool{
+		Name:        "update_current_status",
+		Description: "更新当前时段的状态到首页。当用户想要立即更新当前显示的状态时调用。例如用户说：更新到首页、帮我更新状态、把XX状态更新上去、同步到首页、现在是XX状态。",
+		Parameters: ToolParameters{
+			Type: "object",
+			Properties: map[string]ToolParam{
+				"emoji": {
+					Type:        "string",
+					Description: "状态表情，如 😊、💼、🏠 等",
+				},
+				"status": {
+					Type:        "string",
+					Description: "状态描述，2-6个字，如：开心、工作中、在家休息",
+				},
+			},
+			Required: []string{"emoji", "status"},
+		},
+		Handler: createUpdateCurrentStatusHandler(deps),
+	})
+
+	// 11. 获取当前时刻表（查询用）
+	registry.MustRegister(&Tool{
+		Name:        "get_current_schedule",
+		Description: "获取用户当前的时刻表。用于查看今天的安排。",
+		Parameters: ToolParameters{
+			Type:       "object",
+			Properties: map[string]ToolParam{},
+		},
+		Handler: createGetCurrentScheduleHandler(deps),
 	})
 }
 
@@ -459,6 +522,131 @@ func createGetCurrentTimeHandler() ToolHandler {
 		return &ToolResult{
 			Success: true,
 			Data:    data,
+		}, nil
+	}
+}
+
+func createConfirmScheduleHandler(deps *BuiltinToolDeps) ToolHandler {
+	return func(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
+		if deps.ConfirmScheduleFunc == nil {
+			return &ToolResult{
+				Success: false,
+				Error:   "确认时刻表功能未配置",
+			}, nil
+		}
+
+		err := deps.ConfirmScheduleFunc(ctx, deps.CurrentUserID, deps.CurrentSessionID)
+		if err != nil {
+			return &ToolResult{
+				Success: false,
+				Error:   err.Error(),
+			}, nil
+		}
+
+		return &ToolResult{
+			Success: true,
+			Data:    map[string]interface{}{"message": "时刻表已确认保存", "action": "confirmed"},
+		}, nil
+	}
+}
+
+func createCancelSessionHandler(deps *BuiltinToolDeps) ToolHandler {
+	return func(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
+		if deps.CancelSessionFunc == nil {
+			return &ToolResult{
+				Success: false,
+				Error:   "取消会话功能未配置",
+			}, nil
+		}
+
+		err := deps.CancelSessionFunc(ctx, deps.CurrentUserID, deps.CurrentSessionID)
+		if err != nil {
+			return &ToolResult{
+				Success: false,
+				Error:   err.Error(),
+			}, nil
+		}
+
+		return &ToolResult{
+			Success: true,
+			Data:    map[string]interface{}{"message": "已取消", "action": "cancelled"},
+		}, nil
+	}
+}
+
+func createUpdateCurrentStatusHandler(deps *BuiltinToolDeps) ToolHandler {
+	return func(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
+		if deps.UpdateCurrentStatusFunc == nil {
+			return &ToolResult{
+				Success: false,
+				Error:   "更新状态功能未配置",
+			}, nil
+		}
+
+		emoji, ok := args["emoji"].(string)
+		if !ok || emoji == "" {
+			return &ToolResult{
+				Success: false,
+				Error:   "emoji 参数不能为空",
+			}, nil
+		}
+
+		status, ok := args["status"].(string)
+		if !ok || status == "" {
+			return &ToolResult{
+				Success: false,
+				Error:   "status 参数不能为空",
+			}, nil
+		}
+
+		err := deps.UpdateCurrentStatusFunc(ctx, deps.CurrentUserID, emoji, status)
+		if err != nil {
+			return &ToolResult{
+				Success: false,
+				Error:   err.Error(),
+			}, nil
+		}
+
+		return &ToolResult{
+			Success: true,
+			Data: map[string]interface{}{
+				"message": "当前状态已更新",
+				"action":  "status_updated",
+				"emoji":   emoji,
+				"status":  status,
+			},
+		}, nil
+	}
+}
+
+func createGetCurrentScheduleHandler(deps *BuiltinToolDeps) ToolHandler {
+	return func(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
+		if deps.GetCurrentScheduleFunc == nil {
+			return &ToolResult{
+				Success: false,
+				Error:   "获取时刻表功能未配置",
+			}, nil
+		}
+
+		schedule, err := deps.GetCurrentScheduleFunc(ctx, deps.CurrentUserID)
+		if err != nil {
+			return &ToolResult{
+				Success: false,
+				Error:   err.Error(),
+			}, nil
+		}
+
+		if len(schedule) == 0 {
+			return &ToolResult{
+				Success: true,
+				Data:    map[string]string{"message": "暂无时刻表"},
+			}, nil
+		}
+
+		return &ToolResult{
+			Success:       true,
+			Data:          map[string]interface{}{"schedule": schedule, "count": len(schedule)},
+			TokenEstimate: estimateTokens(schedule),
 		}, nil
 	}
 }
