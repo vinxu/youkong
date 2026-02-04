@@ -15,6 +15,7 @@ const (
 	OccupationFreelancer    OccupationType = "freelancer"
 	OccupationShiftWorker   OccupationType = "shift_worker"
 	OccupationEntrepreneur  OccupationType = "entrepreneur"
+	OccupationInvestor      OccupationType = "investor"
 	OccupationHomemaker     OccupationType = "homemaker"
 	OccupationRetired       OccupationType = "retired"
 	OccupationOther         OccupationType = "other"
@@ -78,8 +79,36 @@ func (w *WorkHours) Scan(value interface{}) error {
 }
 
 // Value 实现 driver.Valuer 接口
-func (w WorkHours) Value() (driver.Value, error) {
+func (w *WorkHours) Value() (driver.Value, error) {
+	if w == nil {
+		return nil, nil // 返回 NULL
+	}
 	return json.Marshal(w)
+}
+
+// 用户偏好设置
+type Preferences map[string]string
+
+// Scan 实现 sql.Scanner 接口
+func (p *Preferences) Scan(value interface{}) error {
+	if value == nil {
+		*p = make(map[string]string)
+		return nil
+	}
+	bytes, ok := value.([]byte)
+	if !ok {
+		*p = make(map[string]string)
+		return nil
+	}
+	return json.Unmarshal(bytes, p)
+}
+
+// Value 实现 driver.Valuer 接口
+func (p Preferences) Value() (driver.Value, error) {
+	if p == nil {
+		return json.Marshal(map[string]string{})
+	}
+	return json.Marshal(p)
 }
 
 // 常驻地点
@@ -124,7 +153,7 @@ type UserProfileData struct {
 	ExerciseFrequency  ExerciseFrequency   `db:"exercise_frequency" json:"exercise_frequency"`
 	SocialPreference   SocialPreference    `db:"social_preference" json:"social_preference"`
 	FrequentLocations  FrequentLocations   `db:"frequent_locations" json:"frequent_locations"`
-	Preferences        map[string]string   `db:"preferences" json:"preferences,omitempty"`
+	Preferences        Preferences         `db:"preferences" json:"preferences,omitempty"`
 	CreatedAt          time.Time           `db:"created_at" json:"created_at"`
 	UpdatedAt          time.Time           `db:"updated_at" json:"updated_at"`
 }
@@ -138,5 +167,49 @@ type UserProfileRequest struct {
 	ExerciseFrequency ExerciseFrequency  `json:"exercise_frequency" binding:"required,oneof=daily regular occasional rarely"`
 	SocialPreference  SocialPreference   `json:"social_preference" binding:"required,oneof=very_social moderately_social introvert"`
 	FrequentLocations []FrequentLocation `json:"frequent_locations,omitempty"`
-	Preferences       map[string]string  `json:"preferences,omitempty"`
+	Preferences       Preferences        `json:"preferences,omitempty"`
+}
+
+// 简化的用户画像请求（引导流程用）
+type SimpleProfileRequest struct {
+	ProfileType string `json:"profile_type" binding:"required,oneof=office_worker student freelancer entrepreneur investor parent retired"`
+}
+
+// ProfileType 到 OccupationType 的映射
+func MapProfileTypeToOccupation(profileType string) OccupationType {
+	switch profileType {
+	case "office_worker":
+		return OccupationOfficeWorker
+	case "student":
+		return OccupationStudent
+	case "freelancer":
+		return OccupationFreelancer
+	case "entrepreneur":
+		return OccupationEntrepreneur
+	case "investor":
+		return OccupationInvestor
+	case "parent":
+		return OccupationHomemaker // 全职父母映射到 homemaker
+	case "retired":
+		return OccupationRetired
+	default:
+		return OccupationOther
+	}
+}
+
+// 获取 ProfileType 的中文名称
+func GetProfileTypeName(profileType string) string {
+	names := map[string]string{
+		"office_worker": "上班族",
+		"student":       "学生",
+		"freelancer":    "自由职业",
+		"entrepreneur":  "创业者",
+		"investor":      "投资人",
+		"parent":        "全职父母",
+		"retired":       "退休人士",
+	}
+	if name, ok := names[profileType]; ok {
+		return name
+	}
+	return "其他"
 }
