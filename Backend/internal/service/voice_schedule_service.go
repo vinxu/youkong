@@ -134,7 +134,7 @@ func (s *VoiceScheduleService) ProcessVoiceInput(
 
 	if userCtx.CoreMemory != nil && userCtx.CoreMemory.BehaviorInsights != "" {
 		s.sendProgress(callback, model.ProgressCheckingHistory, "回顾你的习惯...")
-		s.sendProgressDetail(callback, truncateString(userCtx.CoreMemory.BehaviorInsights, 50))
+		s.sendProgressDetail(callback, truncateStr(userCtx.CoreMemory.BehaviorInsights, 50))
 	}
 
 	if len(userCtx.TodaySchedules) > 0 {
@@ -1069,9 +1069,9 @@ func (s *VoiceScheduleService) CompressUserContext(ctx context.Context, userCtx 
 
 	// 3. 历史规律：复用 CoreMemory 的 LLM 提炼结果
 	if userCtx.CoreMemory != nil {
-		compressed.BehaviorInsights = truncateString(userCtx.CoreMemory.BehaviorInsights, 100)
-		compressed.TimePatterns = truncateString(userCtx.CoreMemory.TimePatterns, 100)
-		compressed.LocationPrefs = truncateString(userCtx.CoreMemory.LocationPreferences, 100)
+		compressed.BehaviorInsights = truncateStr(userCtx.CoreMemory.BehaviorInsights, 100)
+		compressed.TimePatterns = truncateStr(userCtx.CoreMemory.TimePatterns, 100)
+		compressed.LocationPrefs = truncateStr(userCtx.CoreMemory.LocationPreferences, 100)
 	}
 
 	// 4. 设备状态压缩
@@ -1102,10 +1102,10 @@ func (s *VoiceScheduleService) CompressUserContext(ctx context.Context, userCtx 
 
 		// 日历事件
 		if userCtx.DeviceData.CurrentEvent != "" {
-			parts = append(parts, fmt.Sprintf("正在「%s」", truncateString(userCtx.DeviceData.CurrentEvent, 10)))
+			parts = append(parts, fmt.Sprintf("正在「%s」", truncateStr(userCtx.DeviceData.CurrentEvent, 10)))
 		} else if userCtx.DeviceData.NextEvent != "" && userCtx.DeviceData.NextEventIn > 0 {
 			parts = append(parts, fmt.Sprintf("%d分钟后有「%s」",
-				userCtx.DeviceData.NextEventIn, truncateString(userCtx.DeviceData.NextEvent, 10)))
+				userCtx.DeviceData.NextEventIn, truncateStr(userCtx.DeviceData.NextEvent, 10)))
 		}
 
 		if len(parts) > 0 {
@@ -1143,7 +1143,7 @@ func (s *VoiceScheduleService) CompressConversationHistory(history []model.Conve
 func (s *VoiceScheduleService) addConversationTurn(session *model.VoiceScheduleSession, role, content string) {
 	turn := model.ConversationTurn{
 		Role:    role,
-		Content: truncateString(content, maxTurnLength),
+		Content: truncateStr(content, maxTurnLength),
 		Time:    time.Now().Format("15:04:05"),
 	}
 	session.ConversationHistory = append(session.ConversationHistory, turn)
@@ -1162,8 +1162,8 @@ func getChineseWeekday(weekday time.Weekday) string {
 	return weekdays[weekday]
 }
 
-// truncateString 截断字符串
-func truncateString(s string, maxLen int) string {
+// truncateStr 截断字符串（避免与其他 service 冲突）
+func truncateStr(s string, maxLen int) string {
 	runes := []rune(s)
 	if len(runes) > maxLen {
 		return string(runes[:maxLen-3]) + "..."

@@ -187,12 +187,13 @@ type VoiceScheduleEvent struct {
 	Reasoning []string `json:"reasoning,omitempty"` // 推理依据
 
 	// 可见性相关字段
-	Visibility string       `json:"visibility,omitempty"` // 默认可见性
-	Circles    []CircleInfo `json:"circles,omitempty"`    // 圈子列表
+	Visibility string              `json:"visibility,omitempty"` // 默认可见性
+	Circles    []CircleInfoCompact `json:"circles,omitempty"`    // 圈子列表
 }
 
-// CircleInfo 圈子信息（用于可见性选择）
-type CircleInfo struct {
+// CircleInfoCompact 圈子信息（用于语音时刻表可见性选择）
+// 注意：与 invitation.go 中的 CircleInfo 字段相似，但 JSON 标签不同
+type CircleInfoCompact struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Emoji       string `json:"emoji"`
