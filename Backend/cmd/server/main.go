@@ -193,7 +193,7 @@ func main() {
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo, redisClient)
-	voiceScheduleService := service.NewVoiceScheduleService(scheduleRepo, memoryRepo, userProfileService, redisClient, asrClient, llmClient)
+	voiceScheduleService := service.NewVoiceScheduleService(scheduleRepo, memoryRepo, userProfileService, redisClient, asrClient, llmClient, cfg.LLM.APIKey)
 
 	// 初始化 Agent Chat Service（Tool Agent 框架）
 	var agentChatService *service.AgentChatService
