@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	"youkong/internal/middleware"
 	"youkong/internal/model"
+	"youkong/internal/pkg/agent"
 	"youkong/internal/pkg/response"
 	"youkong/internal/service"
 )
@@ -20,14 +22,26 @@ type AgentHandler struct {
 	agentService         *service.AgentService
 	memoryService        *service.MemoryService
 	voiceScheduleService *service.VoiceScheduleService
+	agentChatService     *service.AgentChatService
+	scheduleRepo         ScheduleRepositoryInterface
+}
+
+// ScheduleRepositoryInterface 时刻表 Repository 接口
+type ScheduleRepositoryInterface interface {
+	GetUserScheduleHistory(ctx context.Context, userID string, beforeDate string, limit int) ([]*model.StatusSchedule, error)
+	GetUserOldestScheduleDate(ctx context.Context, userID string) (string, error)
+	CountUserSchedules(ctx context.Context, userID string) (int, error)
+	GetActiveByUserAndDate(ctx context.Context, userID string, date time.Time) (*model.StatusSchedule, error)
 }
 
 // NewAgentHandler 创建 Agent 处理器
-func NewAgentHandler(agentService *service.AgentService, memoryService *service.MemoryService, voiceScheduleService *service.VoiceScheduleService) *AgentHandler {
+func NewAgentHandler(agentService *service.AgentService, memoryService *service.MemoryService, voiceScheduleService *service.VoiceScheduleService, agentChatService *service.AgentChatService, scheduleRepo ScheduleRepositoryInterface) *AgentHandler {
 	return &AgentHandler{
 		agentService:         agentService,
 		memoryService:        memoryService,
 		voiceScheduleService: voiceScheduleService,
+		agentChatService:     agentChatService,
+		scheduleRepo:         scheduleRepo,
 	}
 }
 
@@ -52,6 +66,24 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 		return
 	}
 
+	// 【优先级检查】如果有活跃时刻表，使用时刻表状态而不是 LLM 分析
+	if scheduleResult := h.checkActiveScheduleStatus(c.Request.Context(), userID); scheduleResult != nil {
+		fmt.Printf("[上报] 使用时刻表状态 user=%s emoji=%s status=%s\n",
+			userID, scheduleResult.LifeStatus.Emoji, scheduleResult.LifeStatus.Label)
+
+		// 缓存时刻表状态
+		if h.memoryService != nil {
+			_ = h.memoryService.CacheAnalysisResult(c.Request.Context(), userID, scheduleResult)
+		}
+
+		response.Success(c, gin.H{
+			"success":  true,
+			"message":  "使用时刻表状态",
+			"analysis": scheduleResult,
+		})
+		return
+	}
+
 	fmt.Printf("[上报] 开始分析 user=%s\n", userID)
 	result, err := h.memoryService.AnalyzeAndUpdateMemory(c.Request.Context(), userID, &req)
 	if err != nil {
@@ -68,6 +100,97 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 		"message":  "分析完成",
 		"analysis": result,
 	})
+}
+
+// checkActiveScheduleStatus 检查用户是否有活跃时刻表，如果有返回当前时段的状态
+func (h *AgentHandler) checkActiveScheduleStatus(ctx context.Context, userID string) *model.AnalysisResult {
+	if h.scheduleRepo == nil {
+		return nil
+	}
+
+	// 获取今天的活跃时刻表
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	schedule, err := h.scheduleRepo.GetActiveByUserAndDate(ctx, userID, today)
+	if err != nil || schedule == nil || len(schedule.Items) == 0 {
+		return nil
+	}
+
+	// 检查当前时间是否在某个时段内
+	currentTime := now.Format("15:04")
+	for _, item := range schedule.Items {
+		if isTimeInRange(currentTime, item.StartTime, item.EndTime) {
+			// 找到当前时段，返回时刻表状态
+			return &model.AnalysisResult{
+				Availability: model.AvailabilityAnalysis{
+					Status:      getScheduleStatusText(item.Status),
+					Probability: guessScheduleProbability(item.Status),
+					Reason:      item.Status,
+					Confidence:  "high",
+				},
+				LifeStatus: model.LifeStatus{
+					Emoji:       item.Emoji,
+					Label:       item.Status,
+					Description: item.Status,
+				},
+				UpdatedAt: now,
+			}
+		}
+	}
+
+	return nil
+}
+
+// isTimeInRange 检查时间是否在范围内（复用调度器逻辑）
+func isTimeInRange(current, start, end string) bool {
+	// 处理跨午夜的情况
+	if end < start {
+		return current >= start || current < end
+	}
+	return current >= start && current < end
+}
+
+// getScheduleStatusText 根据状态描述判断有空/忙碌
+func getScheduleStatusText(status string) string {
+	busyKeywords := []string{"开会", "工作", "上班", "上课", "出差", "加班", "忙"}
+	for _, keyword := range busyKeywords {
+		if containsStr(status, keyword) {
+			return "忙碌"
+		}
+	}
+
+	freeKeywords := []string{"休息", "休闲", "逛街", "刷", "玩", "躺", "看", "吃", "喝", "聚"}
+	for _, keyword := range freeKeywords {
+		if containsStr(status, keyword) {
+			return "有空"
+		}
+	}
+
+	return "可能有空"
+}
+
+// guessScheduleProbability 猜测有空概率
+func guessScheduleProbability(status string) int {
+	statusText := getScheduleStatusText(status)
+	switch statusText {
+	case "有空":
+		return 80
+	case "忙碌":
+		return 20
+	default:
+		return 50
+	}
+}
+
+// containsStr 检查字符串是否包含子串
+func containsStr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 // GetFreeProbability 获取好友有空概率列表（增强版，带生活状态）
@@ -689,7 +812,10 @@ func (h *AgentHandler) VoiceScheduleStream(c *gin.Context) {
 		}
 	}
 
-	fmt.Printf("[VoiceSchedule] 收到音频 user=%s size=%d format=%s\n", userID, len(audioData), audioFormat)
+	// 获取可选的 session_id（用于多轮对话保持上下文）
+	sessionID := c.PostForm("session_id")
+
+	fmt.Printf("[VoiceSchedule] 收到音频 user=%s size=%d format=%s session=%s\n", userID, len(audioData), audioFormat, sessionID)
 
 	// 设置 SSE 响应头
 	c.Header("Content-Type", "text/event-stream")
@@ -699,8 +825,8 @@ func (h *AgentHandler) VoiceScheduleStream(c *gin.Context) {
 
 	w := c.Writer
 
-	// 流式处理语音输入
-	_, err = h.voiceScheduleService.ProcessVoiceInput(c.Request.Context(), userID, audioData, audioFormat, func(event *model.VoiceScheduleEvent) {
+	// 流式处理语音输入（传入 sessionID 以恢复会话）
+	_, err = h.voiceScheduleService.ProcessVoiceInput(c.Request.Context(), userID, sessionID, audioData, audioFormat, func(event *model.VoiceScheduleEvent) {
 		data, err := json.Marshal(event)
 		if err != nil {
 			return
@@ -803,7 +929,311 @@ func (h *AgentHandler) VoiceScheduleInteract(c *gin.Context) {
 		return
 	}
 
-	// 发送完成信号
+	// 发送完成信号（VoiceScheduleInteract）
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	w.Flush()
+}
+
+// VoiceScheduleText 语音时刻表文本测试接口（用于测试，跳过语音识别）
+// POST /api/agent/voice-schedule/text
+func (h *AgentHandler) VoiceScheduleText(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权"})
+		return
+	}
+
+	if h.voiceScheduleService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "语音服务未启用"})
+		return
+	}
+
+	var req struct {
+		SessionID string `json:"session_id"` // 可选，用于继续会话
+		Text      string `json:"text" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误: text 必填"})
+		return
+	}
+
+	fmt.Printf("[VoiceScheduleText] user=%s session=%s text=%s\n", userID, req.SessionID, req.Text)
+
+	// 设置 SSE 响应头
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	w := c.Writer
+
+	// 使用文本处理（跳过语音识别）
+	_, err := h.voiceScheduleService.ProcessTextInput(c.Request.Context(), userID, req.SessionID, req.Text, func(event *model.VoiceScheduleEvent) {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+	})
+
+	if err != nil {
+		errEvent := model.VoiceScheduleEvent{
+			Type:    model.VSEventError,
+			Message: err.Error(),
+		}
+		data, _ := json.Marshal(errEvent)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+		return
+	}
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	w.Flush()
+}
+
+// AgentChatStream Agent 聊天流式接口（Tool Use Loop）
+// POST /api/agent/chat/stream
+func (h *AgentHandler) AgentChatStream(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权"})
+		return
+	}
+
+	if h.agentChatService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Agent Chat 服务未启用"})
+		return
+	}
+
+	var req service.AgentChatRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误: message 必填"})
+		return
+	}
+
+	fmt.Printf("[AgentChatStream] user=%s session=%s message=%s\n", userID, req.SessionID, req.Message)
+
+	// 设置 SSE 响应头
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	w := c.Writer
+
+	// 流式执行 Agent Chat
+	_, err := h.agentChatService.Chat(c.Request.Context(), userID, &req, func(event *agent.AgentStreamEvent) {
+		data, err := event.ToJSON()
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+	})
+
+	if err != nil {
+		errEvent := agent.NewErrorEvent(err.Error())
+		data, _ := errEvent.ToJSON()
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+		return
+	}
+}
+
+// AgentChat Agent 聊天非流式接口
+// POST /api/agent/chat
+func (h *AgentHandler) AgentChat(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.agentChatService == nil {
+		response.InternalError(c, "Agent Chat 服务未启用")
+		return
+	}
+
+	var req service.AgentChatRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "参数错误: message 必填")
+		return
+	}
+
+	fmt.Printf("[AgentChat] user=%s session=%s message=%s\n", userID, req.SessionID, req.Message)
+
+	result, err := h.agentChatService.Chat(c.Request.Context(), userID, &req, nil)
+	if err != nil {
+		fmt.Printf("[AgentChat] error: %v\n", err)
+		response.InternalError(c, "处理失败")
+		return
+	}
+
+	response.Success(c, result)
+}
+
+// GetMyScheduleHistory 获取我的状态时刻表历史（分页）
+// GET /api/agent/my-schedule/history
+func (h *AgentHandler) GetMyScheduleHistory(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.scheduleRepo == nil {
+		response.InternalError(c, "时刻表服务未启用")
+		return
+	}
+
+	// 解析查询参数
+	limitStr := c.DefaultQuery("limit", "20")
+	beforeDate := c.Query("before_date") // YYYY-MM-DD 格式，可选
+
+	limit := 20
+	if l, err := parseLimit(limitStr); err == nil && l > 0 && l <= 100 {
+		limit = l
+	}
+
+	// 获取时刻表历史
+	schedules, err := h.scheduleRepo.GetUserScheduleHistory(c.Request.Context(), userID, beforeDate, limit+1)
+	if err != nil {
+		fmt.Printf("[GetMyScheduleHistory] 获取失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "获取失败")
+		return
+	}
+
+	// 判断是否有更多数据
+	hasMore := len(schedules) > limit
+	if hasMore {
+		schedules = schedules[:limit]
+	}
+
+	// 获取最早的时刻表日期
+	oldestDate, _ := h.scheduleRepo.GetUserOldestScheduleDate(c.Request.Context(), userID)
+
+	// 按日期分组并格式化响应
+	daySchedules := formatSchedulesByDate(schedules)
+
+	response.Success(c, gin.H{
+		"schedules":   daySchedules,
+		"has_more":    hasMore,
+		"oldest_date": oldestDate,
+	})
+}
+
+// parseLimit 解析 limit 参数
+func parseLimit(s string) (int, error) {
+	var limit int
+	_, err := fmt.Sscanf(s, "%d", &limit)
+	return limit, err
+}
+
+// DayScheduleResponse 按日期分组的时刻表响应
+type DayScheduleResponse struct {
+	ScheduleDate string               `json:"schedule_date"`
+	Items        []model.ScheduleItem `json:"items"`
+	Status       string               `json:"status"`
+}
+
+// formatSchedulesByDate 将时刻表按日期分组
+func formatSchedulesByDate(schedules []*model.StatusSchedule) []DayScheduleResponse {
+	// 使用 map 按日期分组，保留每天最新的时刻表
+	dateMap := make(map[string]*model.StatusSchedule)
+	dateOrder := make([]string, 0)
+
+	for _, s := range schedules {
+		dateStr := s.ScheduleDate.Format("2006-01-02")
+		if _, exists := dateMap[dateStr]; !exists {
+			dateMap[dateStr] = s
+			dateOrder = append(dateOrder, dateStr)
+		}
+	}
+
+	// 按日期顺序构建响应
+	result := make([]DayScheduleResponse, 0, len(dateOrder))
+	for _, dateStr := range dateOrder {
+		s := dateMap[dateStr]
+		result = append(result, DayScheduleResponse{
+			ScheduleDate: dateStr,
+			Items:        s.Items,
+			Status:       string(s.Status),
+		})
+	}
+
+	return result
+}
+
+// AgentVoiceChatStream Agent 语音聊天流式接口（语音转文字 + Tool Use Loop）
+// POST /api/agent/voice/stream
+func (h *AgentHandler) AgentVoiceChatStream(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权"})
+		return
+	}
+
+	if h.agentChatService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Agent Chat 服务未启用"})
+		return
+	}
+
+	// 解析表单数据
+	sessionID := c.PostForm("session_id")
+	audioFormat := c.PostForm("format")
+	if audioFormat == "" {
+		audioFormat = "m4a"
+	}
+
+	// 读取音频文件
+	file, _, err := c.Request.FormFile("audio")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少音频文件"})
+		return
+	}
+	defer file.Close()
+
+	audioData, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "读取音频文件失败"})
+		return
+	}
+
+	fmt.Printf("[AgentVoiceChatStream] user=%s session=%s format=%s audioSize=%d\n",
+		userID, sessionID, audioFormat, len(audioData))
+
+	// 设置 SSE 响应头
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	w := c.Writer
+
+	// 构建请求
+	req := &service.AgentVoiceChatRequest{
+		SessionID:   sessionID,
+		AudioData:   audioData,
+		AudioFormat: audioFormat,
+	}
+
+	// 流式执行语音聊天
+	_, _, err = h.agentChatService.VoiceChat(c.Request.Context(), userID, req, func(event *agent.AgentStreamEvent) {
+		data, err := event.ToJSON()
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+	})
+
+	if err != nil {
+		errEvent := agent.NewErrorEvent(err.Error())
+		data, _ := errEvent.ToJSON()
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+		return
+	}
 }

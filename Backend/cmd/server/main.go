@@ -195,6 +195,26 @@ func main() {
 	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo, redisClient)
 	voiceScheduleService := service.NewVoiceScheduleService(scheduleRepo, memoryRepo, userProfileService, redisClient, asrClient, llmClient)
 
+	// 初始化 Agent Chat Service（Tool Agent 框架）
+	var agentChatService *service.AgentChatService
+	if cfg.LLM.APIKey != "" {
+		agentChatService = service.NewAgentChatService(
+			cfg.LLM.APIKey,
+			cfg.LLM.Model,
+			redisClient,
+			userRepo,
+			friendshipRepo,
+			memoryRepo,
+			scheduleRepo,
+			agentService,
+			memoryService,
+			asrClient, // 语音识别客户端
+		)
+		logger.Info("Agent Chat Service 初始化成功（Tool Agent 框架）")
+	} else {
+		logger.Warn("LLM_API_KEY 未配置，Agent Chat 功能将不可用")
+	}
+
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
 	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL, messageRepo)
@@ -202,7 +222,7 @@ func main() {
 	conversationHandler := handler.NewConversationHandler(conversationService)
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
 	friendshipHandler := handler.NewFriendshipHandler(friendshipService)
-	agentHandler := handler.NewAgentHandler(agentService, memoryService, voiceScheduleService)
+	agentHandler := handler.NewAgentHandler(agentService, memoryService, voiceScheduleService, agentChatService, scheduleRepo)
 	contactHandler := handler.NewContactHandler(contactService)
 	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
 	wsHandler := handler.NewWSHandler(wsManager, jwtManager)
@@ -351,6 +371,11 @@ func main() {
 				agent.POST("/onboarding-status-options", agentHandler.GetOnboardingStatusOptions) // 引导流程状态选项
 				agent.POST("/voice-schedule/stream", agentHandler.VoiceScheduleStream)            // 语音时刻表（SSE）
 				agent.POST("/voice-schedule/interact", agentHandler.VoiceScheduleInteract)        // 语音时刻表交互
+				agent.POST("/voice-schedule/text", agentHandler.VoiceScheduleText)                // 语音时刻表文本测试
+				agent.POST("/chat/stream", agentHandler.AgentChatStream)                          // Tool Agent 聊天（SSE）
+				agent.POST("/chat", agentHandler.AgentChat)                                       // Tool Agent 聊天（非流式）
+				agent.POST("/voice/stream", agentHandler.AgentVoiceChatStream)                    // Tool Agent 语音聊天（SSE）
+				agent.GET("/my-schedule/history", agentHandler.GetMyScheduleHistory)              // 我的状态时刻表历史（分页）
 			}
 
 			// 通讯录模块
