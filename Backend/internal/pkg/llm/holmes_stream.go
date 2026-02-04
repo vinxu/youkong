@@ -112,19 +112,23 @@ func (h *HolmesAnalyzer) streamClues(clue *model.HolmesClue, callback HolmesStre
 		clues = append(clues, fmt.Sprintf("位置: %s", h.translatePlaceType(clue.PlaceType)))
 	}
 
-	// 屏幕状态
-	if clue.ScreenActive {
-		activity := h.translateActivityType(clue.ActivityType)
-		if clue.ScreenDurationMins > 0 {
-			clues = append(clues, fmt.Sprintf("屏幕: 活跃 - %s (%d分钟)", activity, clue.ScreenDurationMins))
+	// 屏幕状态（只有当有屏幕数据时才输出）
+	// 检查是否有实际的屏幕数据：ActivityType 不为空 或 有会话时长 或 有上次活跃时间
+	hasScreenData := clue.ActivityType != "" || clue.ScreenDurationMins > 0 || clue.LastActiveMinutesAgo > 0
+	if hasScreenData {
+		if clue.ScreenActive {
+			activity := h.translateActivityType(clue.ActivityType)
+			if clue.ScreenDurationMins > 0 {
+				clues = append(clues, fmt.Sprintf("屏幕: 活跃 - %s (%d分钟)", activity, clue.ScreenDurationMins))
+			} else {
+				clues = append(clues, fmt.Sprintf("屏幕: 活跃 - %s", activity))
+			}
 		} else {
-			clues = append(clues, fmt.Sprintf("屏幕: 活跃 - %s", activity))
-		}
-	} else {
-		if clue.LastActiveMinutesAgo > 0 {
-			clues = append(clues, fmt.Sprintf("屏幕: 闲置 (%d分钟前活跃)", clue.LastActiveMinutesAgo))
-		} else {
-			clues = append(clues, "屏幕: 闲置")
+			if clue.LastActiveMinutesAgo > 0 {
+				clues = append(clues, fmt.Sprintf("屏幕: 闲置 (%d分钟前活跃)", clue.LastActiveMinutesAgo))
+			} else {
+				clues = append(clues, "屏幕: 闲置")
+			}
 		}
 	}
 
@@ -794,7 +798,7 @@ type StatusOptionsLLMResponse struct {
 }
 
 // GenerateStatusOptionsStream 流式生成状态选项
-func (h *HolmesAnalyzer) GenerateStatusOptionsStream(ctx context.Context, input *HolmesInput, recentMemory []*model.UserStatusMemory, callback HolmesStreamCallback) (*model.StatusOptionsResult, error) {
+func (h *HolmesAnalyzer) GenerateStatusOptionsStream(ctx context.Context, input *HolmesInput, recentMemory []*model.UserStatusMemory, profileType string, callback HolmesStreamCallback) (*model.StatusOptionsResult, error) {
 	// Phase 1: 收集线索
 	callback(&HolmesStreamEvent{
 		Type:    "phase",
@@ -824,7 +828,7 @@ func (h *HolmesAnalyzer) GenerateStatusOptionsStream(ctx context.Context, input 
 		Content: "💭 AI 推理中...",
 	})
 
-	options, err := h.callStatusOptionsLLMStream(ctx, clue, semanticCtx, recentMemory, callback)
+	options, err := h.callStatusOptionsLLMStream(ctx, clue, semanticCtx, recentMemory, profileType, callback)
 	if err != nil {
 		log.Printf("[状态选项] LLM 调用失败，使用默认选项: %v", err)
 		callback(&HolmesStreamEvent{
@@ -853,12 +857,12 @@ func (h *HolmesAnalyzer) GenerateStatusOptionsStream(ctx context.Context, input 
 }
 
 // callStatusOptionsLLMStream 流式调用 LLM 生成状态选项
-func (h *HolmesAnalyzer) callStatusOptionsLLMStream(ctx context.Context, clue *model.HolmesClue, semanticCtx *model.SemanticContext, recentMemory []*model.UserStatusMemory, callback HolmesStreamCallback) ([]model.StatusOption, error) {
+func (h *HolmesAnalyzer) callStatusOptionsLLMStream(ctx context.Context, clue *model.HolmesClue, semanticCtx *model.SemanticContext, recentMemory []*model.UserStatusMemory, profileType string, callback HolmesStreamCallback) ([]model.StatusOption, error) {
 	if h.client == nil {
 		return nil, fmt.Errorf("LLM client not available")
 	}
 
-	prompt := h.buildStatusOptionsPrompt(clue, semanticCtx, recentMemory)
+	prompt := h.buildStatusOptionsPrompt(clue, semanticCtx, recentMemory, profileType)
 
 	requestBody := map[string]interface{}{
 		"model": holmesModel,
@@ -903,7 +907,7 @@ func (h *HolmesAnalyzer) callStatusOptionsLLMStream(ctx context.Context, clue *m
 }
 
 // buildStatusOptionsPrompt 构建状态选项 Prompt
-func (h *HolmesAnalyzer) buildStatusOptionsPrompt(clue *model.HolmesClue, ctx *model.SemanticContext, recentMemory []*model.UserStatusMemory) string {
+func (h *HolmesAnalyzer) buildStatusOptionsPrompt(clue *model.HolmesClue, ctx *model.SemanticContext, recentMemory []*model.UserStatusMemory, profileType string) string {
 	// 格式化当前数据
 	currentData := h.formatClues(clue)
 
@@ -935,7 +939,16 @@ func (h *HolmesAnalyzer) buildStatusOptionsPrompt(clue *model.HolmesClue, ctx *m
 		memoryText = strings.Join(lines, "\n")
 	}
 
-	return fmt.Sprintf(`你是一个了解用户的 AI 助手。根据以下设备数据和历史记录，推测用户此刻最可能在做什么。
+	// 获取用户角色中文名
+	profileName := "未知"
+	if profileType != "" {
+		profileName = model.GetProfileTypeName(profileType)
+	}
+
+	return fmt.Sprintf(`你是一个了解用户的 AI 助手。根据用户角色、设备数据和历史记录，推测用户此刻最可能在做什么。
+
+## 用户角色
+%s
 
 ## 当前数据
 %s
@@ -949,35 +962,49 @@ func (h *HolmesAnalyzer) buildStatusOptionsPrompt(clue *model.HolmesClue, ctx *m
 %s
 
 ## 要求
-1. 分析用户的设备数据和历史模式
-2. 推测用户此刻最可能在做什么
+1. **重要**：首先根据用户角色（%s）理解其日常作息和行为模式
+2. 结合设备数据和历史记录，推测用户此刻最可能在做什么
 3. 生成 4 个最可能的状态选项，按可能性从高到低排序
-4. 每个选项包含一个贴切的 emoji 和简短描述（2-6字）
+4. 选项要符合该角色的典型行为特征
+5. 从社交角度考虑：朋友是否想知道你在什么场所做什么
+6. 重要场景加场所（如：在家、在公司、在学校、在外面），emoji 可以用 1-2 个表达场所+行为
+7. 普通行为可以不加场所（如：睡觉、休息、刷手机）
+8. 每个选项包含 1-2 个贴切的 emoji 和简短描述（2-6字）
+
+## 角色特征参考
+- 上班族：朝九晚五、工作日忙碌、晚上和周末休闲
+- 学生：上课、自习、课间、宿舍
+- 自由职业：时间弹性、居家办公、不固定作息
+- 创业者：工作时间长、会议多、压力大
+- 投资人：研究市场、开会、出差
+- 全职父母：接送孩子、家务、陪孩子
+- 退休人士：晨练、休闲、慢节奏
 
 ## 输出格式（JSON）
 {
   "options": [
-    {"emoji": "💼", "status": "专注工作"},
-    {"emoji": "📊", "status": "开会讨论"},
+    {"emoji": "🏢💼", "status": "在公司工作"},
+    {"emoji": "🏢📊", "status": "公司开会"},
     {"emoji": "☕", "status": "喝咖啡"},
     {"emoji": "📱", "status": "摸鱼刷手机"}
   ]
 }
 
-## Emoji 建议（可自由选择）
-🎮 游戏 | 📺 追剧 | 💼 工作 | ☕ 摸鱼
-🍜 吃饭 | 🛋️ 躺平 | 🚶 外出 | 😴 睡觉
-📱 刷手机 | 💬 聊天 | 🎧 听歌 | 🏃 运动
-🍻 聚会 | 🔕 专注 | 📊 开会 | 🚇 通勤
-🛍️ 购物 | 🎬 看电影 | 📚 看书 | 🎨 创作
-🏋️ 健身 | 🍕 美食 | 🎉 娱乐 | 😊 休闲
+## Emoji 场所建议
+🏠 家 | 🏢 公司 | 🏫 学校 | 🏬 商场 | ☕ 咖啡厅 | 🚇 地铁
+
+## Emoji 行为建议
+🎮 游戏 | 📺 追剧 | 💼 工作 | 🍽️ 吃饭 | 🛋️ 躺着 | 😴 睡觉
+📱 刷手机 | 💬 聊天 | 🎧 听歌 | 🏃 运动 | 📊 开会 | 📚 看书
 
 只输出 JSON，不要有任何前缀或解释。`,
+		profileName,
 		currentData,
 		spaceText,
 		timeText,
 		activityText,
 		memoryText,
+		profileName,
 	)
 }
 

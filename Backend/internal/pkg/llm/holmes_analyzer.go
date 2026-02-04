@@ -35,6 +35,8 @@ type HolmesInput struct {
 	RecentHistory []*model.StatusHistory
 	// 用户核心记忆（可选）
 	CoreMemory *model.CoreMemory
+	// 用户角色画像（可选）
+	ProfileType string
 }
 
 // HolmesLLMResponse LLM 返回的福尔摩斯推理结果
@@ -475,11 +477,14 @@ func (h *HolmesAnalyzer) formatClues(clue *model.HolmesClue) string {
 		lines = append(lines, fmt.Sprintf("今日步数：%d 步（最近1小时 %d 步）", clue.StepsToday, clue.StepsLastHour))
 	}
 
-	// 屏幕线索
-	if clue.ScreenActive {
-		lines = append(lines, fmt.Sprintf("屏幕：活跃，%s（已使用 %d 分钟）", clue.ActivityType, clue.ScreenDurationMins))
-	} else {
-		lines = append(lines, fmt.Sprintf("屏幕：闲置（%d 分钟前活跃）", clue.LastActiveMinutesAgo))
+	// 屏幕线索（只有当有实际屏幕数据时才输出）
+	hasScreenData := clue.ActivityType != "" || clue.ScreenDurationMins > 0 || clue.LastActiveMinutesAgo > 0
+	if hasScreenData {
+		if clue.ScreenActive {
+			lines = append(lines, fmt.Sprintf("屏幕：活跃，%s（已使用 %d 分钟）", clue.ActivityType, clue.ScreenDurationMins))
+		} else if clue.LastActiveMinutesAgo > 0 {
+			lines = append(lines, fmt.Sprintf("屏幕：闲置（%d 分钟前活跃）", clue.LastActiveMinutesAgo))
+		}
 	}
 
 	// 日历线索

@@ -33,8 +33,11 @@ type ScreenData struct {
 
 // LocationData 位置数据
 type LocationData struct {
-	PlaceType            PlaceType `json:"place_type"`              // 位置类型
-	AtPlaceSinceMinutes  int       `json:"at_place_since_minutes"`  // 在此位置待了多久(分钟)
+	PlaceType           PlaceType `json:"place_type"`                    // 位置类型
+	AtPlaceSinceMinutes int       `json:"at_place_since_minutes"`        // 在此位置待了多久(分钟)
+	City                string    `json:"city,omitempty"`                // 城市名称（客户端上报，如"上海"、"北京"）
+	Latitude            float64   `json:"latitude,omitempty"`            // 纬度
+	Longitude           float64   `json:"longitude,omitempty"`           // 经度
 }
 
 // UserPatterns 用户历史规律（Agent学习得到）
@@ -69,6 +72,7 @@ type UserRealtimeStatus struct {
 	UserID    string       `json:"user_id"`
 	Screen    ScreenData   `json:"screen"`
 	Location  LocationData `json:"location"`
+	City      string       `json:"city,omitempty"` // 城市名称
 	UpdatedAt time.Time    `json:"updated_at"`
 }
 

@@ -456,8 +456,10 @@ type Holmes2Result struct {
 
 // StatusOption 状态选项
 type StatusOption struct {
-	Emoji  string `json:"emoji"`  // 状态 emoji
-	Status string `json:"status"` // 状态描述
+	Emoji  string `json:"emoji"`            // 1-2 个 emoji（场所+行为），如 "🏠🍽️"
+	Status string `json:"status"`           // 完整描述，如 "在家里吃饭"
+	Place  string `json:"place,omitempty"`  // 可选：场所名称（用于分离展示），如 "家里"
+	Action string `json:"action,omitempty"` // 可选：行为名称（用于分离展示），如 "吃饭"
 }
 
 // StatusOptionsResult 状态选项生成结果

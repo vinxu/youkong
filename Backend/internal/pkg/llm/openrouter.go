@@ -47,7 +47,7 @@ func NewOpenRouterClient(apiKey string, model string) *OpenRouterClient {
 		apiURL: apiURL,
 		model:  model,
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second, // 增加超时时间
+			Timeout: 180 * time.Second, // 思考模式需要更长时间
 		},
 	}
 }

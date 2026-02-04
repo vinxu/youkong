@@ -494,8 +494,8 @@ func (s *MemoryService) GetRecentUserStatusMemory(ctx context.Context, userID st
 
 // SelectStatus 用户选择状态，保存到记忆并更新缓存
 func (s *MemoryService) SelectStatus(ctx context.Context, userID string, req *model.SelectStatusRequest) error {
-	// 1. 序列化设备上下文数据
-	contextJSON := ""
+	// 1. 序列化设备上下文数据（MySQL JSON 列不接受空字符串，必须是有效 JSON）
+	contextJSON := "{}"
 	if req.DeviceData != nil {
 		if data, err := json.Marshal(req.DeviceData); err == nil {
 			contextJSON = string(data)

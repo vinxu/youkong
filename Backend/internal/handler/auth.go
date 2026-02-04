@@ -23,14 +23,21 @@ type SendSMSRequest struct {
 }
 
 func (h *AuthHandler) SendSMS(c *gin.Context) {
+	// Debug: 检查 authService 是否为 nil
+	if h.authService == nil {
+		response.Error(c, response.CodeInternalError, "authService is nil")
+		return
+	}
+
 	var req SendSMSRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.ParamError(c, "手机号格式错误")
+		response.ParamError(c, "手机号格式错误: "+err.Error())
 		return
 	}
 
 	if err := h.authService.SendSMSCode(c.Request.Context(), req.Phone); err != nil {
-		response.Error(c, response.CodeInternalError, err.Error())
+		// 短信发送失败（频率限制等）返回 400 而不是 500
+		response.ParamError(c, err.Error())
 		return
 	}
 
