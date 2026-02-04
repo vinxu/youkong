@@ -178,6 +178,17 @@ func (r *ScheduleRepository) CancelUserActiveSchedules(ctx context.Context, user
 	return err
 }
 
+// CancelUserSchedulesByDate 取消用户指定日期的活跃时刻表
+func (r *ScheduleRepository) CancelUserSchedulesByDate(ctx context.Context, userID string, date time.Time) error {
+	query := `
+		UPDATE status_schedules
+		SET status = 'cancelled', updated_at = NOW()
+		WHERE user_id = ? AND status = 'active' AND DATE(schedule_date) = DATE(?)
+	`
+	_, err := r.db.ExecContext(ctx, query, userID, date)
+	return err
+}
+
 // GetRecentByUser 获取用户最近的时刻表
 func (r *ScheduleRepository) GetRecentByUser(ctx context.Context, userID string, limit int) ([]*model.StatusSchedule, error) {
 	var schedules []*model.StatusSchedule
@@ -192,4 +203,66 @@ func (r *ScheduleRepository) GetRecentByUser(ctx context.Context, userID string,
 		return nil, err
 	}
 	return schedules, nil
+}
+
+// GetUserScheduleHistory 获取用户时刻表历史（分页）
+// beforeDate: 获取此日期之前的数据（用于分页），为空则从最新开始
+// limit: 每页数量
+func (r *ScheduleRepository) GetUserScheduleHistory(ctx context.Context, userID string, beforeDate string, limit int) ([]*model.StatusSchedule, error) {
+	var schedules []*model.StatusSchedule
+
+	var query string
+	var args []interface{}
+
+	if beforeDate == "" {
+		// 从最新开始获取
+		query = `
+			SELECT * FROM status_schedules
+			WHERE user_id = ?
+			ORDER BY schedule_date DESC, created_at DESC
+			LIMIT ?
+		`
+		args = []interface{}{userID, limit}
+	} else {
+		// 获取指定日期之前的数据
+		query = `
+			SELECT * FROM status_schedules
+			WHERE user_id = ? AND schedule_date < ?
+			ORDER BY schedule_date DESC, created_at DESC
+			LIMIT ?
+		`
+		args = []interface{}{userID, beforeDate, limit}
+	}
+
+	err := r.db.SelectContext(ctx, &schedules, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return schedules, nil
+}
+
+// GetUserOldestScheduleDate 获取用户最早的时刻表日期
+func (r *ScheduleRepository) GetUserOldestScheduleDate(ctx context.Context, userID string) (string, error) {
+	var oldestDate string
+	query := `
+		SELECT DATE_FORMAT(MIN(schedule_date), '%Y-%m-%d') as oldest_date
+		FROM status_schedules
+		WHERE user_id = ?
+	`
+	err := r.db.GetContext(ctx, &oldestDate, query, userID)
+	if err != nil {
+		return "", err
+	}
+	return oldestDate, nil
+}
+
+// CountUserSchedules 统计用户时刻表数量
+func (r *ScheduleRepository) CountUserSchedules(ctx context.Context, userID string) (int, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM status_schedules WHERE user_id = ?`
+	err := r.db.GetContext(ctx, &count, query, userID)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
 }

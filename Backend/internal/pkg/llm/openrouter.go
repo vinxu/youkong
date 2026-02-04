@@ -324,6 +324,44 @@ func (c *OpenRouterClient) ChatWithThinking(ctx context.Context, requestBody map
 	}, nil
 }
 
+// ChatOptions LLM 调用选项
+type ChatOptions struct {
+	EnableJSONMode bool    // 启用 JSON Object 模式（确保输出有效 JSON）
+	Temperature    float64 // 温度参数（默认 0.85）
+}
+
+// ChatWithOptions 带选项的聊天方法
+func (c *OpenRouterClient) ChatWithOptions(ctx context.Context, messages []ChatMessage, opts *ChatOptions) (string, error) {
+	if opts == nil {
+		opts = &ChatOptions{}
+	}
+
+	temperature := opts.Temperature
+	if temperature == 0 {
+		temperature = 0.85
+	}
+
+	requestBody := map[string]interface{}{
+		"model":              c.model,
+		"messages":           messages,
+		"temperature":        temperature,
+		"top_p":              0.9,
+		"frequency_penalty":  0.5,
+		"presence_penalty":   0.3,
+		"repetition_penalty": 1.1,
+	}
+
+	// 启用 JSON Object 模式（阿里云通义千问支持）
+	// 注意：提示词中必须包含 "JSON" 关键词
+	if opts.EnableJSONMode {
+		requestBody["response_format"] = map[string]string{
+			"type": "json_object",
+		}
+	}
+
+	return c.chatWithRequestBody(ctx, requestBody)
+}
+
 // GenerateFreeReason 生成隐私安全的有空理由
 func (c *OpenRouterClient) GenerateFreeReason(ctx context.Context, state SanitizedUserState) (string, error) {
 	prompt := fmt.Sprintf(`你是一个帮助用户判断朋友是否有空的助手。
