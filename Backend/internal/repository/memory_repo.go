@@ -206,20 +206,21 @@ type UserAnalysisCache struct {
 	AvailabilityConfidence  string    `db:"availability_confidence"`
 	LifeStatusEmoji         string    `db:"life_status_emoji"`
 	LifeStatusLabel         string    `db:"life_status_label"`
-	LifeStatusDescription   *string   `db:"life_status_description"` // 新增：详细描述
-	Mood                    *string   `db:"mood"`                    // 新增：心情
-	Activity                *string   `db:"activity"`                // 新增：活动
-	Context                 *string   `db:"context"`                 // 新增：上下文
+	LifeStatusDescription   *string   `db:"life_status_description"` // 详细描述
+	Mood                    *string   `db:"mood"`                    // 心情
+	Activity                *string   `db:"activity"`                // 活动
+	Context                 *string   `db:"context"`                 // 上下文
 	CreatedAt               time.Time `db:"created_at"`
 	UpdatedAt               time.Time `db:"updated_at"`
+	IsAIGuess               bool      `db:"is_ai_guess"` // 是否为 AI 推测的状态（字段顺序与数据库列顺序一致）
 }
 
 // SaveAnalysisCache 保存分析缓存
 func (r *MemoryRepository) SaveAnalysisCache(ctx context.Context, userID string, result *model.AnalysisResult) error {
 	query := `INSERT INTO user_analysis_cache (
 		user_id, availability_status, availability_probability, availability_reason, availability_confidence,
-		life_status_emoji, life_status_label, life_status_description, mood, activity, context
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		life_status_emoji, life_status_label, life_status_description, mood, activity, context, is_ai_guess
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON DUPLICATE KEY UPDATE
 		availability_status = VALUES(availability_status),
 		availability_probability = VALUES(availability_probability),
@@ -231,6 +232,7 @@ func (r *MemoryRepository) SaveAnalysisCache(ctx context.Context, userID string,
 		mood = VALUES(mood),
 		activity = VALUES(activity),
 		context = VALUES(context),
+		is_ai_guess = VALUES(is_ai_guess),
 		updated_at = NOW()`
 	_, err := r.db.ExecContext(ctx, query,
 		userID,
@@ -244,6 +246,7 @@ func (r *MemoryRepository) SaveAnalysisCache(ctx context.Context, userID string,
 		strPtrOrNull(result.Mood),
 		strPtrOrNull(result.Activity),
 		strPtrOrNull(result.Context),
+		result.IsAIGuess,
 	)
 	return err
 }
@@ -284,6 +287,7 @@ func (r *MemoryRepository) GetAnalysisCache(ctx context.Context, userID string) 
 		Activity:  ptrStrToStr(cache.Activity),
 		Context:   ptrStrToStr(cache.Context),
 		UpdatedAt: cache.UpdatedAt, // 包含更新时间用于时效检查
+		IsAIGuess: cache.IsAIGuess, // 是否为 AI 推测的状态
 	}, nil
 }
 
@@ -331,6 +335,7 @@ func (r *MemoryRepository) GetAnalysisCacheByUserIDs(ctx context.Context, userID
 			Activity:  ptrStrToStr(cache.Activity),
 			Context:   ptrStrToStr(cache.Context),
 			UpdatedAt: cache.UpdatedAt, // 包含更新时间用于时效检查
+			IsAIGuess: cache.IsAIGuess, // 是否为 AI 推测的状态
 		}
 	}
 	return result, nil
