@@ -153,6 +153,7 @@ type AnalysisResult struct {
 	Context      string               `json:"context,omitempty"`     // 上下文描述
 	MemoryUpdate *MemoryUpdate        `json:"memory_update,omitempty"`
 	UpdatedAt    time.Time            `json:"updated_at,omitempty"` // 缓存更新时间（用于时效检查）
+	IsAIGuess    bool                 `json:"is_ai_guess,omitempty"` // 是否为 AI 推测的状态（false=用户设置，true=AI推测）
 }
 
 // MemoryUpdate 记忆更新内容
