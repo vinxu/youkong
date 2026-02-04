@@ -1,6 +1,44 @@
 package com.youkong.core.network.model
 
+import androidx.annotation.Keep
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+
+/**
+ * 空响应类型，用于不需要 data 内容的 API
+ * 使用 @Serializable data class 确保 R8 保留序列化器
+ */
+@Keep
+@Serializable
+data class EmptyResponse(
+    val message: String? = null,
+)
+
+/**
+ * 简单 API 响应（非泛型）
+ * 用于不需要 data 字段的 API，完全避免 R8 泛型类型擦除问题
+ *
+ * 适用场景：发送验证码、删除好友等只需要知道成功/失败的 API
+ *
+ * @Keep 注解确保 R8 不会混淆此类
+ * data 字段使用 JsonObject 类型，可以接收任意 JSON 对象，避免类型解析问题
+ */
+@Keep
+@Serializable
+data class SimpleApiResponse(
+    val code: Int,
+    val message: String,
+    val data: JsonObject? = null, // 接收任意 JSON 对象，忽略其内容
+) {
+    val isSuccess: Boolean get() = code == ApiErrorCode.SUCCESS
+
+    fun checkSuccess() {
+        if (!isSuccess) {
+            throw ApiException(code, message)
+        }
+    }
+}
 
 @Serializable
 data class ApiResponse<T>(
@@ -50,3 +88,23 @@ class ApiException(
         fun internalError() = ApiException(ApiErrorCode.INTERNAL_ERROR, "服务器内部错误")
     }
 }
+
+// MARK: - 用户设置
+
+/**
+ * 用户设置请求
+ */
+@Serializable
+data class UserSettingsRequest(
+    @SerialName("auto_predict_enabled")
+    val autoPredictEnabled: Boolean? = null
+)
+
+/**
+ * 用户设置响应
+ */
+@Serializable
+data class UserSettingsResponse(
+    @SerialName("auto_predict_enabled")
+    val autoPredictEnabled: Boolean
+)

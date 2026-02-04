@@ -131,6 +131,7 @@ func main() {
 	deviceTokenRepo := repository.NewDeviceTokenRepository(db)
 	userProfileRepo := repository.NewUserProfileRepository(db)
 	scheduleRepo := repository.NewScheduleRepository(db)
+	userSettingsRepo := repository.NewUserSettingsRepository(db)
 
 	// 初始化微信客户端
 	var wechatClient *wechat.Client
@@ -217,7 +218,7 @@ func main() {
 
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
-	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL, messageRepo)
+	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL, messageRepo, userSettingsRepo)
 	circleHandler := handler.NewCircleHandler(circleService)
 	conversationHandler := handler.NewConversationHandler(conversationService)
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
@@ -282,6 +283,8 @@ func main() {
 				users.GET("/me/poster", userHandler.GetMyPoster)
 				users.GET("/me/invite", userHandler.GetMyInviteInfo)
 				users.GET("/me/badge", userHandler.GetBadgeCount)
+				users.GET("/settings", userHandler.GetSettings)
+				users.PUT("/settings", userHandler.UpdateSettings)
 				users.GET("/search", userHandler.SearchUsers)
 				users.GET("/:id", userHandler.GetUser)
 			}
@@ -438,6 +441,22 @@ func main() {
 	statusScheduler.Start()
 	defer statusScheduler.Stop()
 	logger.Info("状态时刻表调度器已启动")
+
+	// 初始化并启动每日状态推测任务
+	if llmClient != nil {
+		dailyPredictionJob := job.NewDailyPredictionJob(
+			userSettingsRepo,
+			scheduleRepo,
+			memoryRepo,
+			userProfileService,
+			llmClient,
+		)
+		dailyPredictionJob.Start()
+		defer dailyPredictionJob.Stop()
+		logger.Info("每日状态推测任务已启动")
+	} else {
+		logger.Warn("LLM 未配置，每日状态推测任务未启动")
+	}
 
 	// 启动服务器
 	addr := fmt.Sprintf(":%s", cfg.Server.Port)

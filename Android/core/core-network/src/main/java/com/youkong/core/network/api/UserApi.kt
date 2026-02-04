@@ -5,6 +5,8 @@ import com.youkong.core.network.model.MyInviteResponse
 import com.youkong.core.network.model.UpdateUserRequest
 import com.youkong.core.network.model.UserProfileResponse
 import com.youkong.core.network.model.UserResponse
+import com.youkong.core.network.model.UserSettingsRequest
+import com.youkong.core.network.model.UserSettingsResponse
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.PUT
@@ -27,4 +29,10 @@ interface UserApi {
 
     @GET("users/me/invite")
     suspend fun getMyInvite(): ApiResponse<MyInviteResponse>
+
+    @GET("users/settings")
+    suspend fun getUserSettings(): ApiResponse<UserSettingsResponse>
+
+    @PUT("users/settings")
+    suspend fun updateUserSettings(@Body request: UserSettingsRequest): ApiResponse<UserSettingsResponse>
 }

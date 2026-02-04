@@ -4,9 +4,12 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.youkong.core.network.api.ScheduleApi
+import com.youkong.core.network.api.UserApi
 import com.youkong.core.network.model.ScheduleGroup
 import com.youkong.core.network.model.ScheduleItem
+import com.youkong.core.network.model.UserSettingsRequest
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,7 +22,8 @@ import javax.inject.Inject
 
 @HiltViewModel
 class ScheduleTimelineViewModel @Inject constructor(
-    private val scheduleApi: ScheduleApi
+    private val scheduleApi: ScheduleApi,
+    private val userApi: UserApi
 ) : ViewModel() {
 
     companion object {
@@ -39,7 +43,13 @@ class ScheduleTimelineViewModel @Inject constructor(
             _uiState.update { it.copy(isLoading = true, error = null) }
 
             try {
-                val response = scheduleApi.getMyScheduleHistory(limit = PAGE_SIZE)
+                // 并行加载时刻表和用户设置
+                val historyDeferred = async { scheduleApi.getMyScheduleHistory(limit = PAGE_SIZE) }
+                val settingsDeferred = async { userApi.getUserSettings() }
+
+                val response = historyDeferred.await()
+                val settingsResponse = settingsDeferred.await()
+
                 val data = response.data
 
                 if (data != null) {
@@ -50,15 +60,17 @@ class ScheduleTimelineViewModel @Inject constructor(
                             hasMore = data.hasMore,
                             oldestDate = data.oldestDate,
                             isEmpty = groups.isEmpty(),
-                            isLoading = false
+                            isLoading = false,
+                            isAutoPredictEnabled = settingsResponse.data?.autoPredictEnabled ?: false
                         )
                     }
-                    Log.d(TAG, "加载完成: ${groups.size} 组, hasMore: ${data.hasMore}")
+                    Log.d(TAG, "加载完成: ${groups.size} 组, hasMore: ${data.hasMore}, autoPredict: ${settingsResponse.data?.autoPredictEnabled}")
                 } else {
                     _uiState.update {
                         it.copy(
                             isEmpty = true,
-                            isLoading = false
+                            isLoading = false,
+                            isAutoPredictEnabled = settingsResponse.data?.autoPredictEnabled ?: false
                         )
                     }
                 }
@@ -70,6 +82,39 @@ class ScheduleTimelineViewModel @Inject constructor(
                         isLoading = false
                     )
                 }
+            }
+        }
+    }
+
+    // MARK: - Toggle Auto Predict
+
+    fun toggleAutoPredict() {
+        if (_uiState.value.isUpdatingSettings) return
+
+        val newValue = !_uiState.value.isAutoPredictEnabled
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isUpdatingSettings = true) }
+
+            try {
+                val response = userApi.updateUserSettings(
+                    UserSettingsRequest(autoPredictEnabled = newValue)
+                )
+                val data = response.data
+                if (data != null) {
+                    _uiState.update {
+                        it.copy(
+                            isAutoPredictEnabled = data.autoPredictEnabled,
+                            isUpdatingSettings = false
+                        )
+                    }
+                    Log.d(TAG, "更新设置成功: autoPredict = ${data.autoPredictEnabled}")
+                } else {
+                    _uiState.update { it.copy(isUpdatingSettings = false) }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "更新设置失败: ${e.message}")
+                _uiState.update { it.copy(isUpdatingSettings = false) }
             }
         }
     }
@@ -200,5 +245,8 @@ data class ScheduleTimelineUiState(
     val hasMore: Boolean = true,
     val oldestDate: String? = null,
     val isEmpty: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    // 用户设置
+    val isAutoPredictEnabled: Boolean = false,
+    val isUpdatingSettings: Boolean = false
 )

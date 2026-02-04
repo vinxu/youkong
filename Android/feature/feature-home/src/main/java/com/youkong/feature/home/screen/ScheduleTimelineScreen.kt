@@ -2,25 +2,26 @@ package com.youkong.feature.home.screen
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.ExperimentalMaterialApi
-import androidx.compose.material.pullrefresh.PullRefreshIndicator
-import androidx.compose.material.pullrefresh.pullRefresh
-import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.google.accompanist.swiperefresh.SwipeRefresh
+import com.google.accompanist.swiperefresh.SwipeRefreshIndicator
+import com.google.accompanist.swiperefresh.rememberSwipeRefreshState
 import com.youkong.core.network.model.ScheduleGroup
 import com.youkong.core.network.model.ScheduleItem
 import com.youkong.core.ui.theme.CLIColors
@@ -32,7 +33,6 @@ import kotlinx.coroutines.launch
  *
  * CLI 风格，按日期分组显示历史时刻表
  */
-@OptIn(ExperimentalMaterialApi::class)
 @Composable
 fun ScheduleTimelineScreen(
     onDismiss: () -> Unit,
@@ -42,9 +42,8 @@ fun ScheduleTimelineScreen(
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
 
-    val pullRefreshState = rememberPullRefreshState(
-        refreshing = uiState.isRefreshing,
-        onRefresh = { viewModel.refresh() }
+    val swipeRefreshState = rememberSwipeRefreshState(
+        isRefreshing = uiState.isRefreshing
     )
 
     // 首次加载
@@ -95,7 +94,7 @@ fun ScheduleTimelineScreen(
             Spacer(modifier = Modifier.weight(1f))
 
             Text(
-                text = "━━ 我的状态时刻表 ━━",
+                text = "━━ 我的状态表 ━━",
                 fontFamily = FontFamily.Monospace,
                 fontSize = 16.sp,
                 color = CLIColors.Green
@@ -107,13 +106,30 @@ fun ScheduleTimelineScreen(
             Box(modifier = Modifier.width(40.dp))
         }
 
-        Divider(color = CLIColors.Border)
+        HorizontalDivider(color = CLIColors.Border)
+
+        // AI 自动推测开关
+        AutoPredictToggle(
+            isEnabled = uiState.isAutoPredictEnabled,
+            isUpdating = uiState.isUpdatingSettings,
+            onToggle = { viewModel.toggleAutoPredict() }
+        )
+
+        HorizontalDivider(color = CLIColors.Border)
 
         // 内容区域
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .pullRefresh(pullRefreshState)
+        SwipeRefresh(
+            state = swipeRefreshState,
+            onRefresh = { viewModel.refresh() },
+            modifier = Modifier.weight(1f),
+            indicator = { state, trigger ->
+                SwipeRefreshIndicator(
+                    state = state,
+                    refreshTriggerDistance = trigger,
+                    backgroundColor = CLIColors.BackgroundSecondary,
+                    contentColor = CLIColors.Green
+                )
+            }
         ) {
             when {
                 uiState.isLoading && uiState.scheduleGroups.isEmpty() -> {
@@ -154,13 +170,65 @@ fun ScheduleTimelineScreen(
                     }
                 }
             }
+        }
+    }
+}
 
-            PullRefreshIndicator(
-                refreshing = uiState.isRefreshing,
-                state = pullRefreshState,
-                modifier = Modifier.align(Alignment.TopCenter),
-                backgroundColor = CLIColors.BackgroundSecondary,
-                contentColor = CLIColors.Green
+@Composable
+private fun AutoPredictToggle(
+    isEnabled: Boolean,
+    isUpdating: Boolean,
+    onToggle: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CLIColors.BackgroundSecondary)
+            .clickable(enabled = !isUpdating) { onToggle() }
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+            .alpha(if (isUpdating) 0.5f else 1f),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            text = "🤖",
+            fontSize = 18.sp
+        )
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "AI 自动推测",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.TextPrimary
+            )
+            Text(
+                text = "每天凌晨 00:00 自动更新",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                color = CLIColors.TextWeak
+            )
+        }
+
+        // Toggle
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text = "[",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.Border
+            )
+            Text(
+                text = if (isEnabled) "ON" else "OFF",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = if (isEnabled) CLIColors.Green else CLIColors.TextWeak
+            )
+            Text(
+                text = "]",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.Border
             )
         }
     }
@@ -231,14 +299,14 @@ private fun EmptyView() {
             )
 
             Text(
-                text = "> 暂无时刻表",
+                text = "> 暂无状态表",
                 fontFamily = FontFamily.Monospace,
                 fontSize = 14.sp,
                 color = CLIColors.TextSecondary
             )
 
             Text(
-                text = "  用语音创建你的状态时刻表吧",
+                text = "  用语音创建你的状态表吧",
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp,
                 color = CLIColors.TextWeak
@@ -411,7 +479,11 @@ private fun ScheduleItemView(
             )
 
             Text(
-                text = item.status,
+                text = if (item.isAIGuess == true) {
+                    "${item.status} (AI 推测)"
+                } else {
+                    item.status
+                },
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp,
                 color = textColor,

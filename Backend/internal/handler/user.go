@@ -13,18 +13,20 @@ import (
 )
 
 type UserHandler struct {
-	userService     *service.UserService
-	posterGenerator *poster.Generator
-	inviteBaseURL   string
-	messageRepo     *repository.MessageRepository
+	userService          *service.UserService
+	posterGenerator      *poster.Generator
+	inviteBaseURL        string
+	messageRepo          *repository.MessageRepository
+	userSettingsRepo     *repository.UserSettingsRepository
 }
 
-func NewUserHandler(userService *service.UserService, posterGenerator *poster.Generator, inviteBaseURL string, messageRepo *repository.MessageRepository) *UserHandler {
+func NewUserHandler(userService *service.UserService, posterGenerator *poster.Generator, inviteBaseURL string, messageRepo *repository.MessageRepository, userSettingsRepo *repository.UserSettingsRepository) *UserHandler {
 	return &UserHandler{
-		userService:     userService,
-		posterGenerator: posterGenerator,
-		inviteBaseURL:   inviteBaseURL,
-		messageRepo:     messageRepo,
+		userService:          userService,
+		posterGenerator:      posterGenerator,
+		inviteBaseURL:        inviteBaseURL,
+		messageRepo:          messageRepo,
+		userSettingsRepo:     userSettingsRepo,
 	}
 }
 
@@ -194,5 +196,66 @@ func (h *UserHandler) GetBadgeCount(c *gin.Context) {
 
 	response.Success(c, gin.H{
 		"count": count,
+	})
+}
+
+// GetSettings 获取用户设置
+// GET /api/v1/users/settings
+func (h *UserHandler) GetSettings(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	settings, err := h.userSettingsRepo.Get(c.Request.Context(), userID)
+	if err != nil {
+		response.InternalError(c, "获取设置失败: "+err.Error())
+		return
+	}
+
+	response.Success(c, gin.H{
+		"auto_predict_enabled": settings.AutoPredictEnabled,
+	})
+}
+
+// UpdateSettings 更新用户设置
+// PUT /api/v1/users/settings
+func (h *UserHandler) UpdateSettings(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	var req struct {
+		AutoPredictEnabled *bool `json:"auto_predict_enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "参数错误")
+		return
+	}
+
+	// 获取当前设置
+	settings, err := h.userSettingsRepo.Get(c.Request.Context(), userID)
+	if err != nil {
+		response.InternalError(c, "获取设置失败: "+err.Error())
+		return
+	}
+
+	// 更新字段
+	if req.AutoPredictEnabled != nil {
+		settings.AutoPredictEnabled = *req.AutoPredictEnabled
+	}
+	settings.UserID = userID
+
+	// 保存
+	if err := h.userSettingsRepo.Upsert(c.Request.Context(), settings); err != nil {
+		response.InternalError(c, "保存设置失败: "+err.Error())
+		return
+	}
+
+	response.Success(c, gin.H{
+		"auto_predict_enabled": settings.AutoPredictEnabled,
 	})
 }

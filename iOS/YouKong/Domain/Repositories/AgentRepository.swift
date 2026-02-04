@@ -23,6 +23,12 @@ protocol AgentRepositoryProtocol {
 
     /// 获取我的状态时刻表历史（分页）
     func getMyScheduleHistory(limit: Int, beforeDate: String?) async throws -> MyScheduleHistoryResponse
+
+    /// 获取用户设置
+    func getUserSettings() async throws -> UserSettingsResponse
+
+    /// 更新用户设置
+    func updateUserSettings(request: UserSettingsRequest) async throws -> UserSettingsResponse
 }
 
 // MARK: - Status Report Request (按 API 规范分组)
@@ -257,15 +263,17 @@ struct ScheduleItem: Codable, Identifiable, Equatable {
     let emoji: String
     let status: String
     var executed: Bool?
+    var isAIGuess: Bool?
 
     var id: String { "\(startTime)_\(endTime)_\(emoji)" }
 
-    init(startTime: String, endTime: String, emoji: String, status: String, executed: Bool? = nil) {
+    init(startTime: String, endTime: String, emoji: String, status: String, executed: Bool? = nil, isAIGuess: Bool? = nil) {
         self.startTime = startTime
         self.endTime = endTime
         self.emoji = emoji
         self.status = status
         self.executed = executed
+        self.isAIGuess = isAIGuess
     }
 
     enum CodingKeys: String, CodingKey {
@@ -274,6 +282,7 @@ struct ScheduleItem: Codable, Identifiable, Equatable {
         case emoji
         case status
         case executed
+        case isAIGuess = "is_ai_guess"
     }
 }
 
@@ -287,6 +296,23 @@ struct ClarifyQuestion: Codable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, question, options
         case allowVoice = "allow_voice"
+    }
+
+    init(id: String, question: String, options: [String], allowVoice: Bool) {
+        self.id = id
+        self.question = question
+        self.options = options
+        self.allowVoice = allowVoice
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        question = try container.decode(String.self, forKey: .question)
+        // options 可能为 null，解码失败时使用空数组
+        options = (try? container.decode([String].self, forKey: .options)) ?? []
+        // allowVoice 可能为 null，解码失败时默认为 true
+        allowVoice = (try? container.decode(Bool.self, forKey: .allowVoice)) ?? true
     }
 }
 
@@ -637,5 +663,25 @@ struct ScheduleGroup: Identifiable {
         self.items = daySchedule.items
         self.status = daySchedule.status
         self.isCurrentOrFuture = daySchedule.isCurrentOrFuture
+    }
+}
+
+// MARK: - 用户设置
+
+/// 用户设置请求
+struct UserSettingsRequest: Encodable {
+    let autoPredictEnabled: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case autoPredictEnabled = "auto_predict_enabled"
+    }
+}
+
+/// 用户设置响应
+struct UserSettingsResponse: Codable {
+    let autoPredictEnabled: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case autoPredictEnabled = "auto_predict_enabled"
     }
 }

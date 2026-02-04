@@ -31,7 +31,8 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
             screen: nil, // 屏幕数据已移除
             location: LocationRequestData(
                 placeType: locationStatus.placeType.rawValue,
-                atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes
+                atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes,
+                city: locationStatus.city
             ),
             extendedLocation: ExtendedLocationRequestData(
                 placeType: locationStatus.placeType.rawValue,
@@ -103,6 +104,33 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
 
     func getGridData() async throws -> GridResponse {
         let endpoint = APIEndpoint.getGridData
+        return try await apiClient.request(endpoint)
+    }
+
+    // MARK: - Select Status (训练 AI 功能)
+
+    func selectStatus(emoji: String, status: String, deviceData: StatusReportRequest?) async throws {
+        let request = SelectStatusRequest(emoji: emoji, status: status, deviceData: deviceData)
+        let endpoint = APIEndpoint.selectStatus(request: request)
+        let _: SelectStatusResponse = try await apiClient.request(endpoint)
+    }
+
+    // MARK: - My Schedule History
+
+    func getMyScheduleHistory(limit: Int = 20, beforeDate: String? = nil) async throws -> MyScheduleHistoryResponse {
+        let endpoint = APIEndpoint.getMyScheduleHistory(limit: limit, beforeDate: beforeDate)
+        return try await apiClient.request(endpoint)
+    }
+
+    // MARK: - User Settings
+
+    func getUserSettings() async throws -> UserSettingsResponse {
+        let endpoint = APIEndpoint.getUserSettings
+        return try await apiClient.request(endpoint)
+    }
+
+    func updateUserSettings(request: UserSettingsRequest) async throws -> UserSettingsResponse {
+        let endpoint = APIEndpoint.updateUserSettings(request: request)
         return try await apiClient.request(endpoint)
     }
 }

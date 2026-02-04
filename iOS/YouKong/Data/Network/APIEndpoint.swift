@@ -30,6 +30,16 @@ struct APIEndpoint {
 }
 
 extension APIEndpoint {
+    // MARK: - Health Check (用于网络预热)
+
+    static var healthCheck: APIEndpoint {
+        APIEndpoint(
+            path: "/health",
+            method: .get,
+            requiresAuth: false
+        )
+    }
+
     // MARK: - Auth
 
     static func sendSMSCode(phone: String) -> APIEndpoint {
@@ -157,6 +167,82 @@ extension APIEndpoint {
         )
     }
 
+    /// 流式生成状态选项 API - 训练 AI 功能
+    static func generateStatusOptions(request: StatusReportRequest) -> APIEndpoint {
+        return APIEndpoint(
+            path: "/api/v1/agent/status-options",
+            method: .post,
+            body: request
+        )
+    }
+
+    /// 选择状态并记录 API - 训练 AI 功能
+    static func selectStatus(request: SelectStatusRequest) -> APIEndpoint {
+        return APIEndpoint(
+            path: "/api/v1/agent/select-status",
+            method: .post,
+            body: request
+        )
+    }
+
+    /// 获取引导流程的状态选项 - 引导流程
+    /// - Parameters:
+    ///   - profileType: 用户角色类型
+    ///   - city: 当前城市（可选，用于增强推理）
+    static func getOnboardingStatusOptions(profileType: String, city: String? = nil) -> APIEndpoint {
+        return APIEndpoint(
+            path: "/api/v1/agent/onboarding-status-options",
+            method: .post,
+            body: OnboardingStatusOptionsRequest(profileType: profileType, city: city)
+        )
+    }
+
+    /// 保存简化的用户画像 - 引导流程
+    static func saveSimpleProfile(profileType: String) -> APIEndpoint {
+        return APIEndpoint(
+            path: "/api/v1/profile/simple",
+            method: .post,
+            body: ["profile_type": profileType]
+        )
+    }
+
+    // MARK: - Voice Schedule（语音状态时刻表）
+
+    /// 语音状态时刻表 SSE 流（首次上传音频）
+    /// - Note: 这个端点通过 SSEClient 直接调用，不通过 APIClient
+    static var voiceScheduleStream: APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/agent/voice-schedule/stream",
+            method: .post
+        )
+    }
+
+    // MARK: - My Schedule History（我的状态时刻表历史）
+
+    /// 获取我的状态时刻表历史（分页）
+    /// - Parameters:
+    ///   - limit: 每页数量，默认 20
+    ///   - beforeDate: 获取此日期之前的数据（用于分页），格式 YYYY-MM-DD
+    static func getMyScheduleHistory(limit: Int = 20, beforeDate: String? = nil) -> APIEndpoint {
+        var queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        if let beforeDate = beforeDate {
+            queryItems.append(URLQueryItem(name: "before_date", value: beforeDate))
+        }
+        return APIEndpoint(
+            path: "/api/v1/agent/my-schedule/history",
+            queryItems: queryItems
+        )
+    }
+
+    /// 语音状态时刻表后续交互
+    static func voiceScheduleInteraction(request: VoiceScheduleInteractionRequest) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/agent/voice-schedule/interact",
+            method: .post,
+            body: request
+        )
+    }
+
     // MARK: - Contacts
 
     static func syncContacts(phones: [String]) -> APIEndpoint {
@@ -279,6 +365,22 @@ extension APIEndpoint {
     static var getBadgeCount: APIEndpoint {
         APIEndpoint(path: "/api/v1/users/me/badge")
     }
+
+    // MARK: - User Settings
+
+    /// 获取用户设置
+    static var getUserSettings: APIEndpoint {
+        APIEndpoint(path: "/api/v1/users/settings")
+    }
+
+    /// 更新用户设置
+    static func updateUserSettings(request: UserSettingsRequest) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/users/settings",
+            method: .put,
+            body: request
+        )
+    }
 }
 
 // MARK: - Request Types
@@ -286,6 +388,16 @@ extension APIEndpoint {
 struct RegisterDeviceTokenRequest: Codable {
     let token: String
     let platform: String
+}
+
+struct OnboardingStatusOptionsRequest: Encodable {
+    let profileType: String
+    let city: String?
+
+    enum CodingKeys: String, CodingKey {
+        case profileType = "profile_type"
+        case city
+    }
 }
 
 extension Dictionary: Encodable where Key == String, Value == String {}

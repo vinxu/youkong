@@ -1,0 +1,8 @@
+-- 用户设置表
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id VARCHAR(36) PRIMARY KEY COMMENT '用户 ID',
+    auto_predict_enabled TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'AI 自动推测开关',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    CONSTRAINT fk_user_settings_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户设置';

@@ -44,6 +44,9 @@ type VoiceScheduleService struct {
 	// Tool Calling 架构
 	llmAdapter   *agent.LLMAdapter
 	toolRegistry *agent.ToolRegistry
+
+	// v2 架构改进：意图分发器
+	intentDispatcher *IntentDispatcher
 }
 
 // NewVoiceScheduleService 创建语音时刻表服务
@@ -72,6 +75,8 @@ func NewVoiceScheduleService(
 			APIKey: llmAPIKey,
 			Model:  "qwen-max",
 		})
+		// v2 架构改进：创建意图分发器
+		svc.intentDispatcher = NewIntentDispatcher(svc.llmAdapter, svc.toolRegistry)
 	}
 
 	return svc
@@ -642,8 +647,60 @@ func (s *VoiceScheduleService) analyzeWithLLMAndContext(
 		compressedCtx = &model.CompressedUserContext{}
 	}
 
-	// ============ 第一步：尝试用 Tool Calling 识别简单意图 ============
-	// 当用户说"确认"、"取消"、"更新状态"等简单指令时，优先使用 Tool Calling
+	// ============ 第一步：使用意图分发器识别意图（v2 架构改进）============
+	// 特别处理 update_status vs create 的混淆问题
+	if s.intentDispatcher != nil {
+		intentResult, err := s.intentDispatcher.Dispatch(ctx, session, transcript)
+		if err != nil {
+			fmt.Printf("[VoiceSchedule] IntentDispatcher 调用失败: %v，回退到 JSON 模式\n", err)
+		} else if intentResult != nil && intentResult.Confidence >= 0.7 {
+			fmt.Printf("[VoiceSchedule] IntentDispatcher 识别成功: action=%s, confidence=%.2f, thinking=%v\n",
+				intentResult.Action, intentResult.Confidence, intentResult.Thinking)
+
+			// 根据意图类型转换为 LLMVoiceAnalysisResult
+			switch intentResult.Action {
+			case "update_status":
+				// 从 entities 中提取状态信息
+				result := s.buildUpdateStatusResult(intentResult)
+				if result != nil {
+					fmt.Printf("[VoiceSchedule] 返回 update_status 结果: %s %s\n",
+						result.CurrentStatus.Emoji, result.CurrentStatus.Status)
+					return result, nil
+				}
+				fmt.Println("[VoiceSchedule] update_status 但无法提取状态，回退到 JSON 模式")
+
+			case "confirm":
+				return &model.LLMVoiceAnalysisResult{
+					Action:    "tool_confirm",
+					Reasoning: intentResult.Thinking,
+				}, nil
+
+			case "cancel":
+				return &model.LLMVoiceAnalysisResult{
+					Action:    "tool_cancel",
+					Reasoning: intentResult.Thinking,
+				}, nil
+
+			case "query":
+				return &model.LLMVoiceAnalysisResult{
+					Action:     "query",
+					TargetDate: intentResult.TargetDate,
+					Reasoning:  intentResult.Thinking,
+				}, nil
+
+			case "chat":
+				// 聊天意图，但仍然需要 LLM 生成回复
+				// 继续到 JSON 模式处理
+				fmt.Println("[VoiceSchedule] 意图是 chat，继续到 JSON 模式生成回复")
+			}
+		} else if intentResult != nil {
+			fmt.Printf("[VoiceSchedule] IntentDispatcher 置信度不足: action=%s, confidence=%.2f，回退到 JSON 模式\n",
+				intentResult.Action, intentResult.Confidence)
+		}
+	}
+
+	// ============ 第一步（备用）：尝试用 Tool Calling 识别简单意图 ============
+	// 当用户说"确认"、"取消"等简单指令时，优先使用 Tool Calling
 	if s.llmAdapter != nil && s.isSimpleIntent(transcript) {
 		result, handled := s.tryToolCalling(ctx, userID, transcript, session)
 		if handled {
@@ -770,6 +827,96 @@ func (s *VoiceScheduleService) analyzeWithLLMAndContext(
 	result.NeedThinking = needThinking
 
 	return result, nil
+}
+
+// buildUpdateStatusResult 从 IntentResult 构建 update_status 结果
+// v2 架构改进：解决 update_status vs create 混淆问题
+func (s *VoiceScheduleService) buildUpdateStatusResult(intentResult *model.IntentResult) *model.LLMVoiceAnalysisResult {
+	// 优先使用 intentResult.StatusInfo（如果已提取）
+	if intentResult.StatusInfo != nil && intentResult.StatusInfo.Status != "" {
+		return &model.LLMVoiceAnalysisResult{
+			Action: "update_status",
+			CurrentStatus: &model.CurrentStatusGuess{
+				Emoji:  intentResult.StatusInfo.Emoji,
+				Status: intentResult.StatusInfo.Status,
+				Reason: "意图分发器识别为状态更新",
+			},
+			Reasoning: intentResult.Thinking,
+		}
+	}
+
+	// 从 entities 中提取状态信息
+	if intentResult.Entities != nil {
+		emoji := ""
+		status := ""
+
+		if e, ok := intentResult.Entities["emoji"].(string); ok {
+			emoji = e
+		}
+		if s, ok := intentResult.Entities["status"].(string); ok {
+			status = s
+		}
+
+		// 如果提取到了状态，返回结果
+		if status != "" {
+			// 如果没有 emoji，使用默认的
+			if emoji == "" {
+				emoji = s.guessEmojiForStatus(status)
+			}
+			return &model.LLMVoiceAnalysisResult{
+				Action: "update_status",
+				CurrentStatus: &model.CurrentStatusGuess{
+					Emoji:  emoji,
+					Status: status,
+					Reason: "从用户输入中提取状态",
+				},
+				Reasoning: intentResult.Thinking,
+			}
+		}
+	}
+
+	// 无法提取状态信息
+	return nil
+}
+
+// guessEmojiForStatus 根据状态文本猜测 emoji
+func (s *VoiceScheduleService) guessEmojiForStatus(status string) string {
+	// 常见状态到 emoji 的映射
+	statusEmojis := map[string]string{
+		"睡不着": "😵",
+		"失眠":  "😵",
+		"工作":  "💼",
+		"工作中": "💼",
+		"休息":  "🏠",
+		"在家":  "🏠",
+		"开会":  "💼",
+		"吃饭":  "🍚",
+		"健身":  "🏃",
+		"运动":  "🏃",
+		"看书":  "📖",
+		"学习":  "📚",
+		"购物":  "🛒",
+		"逛街":  "🛒",
+		"睡觉":  "😴",
+		"午休":  "😪",
+		"通勤":  "🚇",
+		"出门":  "🚶",
+		"回家":  "🏠",
+		"约会":  "💕",
+		"聚餐":  "🍽️",
+		"看电影": "🎬",
+		"玩游戏": "🎮",
+		"刷手机": "📱",
+	}
+
+	for keyword, emoji := range statusEmojis {
+		if strings.Contains(status, keyword) {
+			return emoji
+		}
+	}
+
+	// 默认 emoji
+	return "📍"
 }
 
 // buildRetryPrompt 构建带错误反馈的重试 Prompt
@@ -1566,12 +1713,21 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
   "current_status": {"emoji": "🌰", "status": "嗑瓜子"},
   "reasoning": ["用户想把'嗑瓜子'这个状态更新到首页"]
 }
-【重要】当用户说以下内容时，使用 update_status：
+【重要】当用户说以下内容时，必须使用 update_status（不是 create）：
 - "帮我更新/修改当前状态"
 - "我现在正在XX，帮我更新一下"
 - "把XX状态更新到首页"
 - "修改我的状态为XX"
+- "修改为XX"/"改成XX"（只说新状态，没有时间范围）
 - "同步到首页"
+- "我现在XX"/"现在在XX"（描述当前状态）
+- "睡不着"/"失眠"/"在工作"等单纯描述当前状态的表达
+【区分】update_status vs create 的关键：
+- update_status：只是想更新当前显示的状态（首页展示），不涉及时刻表规划
+- create：要规划未来的时间安排（有明确的时间段）
+【示例】
+- "修改为睡不着" → update_status（用户只想改当前状态，不是规划时刻表）
+- "下午3点到5点睡觉" → create（有明确时间段，是时刻表规划）
 这类请求不需要返回完整时刻表，只需要返回要更新的状态即可。
 
 6. 删除已有行程（用户说"去掉..."/"删掉..."/"取消..."某个行程）：
@@ -1617,9 +1773,12 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
   - 明确说行程："下午开会"/"明天出差"
   - 修改请求："把下午改成..."/"加一个..."
   - 查询请求："调出明天的时刻表"/"看看我今天的安排"
-  - **更新状态请求**："更新到首页"/"帮我更新状态"/"把XX状态更新上去"/"同步到首页"/"修改我的状态"/"我现在正在XX"
-    - 【重要】使用 action="update_status"，只返回要更新的状态，不需要返回完整时刻表
-    - 例如用户说"帮我修改一下状态，我现在在嗑瓜子" → {"action":"update_status","current_status":{"emoji":"🌰","status":"嗑瓜子"}}
+  - **更新状态请求**："更新到首页"/"帮我更新状态"/"把XX状态更新上去"/"同步到首页"/"修改我的状态"/"我现在正在XX"/"修改为XX"/"改成XX"
+    - 【最重要】使用 action="update_status"，只返回要更新的状态，不需要返回完整时刻表
+    - 关键区分：没有时间范围的状态更新 = update_status，有时间范围的规划 = create
+    - 例如"帮我修改一下状态，我现在在嗑瓜子" → {"action":"update_status","current_status":{"emoji":"🌰","status":"嗑瓜子"}}
+    - 例如"修改为睡不着" → {"action":"update_status","current_status":{"emoji":"😵","status":"睡不着"}}
+    - 例如"我失眠了" → {"action":"update_status","current_status":{"emoji":"😵","status":"失眠"}}
 
 ### 关键判断原则
 - **用户反馈优先**：用户表达不满时，先道歉确认，不要继续执行

@@ -286,6 +286,29 @@ type LLMVoiceAnalysisResult struct {
 // ========== 时刻表累积机制（v2 新增）==========
 // 注意：OperationType 定义在 voice_schedule_schema.go 中，避免重复
 
+// IntentResult 意图分发器返回结果（v2 新增：Tool Calling + CoT 混合机制）
+// 用于解决 update_status vs create 等意图混淆问题
+type IntentResult struct {
+	// Action 意图类型：create/modify/confirm/cancel/update_status/query/chat
+	Action string `json:"action"`
+
+	// Thinking LLM 的分析过程（Chain of Thought）
+	// 至少包含 3 条分析，便于调试和追溯
+	Thinking []string `json:"thinking"`
+
+	// Confidence 置信度 0.0-1.0
+	Confidence float64 `json:"confidence"`
+
+	// Entities 提取的实体（时间、状态、目标等）
+	Entities map[string]interface{} `json:"entities,omitempty"`
+
+	// TargetDate 目标日期（从 entities 中提取，YYYY-MM-DD 格式）
+	TargetDate string `json:"target_date,omitempty"`
+
+	// StatusInfo 当前状态信息（update_status 时使用）
+	StatusInfo *CurrentStatusGuess `json:"status_info,omitempty"`
+}
+
 // ScheduleSnapshot 时刻表快照（用于记录每次 LLM 返回后的时刻表状态）
 type ScheduleSnapshot struct {
 	Round     int            `json:"round"`     // 对话轮次
