@@ -15,7 +15,9 @@ import (
 
 	"youkong/internal/config"
 	"youkong/internal/handler"
+	"youkong/internal/job"
 	"youkong/internal/middleware"
+	"youkong/internal/pkg/asr"
 	"youkong/internal/pkg/jwt"
 	"youkong/internal/pkg/llm"
 	"youkong/internal/pkg/poster"
@@ -104,6 +106,19 @@ func main() {
 	// 初始化JWT管理器
 	jwtManager := jwt.NewManager(cfg.JWT.Secret, cfg.JWT.ExpireHours)
 
+	// 初始化 阿里云 ASR 客户端
+	var asrClient *asr.AliyunASRClient
+	if cfg.AliyunASR.AccessKeyID != "" && cfg.AliyunASR.AccessKeySecret != "" {
+		asrClient = asr.NewAliyunASRClient(
+			cfg.AliyunASR.AccessKeyID,
+			cfg.AliyunASR.AccessKeySecret,
+			cfg.AliyunASR.AppKey,
+		)
+		logger.Info("阿里云 ASR 客户端初始化成功")
+	} else {
+		logger.Warn("阿里云 ASR 配置未设置，语音识别将使用模拟模式")
+	}
+
 	// 初始化Repository
 	userRepo := repository.NewUserRepository(db)
 	circleRepo := repository.NewCircleRepository(db)
@@ -115,6 +130,7 @@ func main() {
 	memoryRepo := repository.NewMemoryRepository(db)
 	deviceTokenRepo := repository.NewDeviceTokenRepository(db)
 	userProfileRepo := repository.NewUserProfileRepository(db)
+	scheduleRepo := repository.NewScheduleRepository(db)
 
 	// 初始化微信客户端
 	var wechatClient *wechat.Client
@@ -172,11 +188,12 @@ func main() {
 	wechatService := service.NewWechatService(wechatRepo, userRepo, invitationRepo, friendshipRepo, circleRepo, wechatClient, jwtManager)
 	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
 	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo, friendRequestRepo)
-	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, llmClient)
+	userProfileService := service.NewUserProfileService(userProfileRepo)
+	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, userProfileService, llmClient)
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
-	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo)
-	userProfileService := service.NewUserProfileService(userProfileRepo)
+	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo, redisClient)
+	voiceScheduleService := service.NewVoiceScheduleService(scheduleRepo, memoryRepo, userProfileService, redisClient, asrClient, llmClient)
 
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
@@ -185,7 +202,7 @@ func main() {
 	conversationHandler := handler.NewConversationHandler(conversationService)
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
 	friendshipHandler := handler.NewFriendshipHandler(friendshipService)
-	agentHandler := handler.NewAgentHandler(agentService, memoryService)
+	agentHandler := handler.NewAgentHandler(agentService, memoryService, voiceScheduleService)
 	contactHandler := handler.NewContactHandler(contactService)
 	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
 	wsHandler := handler.NewWSHandler(wsManager, jwtManager)
@@ -198,7 +215,7 @@ func main() {
 
 	// 创建路由
 	r := gin.New()
-	r.Use(gin.Recovery())
+	r.Use(middleware.Recovery(logger))
 	r.Use(middleware.CORS())
 	r.Use(middleware.Logger(logger))
 
@@ -254,6 +271,7 @@ func main() {
 			{
 				profile.GET("", userProfileHandler.GetMyProfile)
 				profile.PUT("", userProfileHandler.UpsertProfile)
+				profile.POST("/simple", userProfileHandler.SaveSimpleProfile) // 简化版（引导流程）
 				profile.GET("/status", userProfileHandler.GetProfileStatus)
 				profile.DELETE("", userProfileHandler.DeleteProfile)
 			}
@@ -327,9 +345,12 @@ func main() {
 				agent.POST("/status/stream2", agentHandler.ReportStatus2Stream) // Holmes 2.0 流式推理
 				agent.POST("/query", agentHandler.QueryAgentData)
 				agent.GET("/memory", agentHandler.GetMemory)
-				agent.GET("/my-analysis", agentHandler.GetMyAnalysis)               // 获取我的分析结果
-				agent.POST("/status-options", agentHandler.GenerateStatusOptionsStream) // 流式生成状态选项
-				agent.POST("/select-status", agentHandler.SelectStatus)             // 选择状态并记录
+				agent.GET("/my-analysis", agentHandler.GetMyAnalysis)                             // 获取我的分析结果
+				agent.POST("/status-options", agentHandler.GenerateStatusOptionsStream)           // 流式生成状态选项
+				agent.POST("/select-status", agentHandler.SelectStatus)                           // 选择状态并记录
+				agent.POST("/onboarding-status-options", agentHandler.GetOnboardingStatusOptions) // 引导流程状态选项
+				agent.POST("/voice-schedule/stream", agentHandler.VoiceScheduleStream)            // 语音时刻表（SSE）
+				agent.POST("/voice-schedule/interact", agentHandler.VoiceScheduleInteract)        // 语音时刻表交互
 			}
 
 			// 通讯录模块
@@ -386,6 +407,12 @@ func main() {
 			logger.Warn("静态文件目录不存在", zap.String("dir", webDir))
 		}
 	}
+
+	// 初始化并启动状态时刻表调度器
+	statusScheduler := job.NewStatusScheduler(scheduleRepo, memoryRepo, redisClient)
+	statusScheduler.Start()
+	defer statusScheduler.Stop()
+	logger.Info("状态时刻表调度器已启动")
 
 	// 启动服务器
 	addr := fmt.Sprintf(":%s", cfg.Server.Port)

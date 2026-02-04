@@ -2,10 +2,12 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"youkong/internal/model"
+	"youkong/internal/pkg/tencent"
 	"youkong/internal/repository"
 )
 
@@ -14,14 +16,16 @@ type HomeService struct {
 	friendshipRepo *repository.FriendshipRepository
 	userRepo       *repository.UserRepository
 	memoryRepo     *repository.MemoryRepository
+	redisClient    *tencent.RedisClient
 }
 
 // NewHomeService 创建首页服务
-func NewHomeService(friendshipRepo *repository.FriendshipRepository, userRepo *repository.UserRepository, memoryRepo *repository.MemoryRepository) *HomeService {
+func NewHomeService(friendshipRepo *repository.FriendshipRepository, userRepo *repository.UserRepository, memoryRepo *repository.MemoryRepository, redisClient *tencent.RedisClient) *HomeService {
 	return &HomeService{
 		friendshipRepo: friendshipRepo,
 		userRepo:       userRepo,
 		memoryRepo:     memoryRepo,
+		redisClient:    redisClient,
 	}
 }
 
@@ -34,6 +38,7 @@ type FriendGridItem struct {
 	Status       string `json:"status"`
 	UpdatedAt    string `json:"updated_at"`
 	RelativeTime string `json:"relative_time"`
+	City         string `json:"city,omitempty"` // 城市名称（如"上海"、"北京"）
 }
 
 // GridResponse 宫格响应
@@ -73,7 +78,10 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 		return nil, err
 	}
 
-	// 5. 构建宫格数据
+	// 5. 批量获取城市信息（从 Redis 中的实时状态）
+	cityMap := s.getUserCities(ctx, friendIDs)
+
+	// 6. 构建宫格数据
 	friends := make([]FriendGridItem, 0, len(friendIDs))
 	for _, fid := range friendIDs {
 		user := userMap[fid]
@@ -108,6 +116,7 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 			Status:       status,
 			UpdatedAt:    updatedAt.Format(time.RFC3339),
 			RelativeTime: formatRelativeTime(updatedAt),
+			City:         cityMap[fid],
 		})
 
 		// 最多显示 16 个（包括自己）
@@ -116,7 +125,7 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 		}
 	}
 
-	// 6. 计算宫格大小
+	// 7. 计算宫格大小
 	gridSize := calculateGridSize(len(friends))
 
 	return &GridResponse{
@@ -137,6 +146,36 @@ func calculateGridSize(count int) int {
 		return 3
 	}
 	return 4
+}
+
+// getUserCities 批量获取用户的城市信息
+func (s *HomeService) getUserCities(ctx context.Context, userIDs []string) map[string]string {
+	cityMap := make(map[string]string)
+	if s.redisClient == nil {
+		return cityMap
+	}
+
+	for _, userID := range userIDs {
+		key := fmt.Sprintf("agent:status:%s", userID)
+		data, err := s.redisClient.GetBytes(ctx, key)
+		if err != nil || data == nil {
+			continue
+		}
+
+		var status model.UserRealtimeStatus
+		if err := json.Unmarshal(data, &status); err != nil {
+			continue
+		}
+
+		// 优先使用 City 字段，其次使用 Location.City
+		if status.City != "" {
+			cityMap[userID] = status.City
+		} else if status.Location.City != "" {
+			cityMap[userID] = status.Location.City
+		}
+	}
+
+	return cityMap
 }
 
 // formatRelativeTime 格式化相对时间

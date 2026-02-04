@@ -17,15 +17,17 @@ import (
 
 // AgentHandler Agent 处理器
 type AgentHandler struct {
-	agentService  *service.AgentService
-	memoryService *service.MemoryService
+	agentService         *service.AgentService
+	memoryService        *service.MemoryService
+	voiceScheduleService *service.VoiceScheduleService
 }
 
 // NewAgentHandler 创建 Agent 处理器
-func NewAgentHandler(agentService *service.AgentService, memoryService *service.MemoryService) *AgentHandler {
+func NewAgentHandler(agentService *service.AgentService, memoryService *service.MemoryService, voiceScheduleService *service.VoiceScheduleService) *AgentHandler {
 	return &AgentHandler{
-		agentService:  agentService,
-		memoryService: memoryService,
+		agentService:         agentService,
+		memoryService:        memoryService,
+		voiceScheduleService: voiceScheduleService,
 	}
 }
 
@@ -562,6 +564,49 @@ func (h *AgentHandler) GenerateStatusOptionsStream(c *gin.Context) {
 	w.Flush()
 }
 
+// GetOnboardingStatusOptions 获取引导流程的状态选项
+// POST /api/agent/onboarding-status-options
+func (h *AgentHandler) GetOnboardingStatusOptions(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	var req struct {
+		ProfileType string `json:"profile_type" binding:"required"`
+		City        string `json:"city,omitempty"` // 城市名称（如"上海"、"北京"）
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "参数错误: profile_type 必填")
+		return
+	}
+
+	// 验证 profile_type
+	validTypes := map[string]bool{
+		"office_worker": true,
+		"student":       true,
+		"freelancer":    true,
+		"entrepreneur":  true,
+		"investor":      true,
+		"parent":        true,
+		"retired":       true,
+	}
+	if !validTypes[req.ProfileType] {
+		response.ParamError(c, "无效的 profile_type")
+		return
+	}
+
+	result, err := h.agentService.GetOnboardingStatusOptions(c.Request.Context(), req.ProfileType, req.City)
+	if err != nil {
+		fmt.Printf("[引导选项] 获取失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "获取状态选项失败")
+		return
+	}
+
+	response.Success(c, result)
+}
+
 // SelectStatus 选择状态并记录
 // POST /api/agent/select-status
 func (h *AgentHandler) SelectStatus(c *gin.Context) {
@@ -596,4 +641,169 @@ func (h *AgentHandler) SelectStatus(c *gin.Context) {
 		"success": true,
 		"message": "状态已更新",
 	})
+}
+
+// VoiceScheduleStream 语音状态时刻表 SSE 流
+// POST /api/agent/voice-schedule/stream
+// Content-Type: multipart/form-data
+func (h *AgentHandler) VoiceScheduleStream(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权"})
+		return
+	}
+
+	if h.voiceScheduleService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "语音服务未启用"})
+		return
+	}
+
+	// 获取上传的音频文件
+	file, err := c.FormFile("audio")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传音频文件"})
+		return
+	}
+
+	// 读取音频数据
+	f, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取文件失败"})
+		return
+	}
+	defer f.Close()
+
+	audioData := make([]byte, file.Size)
+	if _, err := f.Read(audioData); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取文件失败"})
+		return
+	}
+
+	// 获取音频格式
+	audioFormat := "m4a"
+	if ct := file.Header.Get("Content-Type"); ct != "" {
+		if ct == "audio/wav" || ct == "audio/wave" {
+			audioFormat = "wav"
+		} else if ct == "audio/mpeg" || ct == "audio/mp3" {
+			audioFormat = "mp3"
+		}
+	}
+
+	fmt.Printf("[VoiceSchedule] 收到音频 user=%s size=%d format=%s\n", userID, len(audioData), audioFormat)
+
+	// 设置 SSE 响应头
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	w := c.Writer
+
+	// 流式处理语音输入
+	_, err = h.voiceScheduleService.ProcessVoiceInput(c.Request.Context(), userID, audioData, audioFormat, func(event *model.VoiceScheduleEvent) {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+	})
+
+	if err != nil {
+		errEvent := model.VoiceScheduleEvent{
+			Type:    model.VSEventError,
+			Message: err.Error(),
+		}
+		data, _ := json.Marshal(errEvent)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+		return
+	}
+
+	// 发送完成信号
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	w.Flush()
+}
+
+// VoiceScheduleInteract 语音时刻表后续交互
+// POST /api/agent/voice-schedule/interact
+// 支持 JSON 和 multipart/form-data
+func (h *AgentHandler) VoiceScheduleInteract(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权"})
+		return
+	}
+
+	if h.voiceScheduleService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "语音服务未启用"})
+		return
+	}
+
+	var req model.VoiceScheduleInteractionRequest
+	var audioData []byte
+
+	contentType := c.ContentType()
+	if contentType == "application/json" {
+		// JSON 格式
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+			return
+		}
+	} else {
+		// multipart/form-data 格式
+		req.SessionID = c.PostForm("session_id")
+		req.Action = model.VoiceScheduleAction(c.PostForm("action"))
+
+		// 尝试获取音频文件
+		file, err := c.FormFile("audio")
+		if err == nil {
+			f, err := file.Open()
+			if err == nil {
+				audioData = make([]byte, file.Size)
+				f.Read(audioData)
+				f.Close()
+			}
+		}
+	}
+
+	if req.SessionID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "session_id 必填"})
+		return
+	}
+
+	fmt.Printf("[VoiceSchedule] 交互 user=%s session=%s action=%s\n", userID, req.SessionID, req.Action)
+
+	// 设置 SSE 响应头
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	w := c.Writer
+
+	// 处理交互
+	err := h.voiceScheduleService.ProcessInteraction(c.Request.Context(), userID, &req, audioData, func(event *model.VoiceScheduleEvent) {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+	})
+
+	if err != nil {
+		errEvent := model.VoiceScheduleEvent{
+			Type:    model.VSEventError,
+			Message: err.Error(),
+		}
+		data, _ := json.Marshal(errEvent)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+		return
+	}
+
+	// 发送完成信号
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	w.Flush()
 }

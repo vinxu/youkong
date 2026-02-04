@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"bytes"
+	"io"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +14,23 @@ func Logger(logger *zap.Logger) gin.HandlerFunc {
 		start := time.Now()
 		path := c.Request.URL.Path
 		query := c.Request.URL.RawQuery
+
+		// 读取请求体（仅对 POST/PUT 请求）
+		var bodyBytes []byte
+		if c.Request.Method == "POST" || c.Request.Method == "PUT" {
+			bodyBytes, _ = io.ReadAll(c.Request.Body)
+			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		}
+
+		// 记录请求开始
+		logger.Debug("request started",
+			zap.String("method", c.Request.Method),
+			zap.String("path", path),
+			zap.String("ip", c.ClientIP()),
+			zap.String("content-type", c.ContentType()),
+			zap.Int64("content-length", c.Request.ContentLength),
+			zap.String("body", string(bodyBytes)),
+		)
 
 		c.Next()
 
@@ -30,6 +49,15 @@ func Logger(logger *zap.Logger) gin.HandlerFunc {
 
 		if userID := GetUserID(c); userID != "" {
 			fields = append(fields, zap.String("user_id", userID))
+		}
+
+		// 如果是 500 错误，记录更多信息
+		if status >= 500 {
+			fields = append(fields,
+				zap.String("content-type", c.ContentType()),
+				zap.Int64("content-length", c.Request.ContentLength),
+				zap.String("body", string(bodyBytes)),
+			)
 		}
 
 		if len(c.Errors) > 0 {

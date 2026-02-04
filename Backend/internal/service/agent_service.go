@@ -25,11 +25,12 @@ const (
 
 // AgentService Agent 服务
 type AgentService struct {
-	redisClient     *tencent.RedisClient
-	userRepo        *repository.UserRepository
-	friendshipRepo  *repository.FriendshipRepository
-	llmClient       *llm.OpenRouterClient
-	holmesAnalyzer  *llm.HolmesAnalyzer
+	redisClient        *tencent.RedisClient
+	userRepo           *repository.UserRepository
+	friendshipRepo     *repository.FriendshipRepository
+	userProfileService *UserProfileService
+	llmClient          *llm.OpenRouterClient
+	holmesAnalyzer     *llm.HolmesAnalyzer
 }
 
 // NewAgentService 创建 Agent 服务
@@ -37,6 +38,7 @@ func NewAgentService(
 	redisClient *tencent.RedisClient,
 	userRepo *repository.UserRepository,
 	friendshipRepo *repository.FriendshipRepository,
+	userProfileService *UserProfileService,
 	llmClient *llm.OpenRouterClient,
 ) *AgentService {
 	var holmesAnalyzer *llm.HolmesAnalyzer
@@ -44,11 +46,12 @@ func NewAgentService(
 		holmesAnalyzer = llm.NewHolmesAnalyzer(llmClient)
 	}
 	return &AgentService{
-		redisClient:     redisClient,
-		userRepo:        userRepo,
-		friendshipRepo:  friendshipRepo,
-		llmClient:       llmClient,
-		holmesAnalyzer:  holmesAnalyzer,
+		redisClient:        redisClient,
+		userRepo:           userRepo,
+		friendshipRepo:     friendshipRepo,
+		userProfileService: userProfileService,
+		llmClient:          llmClient,
+		holmesAnalyzer:     holmesAnalyzer,
 	}
 }
 
@@ -64,6 +67,10 @@ func (s *AgentService) ReportStatus(ctx context.Context, userID string, req *mod
 	}
 	if req.Location != nil {
 		status.Location = *req.Location
+		// 保存城市信息
+		if req.Location.City != "" {
+			status.City = req.Location.City
+		}
 	}
 
 	// 序列化并存入 Redis
@@ -855,18 +862,28 @@ func (s *AgentService) GenerateStatusOptionsStream(ctx context.Context, userID s
 		return nil, fmt.Errorf("save status to redis: %w", err)
 	}
 
-	// 2. 流式生成状态选项
+	// 2. 获取用户角色画像
+	var profileType string
+	if s.userProfileService != nil {
+		profileType, _ = s.userProfileService.GetSimpleProfileType(userID)
+		if profileType != "" {
+			fmt.Printf("[状态选项] 用户角色: %s (%s)\n", profileType, model.GetProfileTypeName(profileType))
+		}
+	}
+
+	// 3. 流式生成状态选项
 	if s.holmesAnalyzer == nil {
 		return nil, fmt.Errorf("holmes analyzer not available")
 	}
 
 	input := &llm.HolmesInput{
-		Status:    req,
-		Timestamp: time.Now(),
+		Status:      req,
+		Timestamp:   time.Now(),
+		ProfileType: profileType,
 	}
 
-	// 使用流式生成状态选项
-	result, err := s.holmesAnalyzer.GenerateStatusOptionsStream(ctx, input, recentMemory, func(event *llm.HolmesStreamEvent) {
+	// 使用流式生成状态选项（传入 profileType）
+	result, err := s.holmesAnalyzer.GenerateStatusOptionsStream(ctx, input, recentMemory, profileType, func(event *llm.HolmesStreamEvent) {
 		callback(event)
 	})
 	if err != nil {
@@ -874,6 +891,250 @@ func (s *AgentService) GenerateStatusOptionsStream(ctx context.Context, userID s
 	}
 
 	return result, nil
+}
+
+// ========== 引导流程状态选项生成 ==========
+
+// OnboardingStatusOptionsRequest 引导状态选项请求
+type OnboardingStatusOptionsRequest struct {
+	ProfileType string `json:"profile_type" binding:"required"`
+}
+
+// GetOnboardingStatusOptions 获取引导流程的状态选项（使用 LLM 推理）
+// city: 用户当前所在城市（可选，用于增强推理）
+func (s *AgentService) GetOnboardingStatusOptions(ctx context.Context, profileType string, city string) (*model.StatusOptionsResult, error) {
+	if s.llmClient == nil {
+		// LLM 不可用，返回默认选项
+		return s.getDefaultOnboardingOptions(profileType), nil
+	}
+
+	now := time.Now()
+	weekdays := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
+	weekday := weekdays[now.Weekday()]
+	hour := now.Hour()
+	isWeekend := now.Weekday() == time.Saturday || now.Weekday() == time.Sunday
+
+	// 获取 ProfileType 中文名
+	profileName := model.GetProfileTypeName(profileType)
+
+	// 构建城市信息（如果有）
+	cityInfo := ""
+	if city != "" {
+		cityInfo = fmt.Sprintf("\n当前城市：%s（可以结合城市特点推测状态）", city)
+	}
+
+	prompt := fmt.Sprintf(`你是一个生活状态推理助手。根据用户的角色、当前时间和位置，推测他最可能在做的 4 件事。
+
+用户角色：%s
+当前时间：%s %d:00
+是否周末：%v%s
+
+请返回 4 个最可能的状态，JSON 格式：
+{"options": [{"emoji": "xxx", "status": "xxx"}, ...]}
+
+要求：
+1. 从社交角度考虑：朋友是否想知道你在什么场所做什么
+2. 重要场景加场所（如：在家、在公司、在学校、在外面），emoji 可以用 1-2 个表达场所+行为
+3. 普通行为可以不加场所（如：睡觉、休息）
+4. emoji 可以用1-2个表达场所+行为，如 "🏠🍽️" 表示在家吃饭
+5. status 用 2-6 个字描述，可以带场所如 "在家里吃饭"
+6. 4 个选项要有差异性，覆盖不同可能性
+7. 如果有城市信息，可以结合当地特色（如上海的咖啡文化、成都的茶馆等）
+8. 只返回 JSON，不要有其他文字
+
+示例输出（上班族，周一 10:00）：
+{"options": [{"emoji": "🏢💼", "status": "在公司工作"}, {"emoji": "☕", "status": "喝咖啡"}, {"emoji": "🏢📊", "status": "公司开会"}, {"emoji": "📱", "status": "摸鱼中"}]}
+
+示例输出（上班族，周末 12:00，上海）：
+{"options": [{"emoji": "🏠🛋️", "status": "在家躺着"}, {"emoji": "☕", "status": "喝咖啡"}, {"emoji": "🛍️", "status": "逛商场"}, {"emoji": "🍜", "status": "吃brunch"}]}`, profileName, weekday, hour, isWeekend, cityInfo)
+
+	response, err := s.llmClient.Chat(ctx, prompt)
+	if err != nil {
+		fmt.Printf("[引导选项] LLM 调用失败: %v, 使用默认选项\n", err)
+		return s.getDefaultOnboardingOptions(profileType), nil
+	}
+
+	// 解析 JSON 响应
+	var result model.StatusOptionsResult
+	// 清理响应中可能的 Markdown 代码块标记
+	response = strings.TrimPrefix(response, "```json")
+	response = strings.TrimPrefix(response, "```")
+	response = strings.TrimSuffix(response, "```")
+	response = strings.TrimSpace(response)
+
+	if err := json.Unmarshal([]byte(response), &result); err != nil {
+		fmt.Printf("[引导选项] JSON 解析失败: %v, response: %s\n", err, response)
+		return s.getDefaultOnboardingOptions(profileType), nil
+	}
+
+	// 验证结果
+	if len(result.Options) < 4 {
+		fmt.Printf("[引导选项] 选项数量不足: %d\n", len(result.Options))
+		return s.getDefaultOnboardingOptions(profileType), nil
+	}
+
+	return &result, nil
+}
+
+// getDefaultOnboardingOptions 获取默认的引导选项（LLM 不可用时）
+func (s *AgentService) getDefaultOnboardingOptions(profileType string) *model.StatusOptionsResult {
+	now := time.Now()
+	hour := now.Hour()
+	isWeekend := now.Weekday() == time.Saturday || now.Weekday() == time.Sunday
+
+	// 根据 profile_type 和时间返回默认选项
+	switch profileType {
+	case "office_worker":
+		if isWeekend {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "🛋️", Status: "在家休息"},
+					{Emoji: "📱", Status: "刷手机"},
+					{Emoji: "🛍️", Status: "出门逛街"},
+					{Emoji: "🍜", Status: "约饭中"},
+				},
+			}
+		}
+		if hour >= 9 && hour < 18 {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "💼", Status: "在工作"},
+					{Emoji: "☕", Status: "喝咖啡"},
+					{Emoji: "📊", Status: "开会中"},
+					{Emoji: "📱", Status: "摸鱼中"},
+				},
+			}
+		} else if hour >= 18 && hour < 22 {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "🚇", Status: "在通勤"},
+					{Emoji: "🛋️", Status: "在家休息"},
+					{Emoji: "📺", Status: "在追剧"},
+					{Emoji: "🍜", Status: "吃饭中"},
+				},
+			}
+		} else {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "😴", Status: "准备睡觉"},
+					{Emoji: "📺", Status: "在追剧"},
+					{Emoji: "📱", Status: "刷手机"},
+					{Emoji: "🎮", Status: "玩游戏"},
+				},
+			}
+		}
+
+	case "student":
+		if isWeekend {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "📚", Status: "在自习"},
+					{Emoji: "🎮", Status: "玩游戏"},
+					{Emoji: "😴", Status: "在睡觉"},
+					{Emoji: "🛍️", Status: "出门玩"},
+				},
+			}
+		}
+		if hour >= 8 && hour < 17 {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "📖", Status: "在上课"},
+					{Emoji: "📚", Status: "在自习"},
+					{Emoji: "☕", Status: "课间休息"},
+					{Emoji: "📱", Status: "刷手机"},
+				},
+			}
+		} else {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "📚", Status: "在自习"},
+					{Emoji: "🎮", Status: "玩游戏"},
+					{Emoji: "📺", Status: "在追剧"},
+					{Emoji: "🍜", Status: "吃饭中"},
+				},
+			}
+		}
+
+	case "freelancer":
+		return &model.StatusOptionsResult{
+			Options: []model.StatusOption{
+				{Emoji: "💻", Status: "在工作"},
+				{Emoji: "☕", Status: "喝咖啡"},
+				{Emoji: "🛋️", Status: "在家休息"},
+				{Emoji: "📱", Status: "刷手机"},
+			},
+		}
+
+	case "parent":
+		if hour >= 7 && hour < 9 {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "🚗", Status: "送孩子"},
+					{Emoji: "🍳", Status: "做早餐"},
+					{Emoji: "🏃", Status: "在运动"},
+					{Emoji: "📱", Status: "刷手机"},
+				},
+			}
+		} else if hour >= 9 && hour < 15 {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "🏠", Status: "做家务"},
+					{Emoji: "🛒", Status: "买菜中"},
+					{Emoji: "☕", Status: "喝茶休息"},
+					{Emoji: "📱", Status: "刷手机"},
+				},
+			}
+		} else {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "🚗", Status: "接孩子"},
+					{Emoji: "📖", Status: "陪作业"},
+					{Emoji: "🍳", Status: "做晚饭"},
+					{Emoji: "📺", Status: "看电视"},
+				},
+			}
+		}
+
+	case "retired":
+		if hour >= 6 && hour < 9 {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "🌅", Status: "晨练中"},
+					{Emoji: "🧓", Status: "遛弯儿"},
+					{Emoji: "📰", Status: "看新闻"},
+					{Emoji: "🍵", Status: "喝早茶"},
+				},
+			}
+		} else if hour >= 12 && hour < 15 {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "😴", Status: "午休中"},
+					{Emoji: "📺", Status: "看电视"},
+					{Emoji: "🀄", Status: "打麻将"},
+					{Emoji: "📱", Status: "刷手机"},
+				},
+			}
+		} else {
+			return &model.StatusOptionsResult{
+				Options: []model.StatusOption{
+					{Emoji: "🧓", Status: "遛弯儿"},
+					{Emoji: "🀄", Status: "打麻将"},
+					{Emoji: "📺", Status: "看电视"},
+					{Emoji: "🌳", Status: "逛公园"},
+				},
+			}
+		}
+
+	default:
+		return &model.StatusOptionsResult{
+			Options: []model.StatusOption{
+				{Emoji: "🏠", Status: "在家中"},
+				{Emoji: "💼", Status: "在工作"},
+				{Emoji: "📱", Status: "刷手机"},
+				{Emoji: "🚶", Status: "出门中"},
+			},
+		}
+	}
 }
 
 // ========== Holmes 2.0 流式分析 ==========

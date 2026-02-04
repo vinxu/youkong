@@ -19,6 +19,13 @@ type Config struct {
 	Deploy     DeployConfig
 	APNs       APNsConfig
 	TPNS       TPNSConfig
+	AliyunASR  AliyunASRConfig
+}
+
+type AliyunASRConfig struct {
+	AccessKeyID     string
+	AccessKeySecret string
+	AppKey          string
 }
 
 type APNsConfig struct {
@@ -210,6 +217,11 @@ func Load() (*Config, error) {
 			AccessID:  viper.GetString("TPNS_ACCESS_ID"),
 			AccessKey: viper.GetString("TPNS_ACCESS_KEY"),
 			SecretKey: viper.GetString("TPNS_SECRET_KEY"),
+		},
+		AliyunASR: AliyunASRConfig{
+			AccessKeyID:     viper.GetString("ALIYUN_ASR_ACCESS_KEY_ID"),
+			AccessKeySecret: viper.GetString("ALIYUN_ASR_ACCESS_KEY_SECRET"),
+			AppKey:          viper.GetString("ALIYUN_ASR_APP_KEY"),
 		},
 	}
 
