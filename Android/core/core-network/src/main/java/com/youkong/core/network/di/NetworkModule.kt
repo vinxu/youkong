@@ -1,7 +1,7 @@
 package com.youkong.core.network.di
 
-import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import com.youkong.core.network.BuildConfig
+import com.youkong.core.network.converter.SafeKotlinxSerializationConverterFactory
 import com.youkong.core.network.api.AgentApi
 import com.youkong.core.network.api.AuthApi
 import com.youkong.core.network.api.AvailabilityApi
@@ -11,9 +11,12 @@ import com.youkong.core.network.api.FriendApi
 import com.youkong.core.network.api.HomeApi
 import com.youkong.core.network.api.InvitationApi
 import com.youkong.core.network.api.MessageApi
+import com.youkong.core.network.api.ProfileApi
+import com.youkong.core.network.api.ScheduleApi
 import com.youkong.core.network.api.UserApi
 import com.youkong.core.network.interceptor.AuthInterceptor
 import com.youkong.core.network.sse.AgentSseClient
+import com.youkong.core.network.sse.VoiceScheduleSseClient
 import com.youkong.core.network.interceptor.TokenAuthenticator
 import dagger.Module
 import dagger.Provides
@@ -75,7 +78,8 @@ object NetworkModule {
         return Retrofit.Builder()
             .baseUrl(BuildConfig.BASE_URL)
             .client(okHttpClient)
-            .addConverterFactory(json.asConverterFactory(contentType))
+            // 使用自定义 Converter，解决 R8 泛型类型擦除导致的反序列化崩溃
+            .addConverterFactory(SafeKotlinxSerializationConverterFactory.create(json, contentType))
             .build()
     }
 
@@ -128,4 +132,19 @@ object NetworkModule {
     @Singleton
     fun provideHomeApi(retrofit: Retrofit): HomeApi =
         retrofit.create(HomeApi::class.java)
+
+    @Provides
+    @Singleton
+    fun provideProfileApi(retrofit: Retrofit): ProfileApi =
+        retrofit.create(ProfileApi::class.java)
+
+    @Provides
+    @Singleton
+    fun provideScheduleApi(retrofit: Retrofit): ScheduleApi =
+        retrofit.create(ScheduleApi::class.java)
+
+    @Provides
+    @Singleton
+    fun provideVoiceScheduleSseClient(json: Json): VoiceScheduleSseClient =
+        VoiceScheduleSseClient(json)
 }
