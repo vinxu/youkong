@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"youkong/internal/model"
+	"youkong/internal/pkg/agent"
 	"youkong/internal/pkg/asr"
 	"youkong/internal/pkg/llm"
 	"youkong/internal/pkg/tencent"
@@ -39,6 +40,10 @@ type VoiceScheduleService struct {
 	redisClient        *tencent.RedisClient
 	asrClient          *asr.AliyunASRClient
 	llmClient          *llm.OpenRouterClient
+
+	// Tool Calling 架构
+	llmAdapter   *agent.LLMAdapter
+	toolRegistry *agent.ToolRegistry
 }
 
 // NewVoiceScheduleService 创建语音时刻表服务
@@ -49,15 +54,27 @@ func NewVoiceScheduleService(
 	redisClient *tencent.RedisClient,
 	asrClient *asr.AliyunASRClient,
 	llmClient *llm.OpenRouterClient,
+	llmAPIKey string, // 用于 Tool Calling 的 API Key
 ) *VoiceScheduleService {
-	return &VoiceScheduleService{
+	svc := &VoiceScheduleService{
 		scheduleRepo:       scheduleRepo,
 		memoryRepo:         memoryRepo,
 		userProfileService: userProfileService,
 		redisClient:        redisClient,
 		asrClient:          asrClient,
 		llmClient:          llmClient,
+		toolRegistry:       agent.NewToolRegistry(),
 	}
+
+	// 如果提供了 API Key，创建 LLMAdapter 用于 Tool Calling
+	if llmAPIKey != "" {
+		svc.llmAdapter = agent.NewLLMAdapter(&agent.LLMAdapterConfig{
+			APIKey: llmAPIKey,
+			Model:  "qwen-max",
+		})
+	}
+
+	return svc
 }
 
 // ProcessVoiceInput 处理语音输入（SSE 流式）
@@ -502,6 +519,11 @@ func (s *VoiceScheduleService) handleConfirmAction(
 		// 保存到状态记忆
 		s.saveToMemory(ctx, session)
 
+		// 立即同步当前状态到首页（如果是今天的时刻表）
+		if scheduleDate.Truncate(24*time.Hour).Equal(time.Now().Truncate(24*time.Hour)) {
+			s.syncCurrentStatusToHome(ctx, session.UserID, session.CurrentSchedule)
+		}
+
 		// 格式化日期描述
 		dateDesc := "今天"
 		today := time.Now().Truncate(24 * time.Hour)
@@ -620,6 +642,18 @@ func (s *VoiceScheduleService) analyzeWithLLMAndContext(
 		compressedCtx = &model.CompressedUserContext{}
 	}
 
+	// ============ 第一步：尝试用 Tool Calling 识别简单意图 ============
+	// 当用户说"确认"、"取消"、"更新状态"等简单指令时，优先使用 Tool Calling
+	if s.llmAdapter != nil && s.isSimpleIntent(transcript) {
+		result, handled := s.tryToolCalling(ctx, userID, transcript, session)
+		if handled {
+			fmt.Printf("[VoiceSchedule] Tool Calling 处理成功: action=%s\n", result.Action)
+			return result, nil
+		}
+		fmt.Println("[VoiceSchedule] Tool Calling 未匹配，回退到 JSON 模式")
+	}
+
+	// ============ 第二步：复杂场景使用 JSON 模式 ============
 	// 自适应思考模式：判断是否需要深度思考
 	needThinking := s.shouldUseThinking(transcript, compressedCtx, session)
 
@@ -676,6 +710,58 @@ func (s *VoiceScheduleService) analyzeWithLLMAndContext(
 		return nil, err
 	}
 
+	// 【新增】验证时刻表格式
+	if len(result.Schedule) > 0 {
+		validationResult := model.ValidateScheduleItems(result.Schedule)
+		if !validationResult.Valid {
+			fmt.Printf("[VoiceSchedule] 时刻表格式验证失败: %s\n", validationResult.Error())
+
+			// 尝试重试（最多 2 次）
+			for retryCount := 0; retryCount < 2; retryCount++ {
+				fmt.Printf("[VoiceSchedule] 尝试重试 #%d，带错误反馈\n", retryCount+1)
+
+				// 构建重试 Prompt
+				retryPrompt := s.buildRetryPrompt(prompt, transcript, validationResult.Error())
+
+				// 重新调用 LLM
+				retryMessages := []llm.ChatMessage{
+					{Role: "user", Content: retryPrompt},
+				}
+				retryResponse, retryErr := s.llmClient.ChatWithOptions(llmCtx, retryMessages, &llm.ChatOptions{
+					EnableJSONMode: true,
+					Temperature:    0.5, // 重试时用更低温度
+				})
+				if retryErr != nil {
+					fmt.Printf("[VoiceSchedule] 重试 #%d 调用失败: %v\n", retryCount+1, retryErr)
+					continue
+				}
+
+				// 解析重试响应
+				retryResult, parseErr := s.parseLLMResponse(retryResponse)
+				if parseErr != nil {
+					fmt.Printf("[VoiceSchedule] 重试 #%d 解析失败: %v\n", retryCount+1, parseErr)
+					continue
+				}
+
+				// 再次验证
+				retryValidation := model.ValidateScheduleItems(retryResult.Schedule)
+				if retryValidation.Valid {
+					fmt.Printf("[VoiceSchedule] 重试 #%d 成功，格式验证通过\n", retryCount+1)
+					result = retryResult
+					break
+				}
+				fmt.Printf("[VoiceSchedule] 重试 #%d 仍然失败: %s\n", retryCount+1, retryValidation.Error())
+			}
+
+			// 如果重试后仍然失败，应用兜底修复
+			finalValidation := model.ValidateScheduleItems(result.Schedule)
+			if !finalValidation.Valid {
+				fmt.Printf("[VoiceSchedule] 重试失败，应用兜底修复\n")
+				result.Schedule = sanitizeScheduleItems(result.Schedule)
+			}
+		}
+	}
+
 	// 打印解析结果
 	fmt.Printf("[VoiceSchedule] 解析结果: action=%s, schedule=%d项, message=%s\n",
 		result.Action, len(result.Schedule), truncateStr(result.Message, 50))
@@ -684,6 +770,292 @@ func (s *VoiceScheduleService) analyzeWithLLMAndContext(
 	result.NeedThinking = needThinking
 
 	return result, nil
+}
+
+// buildRetryPrompt 构建带错误反馈的重试 Prompt
+func (s *VoiceScheduleService) buildRetryPrompt(originalPrompt, userInput, validationError string) string {
+	return fmt.Sprintf(`你上一次的输出有格式错误，请修正：
+
+## 错误信息
+%s
+
+## 时间格式要求（必须严格遵守）
+- 时间格式必须是 HH:MM（5个字符）
+- 小时必须是 00-23 的两位数（如 09:00 不是 9:00）
+- 分钟必须是 00-59 的两位数（如 12:05 不是 12:5）
+- 使用英文冒号，不是中文冒号
+
+## 正确示例
+{"start_time": "09:00", "end_time": "12:00", "status": "开会", "emoji": "💼"}
+{"start_time": "00:00", "end_time": "08:00", "status": "睡觉", "emoji": "😴"}
+
+## 用户原始输入
+"%s"
+
+请重新生成正确格式的 JSON 响应。只返回 JSON，不要其他内容。
+
+%s`, validationError, userInput, originalPrompt)
+}
+
+// isSimpleIntent 判断是否是简单意图（确认、取消、更新状态等）
+func (s *VoiceScheduleService) isSimpleIntent(transcript string) bool {
+	// 简单意图关键词
+	simpleIntentWords := []string{
+		// 确认类
+		"确认", "好的", "是的", "没问题", "可以", "行", "对", "保存", "就这样", "确定", "好", "嗯", "ok", "OK",
+		// 取消类
+		"取消", "不要了", "算了", "不用了", "放弃", "不要",
+		// 更新状态类（包括各种说法变体）
+		"更新到首页", "更新状态", "同步到首页", "更新到主页", "发布状态",
+		"修改状态", "修改我的状态", "改一下状态", "改下状态", "改状态",
+		"更新我的状态", "帮我更新", "帮我修改",
+		"当前状态", "现在的状态", "我现在",
+	}
+
+	transcript = strings.ToLower(transcript)
+	for _, word := range simpleIntentWords {
+		if strings.Contains(transcript, strings.ToLower(word)) {
+			return true
+		}
+	}
+	return false
+}
+
+// tryToolCalling 尝试使用 Tool Calling 处理简单意图
+func (s *VoiceScheduleService) tryToolCalling(
+	ctx context.Context,
+	userID string,
+	transcript string,
+	session *model.VoiceScheduleSession,
+) (*model.LLMVoiceAnalysisResult, bool) {
+	// 注册语音时刻表专用工具
+	s.registerVoiceScheduleTools(userID, session)
+
+	// 构建简单的上下文提示
+	systemPrompt := s.buildToolCallingPrompt(session)
+
+	// 构建消息
+	messages := []agent.AgentMessage{
+		agent.NewSystemMessage(systemPrompt),
+		agent.NewUserMessage(transcript),
+	}
+
+	// 获取注册的工具
+	tools := s.toolRegistry.GetAll()
+
+	// 调用 LLM（带工具）
+	llmCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := s.llmAdapter.ChatWithTools(llmCtx, &agent.LLMRequest{
+		Messages:    messages,
+		Tools:       tools,
+		ToolChoice:  "auto",
+		Temperature: 0.3, // 低温度提高工具调用准确性
+	})
+	if err != nil {
+		fmt.Printf("[VoiceSchedule] Tool Calling 失败: %v\n", err)
+		return nil, false
+	}
+
+	// 检查是否有工具调用
+	if len(resp.ToolCalls) == 0 {
+		fmt.Println("[VoiceSchedule] LLM 未调用任何工具")
+		return nil, false
+	}
+
+	// 处理第一个工具调用
+	toolCall := resp.ToolCalls[0]
+	fmt.Printf("[VoiceSchedule] LLM 调用工具: %s, 参数: %s\n", toolCall.Function.Name, toolCall.Function.Arguments)
+
+	// 执行工具
+	result, handled := s.executeToolCall(ctx, userID, session, &toolCall, resp.Content)
+	return result, handled
+}
+
+// registerVoiceScheduleTools 注册语音时刻表专用工具
+func (s *VoiceScheduleService) registerVoiceScheduleTools(userID string, session *model.VoiceScheduleSession) {
+	// 清空现有工具
+	s.toolRegistry.Clear()
+
+	// 创建依赖
+	deps := &agent.BuiltinToolDeps{
+		CurrentUserID:    userID,
+		CurrentSessionID: session.SessionID,
+	}
+
+	// 只注册语音时刻表相关的工具（8-11）
+	// 8. 确认保存时刻表
+	s.toolRegistry.MustRegister(&agent.Tool{
+		Name:        "confirm_schedule",
+		Description: "确认并保存当前的时刻表。当用户表示同意、确认、肯定时调用此工具。例如用户说：确认、好的、是的、没问题、可以、行、对、保存吧、就这样、确定、嗯、ok。",
+		Parameters: agent.ToolParameters{
+			Type:       "object",
+			Properties: map[string]agent.ToolParam{},
+		},
+		Handler: func(ctx context.Context, args map[string]interface{}) (*agent.ToolResult, error) {
+			return &agent.ToolResult{
+				Success: true,
+				Data:    map[string]interface{}{"action": "confirm", "message": "已确认保存"},
+			}, nil
+		},
+	})
+
+	// 9. 取消当前会话
+	s.toolRegistry.MustRegister(&agent.Tool{
+		Name:        "cancel_session",
+		Description: "取消当前操作或会话。当用户表示取消、放弃、不要时调用此工具。例如用户说：取消、不要了、算了、不用了、放弃。",
+		Parameters: agent.ToolParameters{
+			Type:       "object",
+			Properties: map[string]agent.ToolParam{},
+		},
+		Handler: func(ctx context.Context, args map[string]interface{}) (*agent.ToolResult, error) {
+			return &agent.ToolResult{
+				Success: true,
+				Data:    map[string]interface{}{"action": "cancel", "message": "已取消"},
+			}, nil
+		},
+	})
+
+	// 10. 更新当前时段状态
+	s.toolRegistry.MustRegister(&agent.Tool{
+		Name:        "update_current_status",
+		Description: "更新当前时段的状态到首页。当用户想要立即更新或修改当前显示的状态时调用。例如用户说：更新到首页、帮我更新状态、帮我修改状态、修改我的状态、我现在正在XX、把XX状态更新上去、同步到首页、发布状态、改一下状态。",
+		Parameters: agent.ToolParameters{
+			Type: "object",
+			Properties: map[string]agent.ToolParam{
+				"emoji": {
+					Type:        "string",
+					Description: "状态表情，如 😊、💼、🏠 等",
+				},
+				"status": {
+					Type:        "string",
+					Description: "状态描述，2-6个字，如：开心、工作中、在家休息",
+				},
+			},
+			Required: []string{"emoji", "status"},
+		},
+		Handler: func(ctx context.Context, args map[string]interface{}) (*agent.ToolResult, error) {
+			emoji, _ := args["emoji"].(string)
+			status, _ := args["status"].(string)
+			return &agent.ToolResult{
+				Success: true,
+				Data: map[string]interface{}{
+					"action": "update_status",
+					"emoji":  emoji,
+					"status": status,
+				},
+			}, nil
+		},
+	})
+
+	_ = deps // 标记 deps 已使用
+}
+
+// buildToolCallingPrompt 构建 Tool Calling 的系统提示
+func (s *VoiceScheduleService) buildToolCallingPrompt(session *model.VoiceScheduleSession) string {
+	var sb strings.Builder
+
+	sb.WriteString("你是一个智能助手，帮助用户管理状态时刻表。\n\n")
+
+	// 添加当前时刻表上下文
+	if len(session.CurrentSchedule) > 0 {
+		sb.WriteString("## 当前时刻表\n")
+		for _, item := range session.CurrentSchedule {
+			sb.WriteString(fmt.Sprintf("- %s-%s %s %s\n", item.StartTime, item.EndTime, item.Emoji, item.Status))
+		}
+		sb.WriteString("\n")
+	}
+
+	// 添加会话状态
+	if session.State == "schedule_ready" {
+		sb.WriteString("当前状态：时刻表已准备好，等待用户确认。\n\n")
+	}
+
+	sb.WriteString(`## 任务
+根据用户输入，判断用户意图并调用相应工具：
+- 如果用户表示确认（如"确认"、"好的"、"是的"、"没问题"），调用 confirm_schedule
+- 如果用户表示取消（如"取消"、"不要了"、"算了"），调用 cancel_session
+- 如果用户想更新状态到首页，调用 update_current_status
+
+只有明确的意图才调用工具，模糊的输入不要调用。`)
+
+	return sb.String()
+}
+
+// executeToolCall 执行工具调用并返回结果
+func (s *VoiceScheduleService) executeToolCall(
+	ctx context.Context,
+	userID string,
+	session *model.VoiceScheduleSession,
+	toolCall *agent.ToolCall,
+	llmMessage string,
+) (*model.LLMVoiceAnalysisResult, bool) {
+	// 解析工具参数
+	var args map[string]interface{}
+	if toolCall.Function.Arguments != "" {
+		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+			fmt.Printf("[VoiceSchedule] 解析工具参数失败: %v\n", err)
+			args = make(map[string]interface{})
+		}
+	}
+
+	switch toolCall.Function.Name {
+	case "confirm_schedule":
+		// 返回确认动作，让 handleLLMResult 处理
+		return &model.LLMVoiceAnalysisResult{
+			Action:   "tool_confirm",
+			Message:  "已确认保存时刻表",
+			Schedule: session.CurrentSchedule, // 保留当前时刻表
+		}, true
+
+	case "cancel_session":
+		// 返回取消动作
+		return &model.LLMVoiceAnalysisResult{
+			Action:  "tool_cancel",
+			Message: "已取消",
+		}, true
+
+	case "update_current_status":
+		// 解析参数
+		emoji, _ := args["emoji"].(string)
+		status, _ := args["status"].(string)
+
+		if emoji == "" || status == "" {
+			// 如果参数不完整，尝试从会话中获取
+			if len(session.CurrentSchedule) > 0 {
+				// 找到当前时段
+				now := time.Now().Format("15:04")
+				for _, item := range session.CurrentSchedule {
+					if now >= item.StartTime && now < item.EndTime {
+						emoji = item.Emoji
+						status = item.Status
+						break
+					}
+				}
+			}
+		}
+
+		if emoji == "" || status == "" {
+			fmt.Println("[VoiceSchedule] update_current_status 参数不完整")
+			return nil, false
+		}
+
+		// 返回更新状态动作
+		return &model.LLMVoiceAnalysisResult{
+			Action: "tool_update_status",
+			CurrentStatus: &model.CurrentStatusGuess{
+				Emoji:  emoji,
+				Status: status,
+				Reason: "用户请求更新状态",
+			},
+			Message: fmt.Sprintf("已将状态更新为 %s %s", emoji, status),
+		}, true
+
+	default:
+		fmt.Printf("[VoiceSchedule] 未知工具: %s\n", toolCall.Function.Name)
+		return nil, false
+	}
 }
 
 // addDeepThinkingInstructions 为复杂场景添加深度思考指令
@@ -887,32 +1259,71 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
 	// 构建会话历史（包含修改链摘要）
 	historyStr := ""
 	if len(session.ConversationHistory) > 1 {
-		historyParts := []string{}
-		for _, turn := range session.ConversationHistory[:len(session.ConversationHistory)-1] {
-			role := "用户"
-			if turn.Role == "assistant" {
-				role = "AI"
-			} else if turn.Role == "system" {
-				role = "系统"
+		// 如果超过 3 轮对话，生成智能摘要
+		if len(session.ConversationHistory) > 3 {
+			// 提取用户的所有修改请求
+			userRequests := []string{}
+			for _, turn := range session.ConversationHistory[:len(session.ConversationHistory)-1] {
+				if turn.Role == "user" {
+					userRequests = append(userRequests, turn.Content)
+				}
 			}
-			historyParts = append(historyParts, fmt.Sprintf("%s: %s", role, turn.Content))
+			if len(userRequests) > 0 {
+				historyStr = fmt.Sprintf("\n## 对话历史摘要\n用户依次说了：%s\n", strings.Join(userRequests, " → "))
+			}
+			// 更新会话的 HistorySummary
+			session.HistorySummary = historyStr
+		} else {
+			// 对话轮次较少，保留完整历史
+			historyParts := []string{}
+			for _, turn := range session.ConversationHistory[:len(session.ConversationHistory)-1] {
+				role := "用户"
+				if turn.Role == "assistant" {
+					role = "AI"
+				} else if turn.Role == "system" {
+					role = "系统"
+				}
+				historyParts = append(historyParts, fmt.Sprintf("%s: %s", role, turn.Content))
+			}
+			historyStr = fmt.Sprintf("\n## 对话历史\n%s\n", strings.Join(historyParts, "\n"))
 		}
-		historyStr = fmt.Sprintf("\n## 对话历史\n%s\n", strings.Join(historyParts, "\n"))
 	}
 
 	// 构建当前时刻表上下文（关键：修改时必须基于此）
 	scheduleContext := ""
+	currentTimeStr := now.Format("15:04")
+	currentSlotInfo := ""
+	currentSlotIndex := -1
 	if len(session.CurrentSchedule) > 0 {
 		scheduleLines := []string{}
-		for _, item := range session.CurrentSchedule {
+		for i, item := range session.CurrentSchedule {
 			executedMark := ""
 			if item.Executed {
 				executedMark = " [已执行]"
 			}
-			scheduleLines = append(scheduleLines, fmt.Sprintf("- %s-%s %s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status, executedMark))
+			// 检查当前时间是否落在这个时段
+			isCurrentSlot := false
+			if currentTimeStr >= item.StartTime && currentTimeStr < item.EndTime {
+				isCurrentSlot = true
+				currentSlotIndex = i
+				currentSlotInfo = fmt.Sprintf("\n【重要】当前时间 %s 落在时段[%d] %s-%s（%s %s），用户说\"此刻/现在/当前\"时应修改此时段（target_index=%d）\n", currentTimeStr, i, item.StartTime, item.EndTime, item.Emoji, item.Status, i)
+			}
+			// 跨午夜的时段特殊处理（如 23:00-02:00）
+			if item.EndTime < item.StartTime && (currentTimeStr >= item.StartTime || currentTimeStr < item.EndTime) {
+				isCurrentSlot = true
+				currentSlotIndex = i
+				currentSlotInfo = fmt.Sprintf("\n【重要】当前时间 %s 落在时段[%d] %s-%s（%s %s），用户说\"此刻/现在/当前\"时应修改此时段（target_index=%d）\n", currentTimeStr, i, item.StartTime, item.EndTime, item.Emoji, item.Status, i)
+			}
+			currentMark := ""
+			if isCurrentSlot {
+				currentMark = " ← 【当前时段】"
+			}
+			// 添加索引号，方便 LLM 精确定位
+			scheduleLines = append(scheduleLines, fmt.Sprintf("[%d] %s-%s %s %s%s%s", i, item.StartTime, item.EndTime, item.Emoji, item.Status, executedMark, currentMark))
 		}
-		scheduleContext = fmt.Sprintf("\n## 当前完整时刻表【修改/删除时必须基于此表】\n%s\n【注意】修改时保留未提及的时段；删除时移除指定时段\n", strings.Join(scheduleLines, "\n"))
+		scheduleContext = fmt.Sprintf("\n## 当前完整时刻表【修改/删除时必须基于此表】\n%s\n\n修改规则：\n- 修改时设置 operation=\"modify\" 和 target_index（0-based 索引）\n- 保留未提及的时段\n- 删除时移除指定时段%s", strings.Join(scheduleLines, "\n"), currentSlotInfo)
 		fmt.Printf("[VoiceSchedule] 传递给LLM的时刻表:\n%s\n", scheduleContext)
+		_ = currentSlotIndex // 可用于后续逻辑
 	} else {
 		fmt.Println("[VoiceSchedule] 用户无已有时刻表")
 	}
@@ -938,6 +1349,25 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
 	}
 
 	return fmt.Sprintf(`你是一个智能生活助手，帮助用户规划状态时刻表。你需要像一个聪明的秘书一样理解用户的真实意图，进行合理推理。
+
+## 时间格式要求【极其重要，必须严格遵守】
+
+时间格式必须是 HH:MM（5个字符，两位小时+冒号+两位分钟）：
+- 小时范围：00-23（必须两位数，如 09 不是 9）
+- 分钟范围：00-59（必须两位数，如 05 不是 5）
+
+正确示例：
+- "09:00" - 上午9点（小时补零）
+- "12:30" - 中午12点半
+- "00:00" - 午夜0点（不是 24:00）
+- "23:59" - 晚上11点59分
+
+错误示例（绝对不要这样输出）：
+- "9:00" - 错误！应为 "09:00"
+- "12:5" - 错误！应为 "12:05"
+- "19:60" - 错误！分钟超出范围，60是无效的
+- "24:00" - 错误！小时超出范围
+- "12：00" - 错误！必须用英文冒号
 
 ## 当前时间
 %s %s %02d:%02d
@@ -1052,9 +1482,12 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
 
 ## 输出格式（必须返回有效的 JSON 格式）
 
+**【重要】每个时间字段都必须是精确的 HH:MM 格式（5个字符）**
+
 1. 创建/修改时刻表（有具体行程信息时）：
 {
   "action": "create",
+  "operation": "create",
   "target_date": "2026-02-04",
   "date_reasoning": "用户没有提及具体日期，默认使用今天",
   "schedule": [
@@ -1062,6 +1495,20 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
     {"start_time": "12:00", "end_time": "13:00", "emoji": "🍚", "status": "午餐"}
   ],
   "reasoning": ["推理过程1", "推理过程2"]
+}
+
+1b. 修改指定时段（配合 target_index 和 operation="modify"）：
+{
+  "action": "create",
+  "operation": "modify",
+  "target_index": 0,
+  "target_date": "2026-02-04",
+  "date_reasoning": "修改当前时刻表",
+  "schedule": [
+    {"start_time": "10:00", "end_time": "13:00", "emoji": "💼", "status": "开会"},
+    {"start_time": "13:00", "end_time": "14:00", "emoji": "🍚", "status": "午餐"}
+  ],
+  "reasoning": ["用户要求修改第1个时段", "开会时间改为10点", "其他时段顺延"]
 }
 
 2. 替换整个时刻表（用户说"覆盖"/"重新"/"按新计划"）：
@@ -1142,12 +1589,16 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
   - 明确说行程："下午开会"/"明天出差"
   - 修改请求："把下午改成..."/"加一个..."
   - 查询请求："调出明天的时刻表"/"看看我今天的安排"
+  - **更新状态请求**："更新到首页"/"帮我更新状态"/"把XX状态更新上去"/"同步到首页"
+    - 这类请求应该修改【当前时段】的状态，使用 action="create" 返回完整时刻表
+    - 例如用户说"把开心这个状态更新到首页"，应该修改当前时段为"😊 开心"
 
 ### 关键判断原则
 - **用户反馈优先**：用户表达不满时，先道歉确认，不要继续执行
 - **默认是聊天**：如果用户输入不明确包含时间+活动，优先当作聊天处理
 - **不要强行创建时刻表**：用户说"你好"不需要创建时刻表
 - **保持友好对话**：用简洁自然的语言回复
+- **【重要】不要说谎**：只有当你真的返回了 schedule 数组时，才能说"已更新"/"已保存"。如果 action="chat"，绝对不能说"已经帮您更新了状态"
 
 ## 规则
 1. emoji 用 1-2 个表达场所+行为
@@ -1161,7 +1612,9 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
 9. 删除时也要输出修改后的完整时刻表
 10. 只返回 JSON，不要其他内容
 11. 【重要】如果用户提到"明天"/"后天"，必须在返回中包含 target_date 和 date_reasoning 字段！
-12. 【重要】target_date 必须是 YYYY-MM-DD 格式，date_reasoning 解释推理过程`,
+12. 【重要】target_date 必须是 YYYY-MM-DD 格式，date_reasoning 解释推理过程
+13. 【极其重要】时间格式检查：输出前检查每个 start_time 和 end_time 是否为 HH:MM 格式（5字符，如09:00）
+14. 【重要】修改已有时段时，使用 operation="modify" 并设置 target_index 指向要修改的时段索引（0开始）`,
 		weekday, now.Format("2006-01-02"), now.Hour(), now.Minute(),
 		tomorrow.Format("2006-01-02"), dayAfterTomorrow.Format("2006-01-02"),
 		contextStr, scheduleContext, historyStr, transcript,
@@ -1696,6 +2149,50 @@ func (s *VoiceScheduleService) handleLLMResult(
 			Message:   result.Message,
 			Reasoning: result.Reasoning,
 		})
+
+	// ============ Tool Calling 结果处理 ============
+
+	case "tool_confirm":
+		// 通过语音确认时刻表（等同于点击确认按钮）
+		fmt.Println("[VoiceSchedule] Tool Calling: 用户语音确认保存")
+		// 发送需要确认的事件，让前端执行确认流程
+		// 这里直接发送 confirmed 事件，表示用户已经通过语音确认
+		callback(&model.VoiceScheduleEvent{
+			Type:      model.VSEventConfirmed,
+			Message:   "已确认保存时刻表",
+			Items:     session.CurrentSchedule,
+			Reasoning: []string{"用户通过语音确认"},
+		})
+		session.State = "confirmed"
+
+	case "tool_cancel":
+		// 通过语音取消操作
+		fmt.Println("[VoiceSchedule] Tool Calling: 用户语音取消")
+		callback(&model.VoiceScheduleEvent{
+			Type:    model.VSEventCancelled,
+			Message: "已取消",
+		})
+		session.State = "cancelled"
+
+	case "tool_update_status":
+		// 通过语音更新当前状态
+		fmt.Printf("[VoiceSchedule] Tool Calling: 用户语音更新状态 %s %s\n",
+			result.CurrentStatus.Emoji, result.CurrentStatus.Status)
+		// 保存状态猜测
+		session.CurrentStatusGuess = result.CurrentStatus
+		session.State = "status_guess"
+
+		// 【关键修复】立即同步状态到首页（写入 Redis 和 MySQL）
+		s.syncDirectStatus(ctx, session.UserID, result.CurrentStatus.Emoji, result.CurrentStatus.Status)
+
+		// 发送当前状态更新事件
+		callback(&model.VoiceScheduleEvent{
+			Type:       model.VSEventCurrentStatus,
+			Emoji:      result.CurrentStatus.Emoji,
+			StatusText: result.CurrentStatus.Status,
+			Reason:     result.CurrentStatus.Reason,
+			Reasoning:  []string{"用户请求更新状态到首页"},
+		})
 	}
 }
 
@@ -2009,6 +2506,36 @@ func (s *VoiceScheduleService) addConversationTurn(session *model.VoiceScheduleS
 	if len(session.ConversationHistory) > maxConversationTurns {
 		session.ConversationHistory = s.CompressConversationHistory(session.ConversationHistory)
 	}
+
+	// 超过 3 轮时生成摘要
+	if len(session.ConversationHistory) > 3 {
+		session.HistorySummary = s.generateHistorySummary(session.ConversationHistory)
+	}
+}
+
+// generateHistorySummary 生成对话历史的智能摘要
+func (s *VoiceScheduleService) generateHistorySummary(history []model.ConversationTurn) string {
+	if len(history) <= 3 {
+		return ""
+	}
+
+	// 提取用户的所有请求
+	userRequests := []string{}
+	for _, turn := range history {
+		if turn.Role == "user" {
+			// 截断过长的内容
+			content := truncateStr(turn.Content, 30)
+			userRequests = append(userRequests, content)
+		}
+	}
+
+	if len(userRequests) == 0 {
+		return ""
+	}
+
+	// 生成摘要
+	summary := fmt.Sprintf("用户依次说了：%s", strings.Join(userRequests, " → "))
+	return summary
 }
 
 // ========== 辅助函数 ==========
@@ -2347,4 +2874,152 @@ func (s *VoiceScheduleService) ProcessTextInputStateMachine(
 	callback func(event *model.VoiceScheduleEvent),
 ) (*model.VoiceScheduleSession, error) {
 	return s.ProcessWithStateMachine(ctx, userID, sessionID, text, callback)
+}
+
+// syncCurrentStatusToHome 立即同步当前状态到首页
+// 在保存今天的时刻表后调用，确保首页立即显示最新状态
+func (s *VoiceScheduleService) syncCurrentStatusToHome(ctx context.Context, userID string, items []model.ScheduleItem) {
+	if len(items) == 0 || s.memoryRepo == nil {
+		return
+	}
+
+	currentTime := time.Now().Format("15:04")
+
+	// 找到当前时间对应的条目
+	var currentItem *model.ScheduleItem
+	for i := range items {
+		item := &items[i]
+		if currentTime >= item.StartTime && currentTime < item.EndTime {
+			currentItem = item
+			break
+		}
+	}
+
+	// 如果当前时间没有匹配的条目，使用第一个条目（用户刚设置的时刻表，通常想立即生效）
+	if currentItem == nil && len(items) > 0 {
+		// 找到最近的未来条目或第一个条目
+		for i := range items {
+			item := &items[i]
+			if currentTime < item.EndTime {
+				currentItem = item
+				break
+			}
+		}
+		// 如果所有条目都已过期，使用最后一个
+		if currentItem == nil {
+			currentItem = &items[len(items)-1]
+		}
+	}
+
+	if currentItem == nil {
+		return
+	}
+
+	// 构建分析结果
+	analysisResult := &model.AnalysisResult{
+		Availability: model.AvailabilityAnalysis{
+			Status:      s.getStatusText(currentItem.Status),
+			Probability: s.guessProbability(currentItem.Status),
+			Reason:      currentItem.Status,
+			Confidence:  "high",
+		},
+		LifeStatus: model.LifeStatus{
+			Emoji:       currentItem.Emoji,
+			Label:       currentItem.Status,
+			Description: currentItem.Status,
+		},
+		UpdatedAt: time.Now(),
+	}
+
+	// 保存到 MySQL analysis_cache
+	if err := s.memoryRepo.SaveAnalysisCache(ctx, userID, analysisResult); err != nil {
+		fmt.Printf("[VoiceSchedule] 同步状态到首页失败: %v\n", err)
+		return
+	}
+
+	// 同时更新 Redis 缓存
+	if s.redisClient != nil {
+		key := fmt.Sprintf("analysis_cache:%s", userID)
+		if data, err := json.Marshal(analysisResult); err == nil {
+			_ = s.redisClient.Set(ctx, key, data, 10*time.Minute)
+		}
+	}
+
+	fmt.Printf("[VoiceSchedule] 状态已同步到首页: user=%s emoji=%s status=%s\n",
+		userID, currentItem.Emoji, currentItem.Status)
+}
+
+// getStatusText 根据状态描述判断有空/忙碌
+func (s *VoiceScheduleService) getStatusText(status string) string {
+	// 忙碌关键词
+	busyKeywords := []string{"开会", "工作", "上班", "上课", "出差", "加班", "忙"}
+	for _, keyword := range busyKeywords {
+		if strings.Contains(status, keyword) {
+			return "忙碌"
+		}
+	}
+
+	// 可能有空关键词
+	freeKeywords := []string{"休息", "休闲", "逛街", "刷", "玩", "躺", "看"}
+	for _, keyword := range freeKeywords {
+		if strings.Contains(status, keyword) {
+			return "有空"
+		}
+	}
+
+	return "可能有空"
+}
+
+// guessProbability 猜测有空概率
+func (s *VoiceScheduleService) guessProbability(status string) int {
+	statusText := s.getStatusText(status)
+	switch statusText {
+	case "有空":
+		return 80
+	case "忙碌":
+		return 20
+	default:
+		return 50
+	}
+}
+
+// syncDirectStatus 直接同步指定状态到首页（用户语音更新状态时调用）
+func (s *VoiceScheduleService) syncDirectStatus(ctx context.Context, userID, emoji, status string) {
+	if s.memoryRepo == nil {
+		fmt.Printf("[VoiceSchedule] syncDirectStatus: memoryRepo 为空，无法同步状态\n")
+		return
+	}
+
+	// 构建分析结果
+	analysisResult := &model.AnalysisResult{
+		Availability: model.AvailabilityAnalysis{
+			Status:      s.getStatusText(status),
+			Probability: s.guessProbability(status),
+			Reason:      status,
+			Confidence:  "high",
+		},
+		LifeStatus: model.LifeStatus{
+			Emoji:       emoji,
+			Label:       status,
+			Description: status,
+		},
+		UpdatedAt: time.Now(),
+	}
+
+	// 保存到 MySQL analysis_cache
+	if err := s.memoryRepo.SaveAnalysisCache(ctx, userID, analysisResult); err != nil {
+		fmt.Printf("[VoiceSchedule] 同步直接状态到首页失败: %v\n", err)
+		return
+	}
+
+	// 同时更新 Redis 缓存
+	if s.redisClient != nil {
+		key := fmt.Sprintf("analysis_cache:%s", userID)
+		if data, err := json.Marshal(analysisResult); err == nil {
+			_ = s.redisClient.Set(ctx, key, data, 10*time.Minute)
+		}
+	}
+
+	fmt.Printf("[VoiceSchedule] 直接状态已同步到首页: user=%s emoji=%s status=%s\n",
+		userID, emoji, status)
 }

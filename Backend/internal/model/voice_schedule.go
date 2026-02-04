@@ -126,6 +126,9 @@ type VoiceScheduleSession struct {
 	UserContext         *CompressedUserContext `json:"user_context,omitempty"`         // 压缩后的用户上下文
 	ConversationHistory []ConversationTurn     `json:"conversation_history,omitempty"` // 对话历史
 	LastReasoning       []string               `json:"last_reasoning,omitempty"`       // 最近一次的推理依据
+	HistorySummary      string                 `json:"history_summary,omitempty"`      // 对话历史摘要（超过3轮时生成）
+	RetryCount          int                    `json:"retry_count,omitempty"`          // 当前重试次数（验证失败重试）
+	LastOperation       OperationType          `json:"last_operation,omitempty"`       // 上次操作类型
 
 	// 可见性设置
 	Visibility ScheduleVisibility `json:"visibility,omitempty"` // 可见性
@@ -173,6 +176,7 @@ const (
 	VSEventVisibilityPrompt VoiceScheduleEventType = "visibility_prompt" // 可见性选择
 	VSEventCircleList       VoiceScheduleEventType = "circle_list"       // 圈子列表
 	VSEventConfirmed        VoiceScheduleEventType = "confirmed"
+	VSEventCancelled        VoiceScheduleEventType = "cancelled"         // 取消操作
 	VSEventError            VoiceScheduleEventType = "error"
 
 	// ========== 多阶段对话状态机事件（新增）==========
