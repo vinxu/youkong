@@ -18,11 +18,12 @@ const (
 
 // ScheduleItem 时刻表条目
 type ScheduleItem struct {
-	StartTime string `json:"start_time"` // HH:MM 格式
-	EndTime   string `json:"end_time"`   // HH:MM 格式
+	StartTime string `json:"start_time"`           // HH:MM 格式
+	EndTime   string `json:"end_time"`             // HH:MM 格式
 	Emoji     string `json:"emoji"`
 	Status    string `json:"status"`
 	Executed  bool   `json:"executed"`
+	IsAIGuess bool   `json:"is_ai_guess,omitempty"` // 是否为 AI 推测的状态
 }
 
 // ScheduleItems JSON 数组类型（用于数据库存储）
@@ -129,6 +130,9 @@ type VoiceScheduleSession struct {
 	HistorySummary      string                 `json:"history_summary,omitempty"`      // 对话历史摘要（超过3轮时生成）
 	RetryCount          int                    `json:"retry_count,omitempty"`          // 当前重试次数（验证失败重试）
 	LastOperation       OperationType          `json:"last_operation,omitempty"`       // 上次操作类型
+
+	// ========== 时刻表累积机制（v2 新增）==========
+	ScheduleSnapshots []ScheduleSnapshot `json:"schedule_snapshots,omitempty"` // 时刻表快照历史
 
 	// 可见性设置
 	Visibility ScheduleVisibility `json:"visibility,omitempty"` // 可见性
@@ -275,6 +279,28 @@ type LLMVoiceAnalysisResult struct {
 	NeedThinking    bool                `json:"need_thinking,omitempty"`  // 是否需要深度思考
 	TargetDate      string              `json:"target_date,omitempty"`    // 目标日期：YYYY-MM-DD 格式（兼容 today/tomorrow 等旧格式）
 	DateReasoning   string              `json:"date_reasoning,omitempty"` // 日期推理过程（调试用）
+	Operation       string              `json:"operation,omitempty"`      // 操作类型：create/modify/delete/query（用于智能合并）
+	TargetIndex     *int                `json:"target_index,omitempty"`   // 修改/删除时指定目标时段索引（0-based）
+}
+
+// ========== 时刻表累积机制（v2 新增）==========
+// 注意：OperationType 定义在 voice_schedule_schema.go 中，避免重复
+
+// ScheduleSnapshot 时刻表快照（用于记录每次 LLM 返回后的时刻表状态）
+type ScheduleSnapshot struct {
+	Round     int            `json:"round"`     // 对话轮次
+	Action    string         `json:"action"`    // 操作类型：create/modify/delete/replace
+	Schedule  []ScheduleItem `json:"schedule"`  // 快照时的时刻表
+	Timestamp time.Time      `json:"timestamp"` // 记录时间
+	Reason    string         `json:"reason"`    // 操作原因/用户原始输入
+}
+
+// SequenceContext 衔接上下文（用于检测"开完会去健身"等连续活动表达）
+type SequenceContext struct {
+	PreviousActivity ScheduleItem `json:"previous_activity"` // 前一个活动
+	PreviousIndex    int          `json:"previous_index"`    // 前一个活动的索引
+	EndTime          string       `json:"end_time"`          // 前一个活动的结束时间
+	DetectedKeyword  string       `json:"detected_keyword"`  // 检测到的衔接关键词
 }
 
 // ========== Plan Mode 上下文数据结构 ==========

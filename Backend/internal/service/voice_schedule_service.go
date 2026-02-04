@@ -797,22 +797,26 @@ func (s *VoiceScheduleService) buildRetryPrompt(originalPrompt, userInput, valid
 %s`, validationError, userInput, originalPrompt)
 }
 
-// isSimpleIntent 判断是否是简单意图（确认、取消、更新状态等）
+// isSimpleIntent 判断是否是极简单意图（仅确认、取消）
+// 【重要】只对极短的确认/取消类指令使用 Tool Calling 加速，其他都交给 LLM 理解
 func (s *VoiceScheduleService) isSimpleIntent(transcript string) bool {
-	// 简单意图关键词
+	// 只匹配极简单的确认/取消意图
+	// "更新状态"等复杂意图交给 JSON 模式的 LLM 去理解，不用关键字匹配
 	simpleIntentWords := []string{
-		// 确认类
+		// 确认类（纯确认词）
 		"确认", "好的", "是的", "没问题", "可以", "行", "对", "保存", "就这样", "确定", "好", "嗯", "ok", "OK",
-		// 取消类
+		// 取消类（纯取消词）
 		"取消", "不要了", "算了", "不用了", "放弃", "不要",
-		// 更新状态类（包括各种说法变体）
-		"更新到首页", "更新状态", "同步到首页", "更新到主页", "发布状态",
-		"修改状态", "修改我的状态", "改一下状态", "改下状态", "改状态",
-		"更新我的状态", "帮我更新", "帮我修改",
-		"当前状态", "现在的状态", "我现在",
 	}
 
-	transcript = strings.ToLower(transcript)
+	transcript = strings.ToLower(strings.TrimSpace(transcript))
+
+	// 只有当输入非常短（<10字）且包含关键词时才认为是简单意图
+	// 避免把"帮我修改一下状态，我现在在嗑瓜子"这样的长句误判
+	if len([]rune(transcript)) > 10 {
+		return false
+	}
+
 	for _, word := range simpleIntentWords {
 		if strings.Contains(transcript, strings.ToLower(word)) {
 			return true
@@ -1290,10 +1294,18 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
 	}
 
 	// 构建当前时刻表上下文（关键：修改时必须基于此）
+	// v2 改进：使用活动映射表替代原有的简单列表
 	scheduleContext := ""
 	currentTimeStr := now.Format("15:04")
 	currentSlotInfo := ""
 	currentSlotIndex := -1
+
+	// v2 新增：活动映射表（更清晰的结构化展示）
+	activityMapping := s.buildActivityMapping(session)
+
+	// v2 新增：衔接时间指导（处理"开完会去健身"等表达）
+	sequenceGuidance := s.addSequenceGuidance(transcript, session)
+
 	if len(session.CurrentSchedule) > 0 {
 		scheduleLines := []string{}
 		for i, item := range session.CurrentSchedule {
@@ -1321,7 +1333,9 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
 			// 添加索引号，方便 LLM 精确定位
 			scheduleLines = append(scheduleLines, fmt.Sprintf("[%d] %s-%s %s %s%s%s", i, item.StartTime, item.EndTime, item.Emoji, item.Status, executedMark, currentMark))
 		}
-		scheduleContext = fmt.Sprintf("\n## 当前完整时刻表【修改/删除时必须基于此表】\n%s\n\n修改规则：\n- 修改时设置 operation=\"modify\" 和 target_index（0-based 索引）\n- 保留未提及的时段\n- 删除时移除指定时段%s", strings.Join(scheduleLines, "\n"), currentSlotInfo)
+		// v2 改进：整合活动映射表和衔接指导
+		scheduleContext = fmt.Sprintf("%s\n## 当前完整时刻表【修改/删除时必须基于此表】\n%s\n\n修改规则：\n- 修改时设置 operation=\"modify\" 和 target_index（0-based 索引）\n- **新增活动时必须保留所有未修改的时段**\n- 删除时移除指定时段%s%s",
+			activityMapping, strings.Join(scheduleLines, "\n"), currentSlotInfo, sequenceGuidance)
 		fmt.Printf("[VoiceSchedule] 传递给LLM的时刻表:\n%s\n", scheduleContext)
 		_ = currentSlotIndex // 可用于后续逻辑
 	} else {
@@ -1546,6 +1560,20 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
   "reasoning": ["用户描述了当前状态"]
 }
 
+5b. 更新当前状态到首页（用户想把某个状态立刻更新到首页展示）：
+{
+  "action": "update_status",
+  "current_status": {"emoji": "🌰", "status": "嗑瓜子"},
+  "reasoning": ["用户想把'嗑瓜子'这个状态更新到首页"]
+}
+【重要】当用户说以下内容时，使用 update_status：
+- "帮我更新/修改当前状态"
+- "我现在正在XX，帮我更新一下"
+- "把XX状态更新到首页"
+- "修改我的状态为XX"
+- "同步到首页"
+这类请求不需要返回完整时刻表，只需要返回要更新的状态即可。
+
 6. 删除已有行程（用户说"去掉..."/"删掉..."/"取消..."某个行程）：
 {
   "action": "create",
@@ -1589,9 +1617,9 @@ func (s *VoiceScheduleService) buildPlanModePrompt(
   - 明确说行程："下午开会"/"明天出差"
   - 修改请求："把下午改成..."/"加一个..."
   - 查询请求："调出明天的时刻表"/"看看我今天的安排"
-  - **更新状态请求**："更新到首页"/"帮我更新状态"/"把XX状态更新上去"/"同步到首页"
-    - 这类请求应该修改【当前时段】的状态，使用 action="create" 返回完整时刻表
-    - 例如用户说"把开心这个状态更新到首页"，应该修改当前时段为"😊 开心"
+  - **更新状态请求**："更新到首页"/"帮我更新状态"/"把XX状态更新上去"/"同步到首页"/"修改我的状态"/"我现在正在XX"
+    - 【重要】使用 action="update_status"，只返回要更新的状态，不需要返回完整时刻表
+    - 例如用户说"帮我修改一下状态，我现在在嗑瓜子" → {"action":"update_status","current_status":{"emoji":"🌰","status":"嗑瓜子"}}
 
 ### 关键判断原则
 - **用户反馈优先**：用户表达不满时，先道歉确认，不要继续执行
@@ -2067,21 +2095,58 @@ func (s *VoiceScheduleService) handleLLMResult(
 		s.addConversationTurn(session, "assistant", result.Thinking)
 	}
 
-	fmt.Printf("[VoiceSchedule] handleLLMResult: action=%s\n", result.Action)
+	fmt.Printf("[VoiceSchedule] handleLLMResult: action=%s, operation=%s\n", result.Action, result.Operation)
+
+	// 获取最近一次用户输入作为快照原因
+	snapshotReason := ""
+	if len(session.TranscriptHistory) > 0 {
+		snapshotReason = session.TranscriptHistory[len(session.TranscriptHistory)-1]
+	}
 
 	switch result.Action {
 	case "create", "modify":
-		session.CurrentSchedule = result.Schedule
+		// v2 改进：使用智能合并而非直接覆盖
+		operation := result.Operation
+		if operation == "" {
+			operation = result.Action // 兼容旧版本
+		}
+
+		// 如果 LLM 返回的 operation 是 "modify" 但没有 target_index，
+		// 或者返回的时刻表包含了所有已有时段，则信任 LLM 的结果
+		var mergedSchedule []model.ScheduleItem
+		if len(session.CurrentSchedule) > 0 && len(result.Schedule) > 0 {
+			// 检查 LLM 是否已经返回了完整时刻表（包含已有时段）
+			if s.containsExistingSlots(session.CurrentSchedule, result.Schedule) {
+				// LLM 已经返回了包含已有时段的完整时刻表，直接使用
+				mergedSchedule = result.Schedule
+				fmt.Printf("[VoiceSchedule] LLM 返回了完整时刻表，包含 %d 个已有时段\n", len(session.CurrentSchedule))
+			} else {
+				// LLM 只返回了新时段，需要智能合并
+				mergedSchedule = s.mergeSchedules(session.CurrentSchedule, result.Schedule, operation, result.TargetIndex)
+				fmt.Printf("[VoiceSchedule] 智能合并：已有 %d 个时段 + 新 %d 个时段 = 合并后 %d 个时段\n",
+					len(session.CurrentSchedule), len(result.Schedule), len(mergedSchedule))
+			}
+		} else {
+			mergedSchedule = result.Schedule
+		}
+
+		// 记录时刻表快照
+		s.recordScheduleSnapshot(session, mergedSchedule, result.Action, snapshotReason)
+
+		session.CurrentSchedule = mergedSchedule
+		session.LastOperation = model.OperationType(operation)
 		session.State = "schedule_ready"
 		callback(&model.VoiceScheduleEvent{
 			Type:      model.VSEventSchedule,
-			Items:     result.Schedule,
+			Items:     mergedSchedule,
 			Reasoning: result.Reasoning,
 		})
 
 	case "replace":
 		// 完全替换时刻表（用户说"覆盖"/"重新安排"）
+		s.recordScheduleSnapshot(session, result.Schedule, "replace", snapshotReason)
 		session.CurrentSchedule = result.Schedule
+		session.LastOperation = model.OpReplace
 		session.State = "schedule_ready"
 		callback(&model.VoiceScheduleEvent{
 			Type:      model.VSEventSchedule,
@@ -2150,6 +2215,34 @@ func (s *VoiceScheduleService) handleLLMResult(
 			Reasoning: result.Reasoning,
 		})
 
+	case "update_status":
+		// JSON 模式返回的更新状态请求（用户说"帮我修改状态"/"我现在正在XX"等）
+		if result.CurrentStatus == nil {
+			fmt.Println("[VoiceSchedule] update_status 但 current_status 为空")
+			callback(&model.VoiceScheduleEvent{
+				Type:    model.VSEventChat,
+				Message: "请告诉我你现在的状态是什么？",
+			})
+			return
+		}
+		fmt.Printf("[VoiceSchedule] JSON模式: 用户请求更新状态 %s %s\n",
+			result.CurrentStatus.Emoji, result.CurrentStatus.Status)
+		// 保存状态猜测
+		session.CurrentStatusGuess = result.CurrentStatus
+		session.State = "status_updated"
+
+		// 【关键】立即同步状态到首页（写入 Redis 和 MySQL）
+		s.syncDirectStatus(ctx, session.UserID, result.CurrentStatus.Emoji, result.CurrentStatus.Status)
+
+		// 发送当前状态更新事件
+		callback(&model.VoiceScheduleEvent{
+			Type:       model.VSEventCurrentStatus,
+			Emoji:      result.CurrentStatus.Emoji,
+			StatusText: result.CurrentStatus.Status,
+			Reason:     "状态已更新到首页",
+			Reasoning:  result.Reasoning,
+		})
+
 	// ============ Tool Calling 结果处理 ============
 
 	case "tool_confirm":
@@ -2194,6 +2287,421 @@ func (s *VoiceScheduleService) handleLLMResult(
 			Reasoning:  []string{"用户请求更新状态到首页"},
 		})
 	}
+}
+
+// ========== v2 架构改进：时刻表累积机制 ==========
+
+// mergeSchedules 智能合并时刻表（解决直接覆盖导致的数据丢失问题）
+// existing: 当前会话中已有的时刻表
+// incoming: LLM 新返回的时刻表
+// operation: 操作类型（create/modify/replace_all）
+// targetIndex: 修改/删除时的目标索引
+func (s *VoiceScheduleService) mergeSchedules(
+	existing []model.ScheduleItem,
+	incoming []model.ScheduleItem,
+	operation string,
+	targetIndex *int,
+) []model.ScheduleItem {
+	fmt.Printf("[VoiceSchedule] mergeSchedules: operation=%s, existing=%d, incoming=%d\n",
+		operation, len(existing), len(incoming))
+
+	switch operation {
+	case "replace", "replace_all":
+		// LLM 明确返回完整时刻表时才覆盖
+		fmt.Printf("[VoiceSchedule] 完全替换时刻表，共 %d 个时段\n", len(incoming))
+		return incoming
+
+	case "modify":
+		// 修改指定时段：替换匹配的时段，保留其他
+		if targetIndex != nil && *targetIndex >= 0 && *targetIndex < len(existing) {
+			// 如果 incoming 只有一个时段，替换指定索引
+			if len(incoming) == 1 {
+				result := make([]model.ScheduleItem, len(existing))
+				copy(result, existing)
+				result[*targetIndex] = incoming[0]
+				fmt.Printf("[VoiceSchedule] 修改索引 %d 的时段\n", *targetIndex)
+				return s.sortAndDedupSchedule(result)
+			}
+		}
+		// 如果 LLM 返回了多个时段，说明它已经考虑了完整时刻表
+		// 这种情况下信任 LLM 的结果（但做冲突检测）
+		if len(incoming) > 0 {
+			return s.mergeWithConflictResolution(existing, incoming)
+		}
+		return existing
+
+	case "delete":
+		// 删除时段：移除指定索引
+		if targetIndex != nil && *targetIndex >= 0 && *targetIndex < len(existing) {
+			result := make([]model.ScheduleItem, 0, len(existing)-1)
+			for i, item := range existing {
+				if i != *targetIndex {
+					result = append(result, item)
+				}
+			}
+			fmt.Printf("[VoiceSchedule] 删除索引 %d 的时段\n", *targetIndex)
+			return result
+		}
+		// 如果没有指定索引，按时间段匹配删除
+		return s.removeMatchingSlots(existing, incoming)
+
+	case "create":
+		// 添加新时段：保留不冲突的旧时段
+		if len(existing) == 0 {
+			return incoming
+		}
+		return s.mergeWithConflictResolution(existing, incoming)
+
+	default:
+		// 未知操作类型，使用智能合并
+		if len(existing) == 0 {
+			return incoming
+		}
+		return s.mergeWithConflictResolution(existing, incoming)
+	}
+}
+
+// mergeWithConflictResolution 合并时刻表，处理时间冲突
+// 策略：新时段优先，与新时段冲突的旧时段被替换
+func (s *VoiceScheduleService) mergeWithConflictResolution(
+	existing []model.ScheduleItem,
+	incoming []model.ScheduleItem,
+) []model.ScheduleItem {
+	// 标记被新时段覆盖的旧时段
+	overlappedIndices := make(map[int]bool)
+
+	for _, newItem := range incoming {
+		newStart := s.timeToMinutes(newItem.StartTime)
+		newEnd := s.timeToMinutes(newItem.EndTime)
+
+		for i, oldItem := range existing {
+			oldStart := s.timeToMinutes(oldItem.StartTime)
+			oldEnd := s.timeToMinutes(oldItem.EndTime)
+
+			// 检测时间重叠
+			if s.hasTimeOverlap(newStart, newEnd, oldStart, oldEnd) {
+				overlappedIndices[i] = true
+				fmt.Printf("[VoiceSchedule] 旧时段 [%d] %s-%s 与新时段 %s-%s 冲突，将被替换\n",
+					i, oldItem.StartTime, oldItem.EndTime, newItem.StartTime, newItem.EndTime)
+			}
+		}
+	}
+
+	// 构建结果：保留未被覆盖的旧时段 + 所有新时段
+	result := make([]model.ScheduleItem, 0, len(existing)+len(incoming))
+
+	for i, item := range existing {
+		if !overlappedIndices[i] {
+			result = append(result, item)
+		}
+	}
+
+	result = append(result, incoming...)
+
+	return s.sortAndDedupSchedule(result)
+}
+
+// removeMatchingSlots 移除匹配的时段（按状态名称或时间范围）
+func (s *VoiceScheduleService) removeMatchingSlots(
+	existing []model.ScheduleItem,
+	toRemove []model.ScheduleItem,
+) []model.ScheduleItem {
+	result := make([]model.ScheduleItem, 0, len(existing))
+
+	for _, item := range existing {
+		shouldRemove := false
+		for _, rm := range toRemove {
+			// 匹配条件：状态名称相同 或 时间完全相同
+			if item.Status == rm.Status ||
+				(item.StartTime == rm.StartTime && item.EndTime == rm.EndTime) {
+				shouldRemove = true
+				break
+			}
+		}
+		if !shouldRemove {
+			result = append(result, item)
+		}
+	}
+
+	return result
+}
+
+// sortAndDedupSchedule 按开始时间排序并去重
+func (s *VoiceScheduleService) sortAndDedupSchedule(items []model.ScheduleItem) []model.ScheduleItem {
+	if len(items) == 0 {
+		return items
+	}
+
+	// 按开始时间排序（简单冒泡，时刻表条目数通常很少）
+	for i := 0; i < len(items)-1; i++ {
+		for j := i + 1; j < len(items); j++ {
+			if items[i].StartTime > items[j].StartTime {
+				items[i], items[j] = items[j], items[i]
+			}
+		}
+	}
+
+	// 去重（相同开始时间的保留最新的）
+	result := make([]model.ScheduleItem, 0, len(items))
+	seen := make(map[string]bool)
+
+	for _, item := range items {
+		key := item.StartTime + "-" + item.EndTime
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, item)
+		}
+	}
+
+	return result
+}
+
+// containsExistingSlots 检查新时刻表是否包含了已有时段
+// 用于判断 LLM 是否已经返回了完整时刻表
+func (s *VoiceScheduleService) containsExistingSlots(existing, incoming []model.ScheduleItem) bool {
+	if len(existing) == 0 {
+		return true
+	}
+	if len(incoming) < len(existing) {
+		return false
+	}
+
+	// 计算有多少个已有时段出现在新时刻表中
+	matchCount := 0
+	for _, existItem := range existing {
+		for _, newItem := range incoming {
+			// 匹配条件：时间范围相同或状态相同
+			if (existItem.StartTime == newItem.StartTime && existItem.EndTime == newItem.EndTime) ||
+				(existItem.Status == newItem.Status) {
+				matchCount++
+				break
+			}
+		}
+	}
+
+	// 如果超过 50% 的已有时段被保留，认为 LLM 返回了完整时刻表
+	threshold := len(existing) / 2
+	if threshold < 1 {
+		threshold = 1
+	}
+	return matchCount >= threshold
+}
+
+// timeToMinutes 将 HH:MM 时间转换为分钟数
+func (s *VoiceScheduleService) timeToMinutes(timeStr string) int {
+	if len(timeStr) != 5 || timeStr[2] != ':' {
+		return 0
+	}
+	h, _ := strconv.Atoi(timeStr[0:2])
+	m, _ := strconv.Atoi(timeStr[3:5])
+	return h*60 + m
+}
+
+// hasTimeOverlap 检测两个时间段是否重叠
+func (s *VoiceScheduleService) hasTimeOverlap(start1, end1, start2, end2 int) bool {
+	// 处理跨午夜的情况
+	if end1 < start1 {
+		end1 += 24 * 60
+	}
+	if end2 < start2 {
+		end2 += 24 * 60
+	}
+
+	// 标准重叠检测
+	return start1 < end2 && start2 < end1
+}
+
+// recordScheduleSnapshot 记录时刻表快照
+func (s *VoiceScheduleService) recordScheduleSnapshot(
+	session *model.VoiceScheduleSession,
+	schedule []model.ScheduleItem,
+	action string,
+	reason string,
+) {
+	snapshot := model.ScheduleSnapshot{
+		Round:     len(session.ConversationHistory) / 2,
+		Action:    action,
+		Schedule:  schedule,
+		Timestamp: time.Now(),
+		Reason:    reason,
+	}
+
+	session.ScheduleSnapshots = append(session.ScheduleSnapshots, snapshot)
+
+	// 只保留最近 10 个快照
+	if len(session.ScheduleSnapshots) > 10 {
+		session.ScheduleSnapshots = session.ScheduleSnapshots[len(session.ScheduleSnapshots)-10:]
+	}
+
+	fmt.Printf("[VoiceSchedule] 记录时刻表快照: round=%d, action=%s, items=%d\n",
+		snapshot.Round, action, len(schedule))
+}
+
+// ========== v2 架构改进：衔接词检测 ==========
+
+// detectSequenceReference 检测衔接词并提取前置活动
+// 用于处理"开完会去健身"等连续活动表达
+func (s *VoiceScheduleService) detectSequenceReference(
+	transcript string,
+	session *model.VoiceScheduleSession,
+) *model.SequenceContext {
+	if len(session.CurrentSchedule) == 0 {
+		return nil
+	}
+
+	// 衔接关键词模式
+	sequencePatterns := []struct {
+		pattern  *regexp.Regexp
+		position int // 活动名称在匹配结果中的位置
+	}{
+		{regexp.MustCompile(`(.+?)完(?:了)?(?:去|再)`), 1},       // "开会完去健身"、"开会完了再去"
+		{regexp.MustCompile(`(?:做完|开完|吃完|完成)(.+?)(?:去|再)`), 1}, // "开完会去健身"
+		{regexp.MustCompile(`(.+?)(?:之后|后)(?:去|再)?`), 1},      // "开会之后去健身"
+		{regexp.MustCompile(`(.+?)(?:结束|完)(?:后)?`), 1},        // "开会结束去健身"
+		{regexp.MustCompile(`(?:然后|接着|之后)(?:去)?(.+)`), 1},     // "然后去健身"
+	}
+
+	for _, p := range sequencePatterns {
+		matches := p.pattern.FindStringSubmatch(transcript)
+		if len(matches) > p.position {
+			activityName := strings.TrimSpace(matches[p.position])
+			if activityName == "" {
+				continue
+			}
+
+			// 在当前时刻表中查找匹配的活动
+			for i, item := range session.CurrentSchedule {
+				// 模糊匹配：活动名称包含关键词
+				if strings.Contains(item.Status, activityName) ||
+					strings.Contains(activityName, item.Status) ||
+					s.fuzzyMatchActivity(activityName, item.Status) {
+					fmt.Printf("[VoiceSchedule] 检测到衔接表达: '%s' 引用活动 [%d] %s (结束于 %s)\n",
+						matches[0], i, item.Status, item.EndTime)
+					return &model.SequenceContext{
+						PreviousActivity: item,
+						PreviousIndex:    i,
+						EndTime:          item.EndTime,
+						DetectedKeyword:  matches[0],
+					}
+				}
+			}
+		}
+	}
+
+	// 检测隐式衔接："然后"/"接着"（没有明确指定前一活动）
+	implicitPatterns := []string{"然后", "接着", "之后再", "接下来"}
+	for _, kw := range implicitPatterns {
+		if strings.Contains(transcript, kw) && len(session.CurrentSchedule) > 0 {
+			// 默认引用最后一个活动
+			lastIdx := len(session.CurrentSchedule) - 1
+			lastItem := session.CurrentSchedule[lastIdx]
+			fmt.Printf("[VoiceSchedule] 检测到隐式衔接: '%s'，引用最后一个活动 [%d] %s (结束于 %s)\n",
+				kw, lastIdx, lastItem.Status, lastItem.EndTime)
+			return &model.SequenceContext{
+				PreviousActivity: lastItem,
+				PreviousIndex:    lastIdx,
+				EndTime:          lastItem.EndTime,
+				DetectedKeyword:  kw,
+			}
+		}
+	}
+
+	return nil
+}
+
+// fuzzyMatchActivity 模糊匹配活动名称
+func (s *VoiceScheduleService) fuzzyMatchActivity(input, status string) bool {
+	// 常见同义词映射
+	synonyms := map[string][]string{
+		"会议": {"开会", "会", "会议"},
+		"开会": {"会议", "会", "开会"},
+		"健身": {"运动", "锻炼", "健身房"},
+		"运动": {"健身", "锻炼"},
+		"吃饭": {"吃饭", "用餐", "午餐", "晚餐", "吃"},
+		"午餐": {"吃饭", "午饭"},
+		"晚餐": {"吃饭", "晚饭"},
+		"工作": {"办公", "上班"},
+	}
+
+	for key, syns := range synonyms {
+		if strings.Contains(input, key) {
+			for _, syn := range syns {
+				if strings.Contains(status, syn) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// addSequenceGuidance 生成衔接时间指导（注入到 Prompt）
+func (s *VoiceScheduleService) addSequenceGuidance(
+	transcript string,
+	session *model.VoiceScheduleSession,
+) string {
+	ctx := s.detectSequenceReference(transcript, session)
+	if ctx == nil {
+		return ""
+	}
+
+	return fmt.Sprintf(`
+
+## 时间衔接指导【必须遵循】
+
+用户说"%s"，这指的是活动 [%d]（%s %s）的结束时间。
+
+**衔接规则**：
+- 前一活动：%s-%s %s
+- 前一活动结束时间：**%s**
+- **新活动的开始时间必须是 %s**（不能是其他时间）
+
+正确示例：
+- 新活动：{"start_time": "%s", "end_time": "XX:XX", ...}
+
+错误示例：
+- 新活动：{"start_time": "18:00", ...}  ← 错误！时间必须从 %s 开始！
+
+`,
+		ctx.DetectedKeyword,
+		ctx.PreviousIndex,
+		ctx.PreviousActivity.Emoji,
+		ctx.PreviousActivity.Status,
+		ctx.PreviousActivity.StartTime,
+		ctx.PreviousActivity.EndTime,
+		ctx.PreviousActivity.Status,
+		ctx.EndTime,
+		ctx.EndTime,
+		ctx.EndTime,
+		ctx.EndTime,
+	)
+}
+
+// buildActivityMapping 生成活动映射表（注入到 Prompt）
+func (s *VoiceScheduleService) buildActivityMapping(session *model.VoiceScheduleSession) string {
+	if len(session.CurrentSchedule) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n## 已确定的活动【用于衔接和修改，新增活动时必须保留这些】\n\n")
+	sb.WriteString("| 索引 | 时间范围 | 活动 | 备注 |\n")
+	sb.WriteString("|------|----------|------|------|\n")
+
+	for i, item := range session.CurrentSchedule {
+		note := ""
+		if item.Executed {
+			note = "已执行"
+		}
+		sb.WriteString(fmt.Sprintf("| [%d] | %s-%s | %s %s | %s |\n",
+			i, item.StartTime, item.EndTime, item.Emoji, item.Status, note))
+	}
+
+	sb.WriteString("\n**重要**：用户新增活动时，必须在返回的 schedule 中保留上表中所有未被修改的活动！\n")
+	sb.WriteString("**示例**：如果用户只说\"加个健身\"，返回的 schedule 应该包含表中的所有活动 + 新的健身活动。\n\n")
+
+	return sb.String()
 }
 
 // saveToMemory 保存时刻表到状态记忆
@@ -2990,7 +3498,7 @@ func (s *VoiceScheduleService) syncDirectStatus(ctx context.Context, userID, emo
 		return
 	}
 
-	// 构建分析结果
+	// 构建分析结果（用户主动设置，IsAIGuess=false）
 	analysisResult := &model.AnalysisResult{
 		Availability: model.AvailabilityAnalysis{
 			Status:      s.getStatusText(status),
@@ -3004,6 +3512,7 @@ func (s *VoiceScheduleService) syncDirectStatus(ctx context.Context, userID, emo
 			Description: status,
 		},
 		UpdatedAt: time.Now(),
+		IsAIGuess: false, // 用户主动设置的状态
 	}
 
 	// 保存到 MySQL analysis_cache
@@ -3022,4 +3531,105 @@ func (s *VoiceScheduleService) syncDirectStatus(ctx context.Context, userID, emo
 
 	fmt.Printf("[VoiceSchedule] 直接状态已同步到首页: user=%s emoji=%s status=%s\n",
 		userID, emoji, status)
+
+	// 同步到时刻表（用户主动设置的状态会覆盖 AI 推测）
+	s.syncStatusToSchedule(ctx, userID, emoji, status, false)
+}
+
+// syncStatusToSchedule 同步状态到时刻表
+// isAIGuess: true=AI推测, false=用户设置
+func (s *VoiceScheduleService) syncStatusToSchedule(ctx context.Context, userID, emoji, status string, isAIGuess bool) {
+	if s.scheduleRepo == nil {
+		return
+	}
+
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	startTime, endTime := s.getCurrentTimeSlot(now)
+
+	// 获取或创建今日时刻表
+	schedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, userID, today)
+	if err != nil {
+		// 没有活跃时刻表，创建新的
+		schedule = &model.StatusSchedule{
+			UserID:       userID,
+			ScheduleDate: today,
+			Items:        model.ScheduleItems{},
+			CurrentIndex: 0,
+			Status:       model.ScheduleStatusActive,
+			Visibility:   model.VisibilityAllFriends,
+		}
+	}
+
+	// 检查是否有重叠时段
+	found := false
+	for i, item := range schedule.Items {
+		// 检查时段是否重叠（开始时间相同，或当前时间在时段内）
+		if item.StartTime == startTime || (item.StartTime <= startTime && item.EndTime > startTime) {
+			// 如果是 AI 推测，且已有用户设置的状态，不覆盖
+			if isAIGuess && !item.IsAIGuess {
+				fmt.Printf("[时刻表同步] 跳过：已有用户设置的状态 user=%s slot=%s-%s\n",
+					userID, item.StartTime, item.EndTime)
+				return
+			}
+			// 更新时段
+			schedule.Items[i] = model.ScheduleItem{
+				StartTime: startTime,
+				EndTime:   endTime,
+				Emoji:     emoji,
+				Status:    status,
+				Executed:  false,
+				IsAIGuess: isAIGuess,
+			}
+			found = true
+			break
+		}
+	}
+
+	// 如果没有找到重叠时段，添加新条目
+	if !found {
+		schedule.Items = append(schedule.Items, model.ScheduleItem{
+			StartTime: startTime,
+			EndTime:   endTime,
+			Emoji:     emoji,
+			Status:    status,
+			Executed:  false,
+			IsAIGuess: isAIGuess,
+		})
+	}
+
+	// 保存时刻表
+	if schedule.ID == 0 {
+		err = s.scheduleRepo.Create(ctx, schedule)
+	} else {
+		err = s.scheduleRepo.Update(ctx, schedule)
+	}
+
+	if err != nil {
+		fmt.Printf("[时刻表同步] 保存失败 user=%s error=%v\n", userID, err)
+	} else {
+		fmt.Printf("[时刻表同步] 成功 user=%s slot=%s-%s emoji=%s status=%s isAIGuess=%v\n",
+			userID, startTime, endTime, emoji, status, isAIGuess)
+	}
+}
+
+// getCurrentTimeSlot 获取当前时段（向下取整到30分钟）
+func (s *VoiceScheduleService) getCurrentTimeSlot(now time.Time) (string, string) {
+	hour := now.Hour()
+	minute := now.Minute()
+
+	// 向下取整到30分钟
+	if minute >= 30 {
+		minute = 30
+	} else {
+		minute = 0
+	}
+
+	start := fmt.Sprintf("%02d:%02d", hour, minute)
+
+	// 结束时间 +30 分钟
+	endTime := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location()).Add(30 * time.Minute)
+	end := endTime.Format("15:04")
+
+	return start, end
 }
