@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"youkong/internal/model"
+	"youkong/internal/pkg/agent"
 	"youkong/internal/pkg/llm"
 	"youkong/internal/repository"
 )
@@ -406,15 +407,23 @@ func (h *PlanningHandler) NextPhase(session *model.VoiceScheduleSession) model.C
 
 // ========== Approval Handler ==========
 
-// ApprovalHandler 审批阶段处理器（不需要 LLM）
-type ApprovalHandler struct{}
+// ApprovalHandler 审批阶段处理器
+// v3 架构改进：使用 LLM Tool Calling 替代简单模式匹配
+type ApprovalHandler struct {
+	llmAdapter *agent.LLMAdapter
+}
 
 // NewApprovalHandler 创建审批阶段处理器
 func NewApprovalHandler() *ApprovalHandler {
 	return &ApprovalHandler{}
 }
 
-// 审批关键词模式
+// NewApprovalHandlerWithLLM 创建带 LLM 支持的审批阶段处理器
+func NewApprovalHandlerWithLLM(llmAdapter *agent.LLMAdapter) *ApprovalHandler {
+	return &ApprovalHandler{llmAdapter: llmAdapter}
+}
+
+// 审批关键词模式（备用，当 LLM 不可用时使用）
 var (
 	approvePatterns = []string{"好的", "确认", "可以", "行", "没问题", "ok", "OK", "确定", "保存", "执行", "就这样", "对"}
 	rejectPatterns  = []string{"不行", "不对", "错了", "重新", "取消", "不要", "算了", "重来"}
@@ -451,7 +460,7 @@ func (h *ApprovalHandler) Handle(
 	decision := h.analyzeUserDecision(input)
 
 	switch decision {
-	case "approve":
+	case "approve", "unconditional_approve":
 		// 发送审批通过提示
 		callback(&model.VoiceScheduleEvent{
 			Type:       model.VSEventApprovalPrompt,
@@ -468,13 +477,23 @@ func (h *ApprovalHandler) Handle(
 		})
 		fmt.Println("[Approval] 用户拒绝")
 
-	case "modify":
+	case "modify", "conditional_approve", "modify_request":
 		// 发送修改提示
 		callback(&model.VoiceScheduleEvent{
 			Type:    model.VSEventApprovalPrompt,
 			Message: "好的，请告诉我要怎么修改？",
 		})
 		fmt.Println("[Approval] 用户要求修改")
+
+	case "need_clarification":
+		// 用户需要澄清
+		callback(&model.VoiceScheduleEvent{
+			Type:       model.VSEventApprovalPrompt,
+			Message:    "好的，请问有什么不清楚的地方？",
+			DraftPlan:  session.DraftPlan,
+			CanApprove: true,
+		})
+		fmt.Println("[Approval] 用户需要澄清")
 
 	default:
 		// 无法识别，重新提示
@@ -490,28 +509,266 @@ func (h *ApprovalHandler) Handle(
 	return nil
 }
 
-// analyzeUserDecision 分析用户决策（简单模式匹配，不需要 LLM）
+// analyzeUserDecision 分析用户决策
+// v3 架构改进：优先使用 LLM Tool Calling，回退到模式匹配
 func (h *ApprovalHandler) analyzeUserDecision(input string) string {
-	input = strings.ToLower(strings.TrimSpace(input))
-
-	// 检查确认模式
-	for _, pattern := range approvePatterns {
-		if strings.Contains(input, pattern) {
-			return "approve"
+	// 如果配置了 LLM，使用 LLM 分析
+	if h.llmAdapter != nil {
+		result, err := h.analyzeUserDecisionWithLLM(context.Background(), input)
+		if err != nil {
+			fmt.Printf("[Approval] LLM 分析失败: %v，回退到模式匹配\n", err)
+		} else if result.Confidence >= 0.6 {
+			fmt.Printf("[Approval] LLM 分析结果: decision=%s, confidence=%.2f, thinking=%v\n",
+				result.Decision, result.Confidence, result.Thinking)
+			return result.Decision
+		} else {
+			fmt.Printf("[Approval] LLM 置信度不足: %.2f，回退到模式匹配\n", result.Confidence)
 		}
 	}
 
-	// 检查拒绝模式
-	for _, pattern := range rejectPatterns {
+	// 回退到简单模式匹配
+	return h.analyzeUserDecisionByPattern(input)
+}
+
+// analyzeUserDecisionWithLLM 使用 LLM Tool Calling 分析用户决策
+// v3 架构改进：解决"这个时间好像不对"被误判为确认的问题
+func (h *ApprovalHandler) analyzeUserDecisionWithLLM(ctx context.Context, input string) (*agent.UserDecisionResult, error) {
+	if h.llmAdapter == nil {
+		return nil, fmt.Errorf("LLM adapter not configured")
+	}
+
+	// 获取 analyze_user_decision 工具定义
+	tool := agent.AnalyzeUserDecisionTool()
+
+	// 构建系统提示
+	systemPrompt := `你是时刻表助手的审批分析器。用户刚刚收到了一个时刻表计划草案，正在给出反馈。
+请分析用户的反馈，判断他们的真实意图。
+
+【重要】警惕以下误判：
+- "好像不对" / "有点问题" / "不太对" → 这是 modify_request 或 need_clarification，不是 approve！
+- "好的，但是..." → 这是 conditional_approve，需要先处理条件
+- 包含疑问词（什么、怎么、为什么）→ need_clarification
+
+请调用 analyze_user_decision 工具返回分析结果。`
+
+	messages := []agent.AgentMessage{
+		agent.NewSystemMessage(systemPrompt),
+		agent.NewUserMessage(input),
+	}
+
+	// 调用 LLM
+	llmCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	response, err := h.llmAdapter.ChatWithTools(llmCtx, &agent.LLMRequest{
+		Messages:   messages,
+		Tools:      []*agent.Tool{tool},
+		ToolChoice: "required",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("LLM call failed: %w", err)
+	}
+
+	// 解析 Tool Call 结果
+	if len(response.ToolCalls) == 0 {
+		return nil, fmt.Errorf("LLM did not call analyze_user_decision tool")
+	}
+
+	toolCall := response.ToolCalls[0]
+	if toolCall.Function.Name != "analyze_user_decision" {
+		return nil, fmt.Errorf("unexpected tool call: %s", toolCall.Function.Name)
+	}
+
+	// 解析参数
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+		return nil, fmt.Errorf("parse arguments failed: %w", err)
+	}
+
+	result := &agent.UserDecisionResult{
+		Confidence: 0.5,
+	}
+
+	// 解析 decision
+	if decision, ok := args["decision"].(string); ok {
+		result.Decision = decision
+	} else {
+		return nil, fmt.Errorf("decision is required")
+	}
+
+	// 解析 thinking
+	if thinkingRaw, ok := args["thinking"].([]interface{}); ok {
+		for _, t := range thinkingRaw {
+			if s, ok := t.(string); ok {
+				result.Thinking = append(result.Thinking, s)
+			}
+		}
+	}
+
+	// 解析 confidence
+	if confidence, ok := args["confidence"].(float64); ok {
+		result.Confidence = confidence
+	}
+
+	// 解析 condition
+	if condition, ok := args["condition"].(string); ok {
+		result.Condition = condition
+	}
+
+	return result, nil
+}
+
+// analyzeUserDecisionByPattern 使用模式匹配分析用户决策（备用方法）
+// v3 改进：全面覆盖各种用户表达方式
+// 优先级顺序：撤销 > 疑问式判断 > 条件修改 > 澄清/暂停 > 疑问 > 否定质疑 > 拒绝 > 修改 > 确认
+func (h *ApprovalHandler) analyzeUserDecisionByPattern(input string) string {
+	// 保留原始输入用于 Emoji 检测
+	originalInput := input
+	input = strings.ToLower(strings.TrimSpace(input))
+	if input == "" {
+		return "unknown"
+	}
+
+	// ========== 第0步：检查 Emoji 和特殊符号 ==========
+	// 肯定性 Emoji
+	approveEmojis := []string{"👍", "👌", "✓", "✅", "🙆", "💪", "🎉", "👏"}
+	for _, emoji := range approveEmojis {
+		if strings.Contains(originalInput, emoji) {
+			return "approve"
+		}
+	}
+	// 否定性 Emoji
+	rejectEmojis := []string{"❌", "👎", "🙅", "😡", "🚫", "⛔"}
+	for _, emoji := range rejectEmojis {
+		if strings.Contains(originalInput, emoji) {
+			return "reject"
+		}
+	}
+
+	// ========== 第1步：检查撤销意图 ==========
+	// 撤销必须最先检查，避免被其他模式误判
+	undoPatterns := []string{"撤销", "撤回", "后悔", "恢复", "还原", "回退", "undo"}
+	for _, pattern := range undoPatterns {
+		if strings.Contains(input, pattern) {
+			return "undo"
+		}
+	}
+	// "刚才" + "不要" = 撤销
+	if strings.Contains(input, "刚才") && (strings.Contains(input, "不要") || strings.Contains(input, "取消")) {
+		return "undo"
+	}
+
+	// ========== 第1.5步：检查疑问式判断句 ==========
+	// "好不好"、"行不行"、"可不可以" 等是疑问句，不是条件句
+	questionPatternPhrases := []string{"好不好", "行不行", "可不可以", "能不能", "要不要", "对不对"}
+	for _, phrase := range questionPatternPhrases {
+		if strings.Contains(input, phrase) {
+			return "need_clarification"
+		}
+	}
+
+	// ========== 第2步：检查条件确认（"好的，但是..."、"行，不过..."）==========
+	// 注意：只有明确的条件词才算条件修改，单独的"不行"是拒绝
+	conditionalIndicators := []string{"但是", "不过", "不太对", "不太行", "有点问题"}
+	for _, cond := range conditionalIndicators {
+		if strings.Contains(input, cond) {
+			return "modify_request"
+		}
+	}
+	// "有问题" 需要特殊处理 - "有没有问题" 是疑问，"有问题" 是质疑
+	if strings.Contains(input, "有问题") && !strings.Contains(input, "有没有问题") && !strings.Contains(input, "没有问题") && !strings.Contains(input, "没问题") {
+		return "modify_request"
+	}
+
+	// ========== 第3步：检查澄清/暂停请求 ==========
+	// 这些表达表示用户需要思考或确认，不是最终决定
+	clarificationPatterns := []string{
+		"确认一下", "我确认一下", "让我看看", "看一下", "想一下",
+		"等等", "等一下", "稍等", "慢点", "别急",
+		"不明白", "不太明白", "没懂", "不理解", "不懂",
+		"解释", "说明", "再说一遍", "重复",
+		"啥意思", "什么意思",
+		"有没有问题", // 这是疑问
+	}
+	for _, pattern := range clarificationPatterns {
+		if strings.Contains(input, pattern) {
+			return "need_clarification"
+		}
+	}
+
+	// ========== 第4步：检查疑问句 ==========
+	questionIndicators := []string{"什么", "怎么", "为什么", "哪个", "是吗", "吗？", "吗?", "？", "?", "是指"}
+	for _, q := range questionIndicators {
+		if strings.Contains(input, q) {
+			return "need_clarification"
+		}
+	}
+
+	// ========== 第5步：检查否定/不确定质疑 ==========
+	// "好像 + 否定词" 或 "似乎 + 否定词"
+	uncertainIndicators := []string{"好像", "可能", "大概", "似乎"}
+	negativeWords := []string{"不对", "错了", "有误", "问题", "不是", "冲突"}
+	for _, uncertain := range uncertainIndicators {
+		if strings.Contains(input, uncertain) {
+			for _, neg := range negativeWords {
+				if strings.Contains(input, neg) {
+					return "modify_request"
+				}
+			}
+		}
+	}
+	// 单独的质疑词
+	questionPhrases := []string{"不太对", "有点不对", "好像错", "好像不"}
+	for _, phrase := range questionPhrases {
+		if strings.Contains(input, phrase) {
+			return "modify_request"
+		}
+	}
+
+	// ========== 第6步：检查明确的拒绝（优先于修改）==========
+	// 拒绝的判断需要在修改之前，因为 "算了...改天再说" 应该是拒绝而不是修改
+	rejectKeywords := []string{
+		"取消", "不要", "算了", "不对", "错了", "重新", "重来",
+		"不用", "不用了", "别了", "放弃", "不做了", "不弄了",
+		"停", "停下", "停止", "不保存", "别保存", "不存",
+		"不好", "不可以", "不是这样", "不是我要", "不行",
+		"no", "nope",
+	}
+	for _, pattern := range rejectKeywords {
 		if strings.Contains(input, pattern) {
 			return "reject"
 		}
 	}
 
-	// 检查修改模式
-	for _, pattern := range modifyPatterns {
+	// ========== 第7步：检查明确的修改请求 ==========
+	modifyKeywords := []string{"改", "换", "调", "修改", "变成", "改成", "调整"}
+	for _, pattern := range modifyKeywords {
 		if strings.Contains(input, pattern) {
 			return "modify"
+		}
+	}
+
+	// ========== 第8步：检查确认 ==========
+	// 精确匹配短词（避免 "好像" 被匹配为 "好"）
+	exactApprovePatterns := []string{
+		"好", "好的", "好啊", "好呀", "好哦", "好嘞", "好好好", "太好了",
+		"行", "行的", "行啊", "行嘞", "行行行",
+		"可以", "可以的", "可以可以",
+		"嗯", "嗯嗯", "嗯嗯嗯",
+		"对", "对的", "对对对",
+		"是", "是的", "是是是",
+		"ok", "OK", "Ok", "oK", "okay", "yes", "yep", "yup",
+		"确认", "确定", "没问题", "没毛病", "没有问题",
+		"保存", "保存吧", "存吧",
+		"就这样", "就这样吧", "就这么定了", "定了",
+		"完美", "很好", "不错", "挺好", "挺好的",
+	}
+	for _, pattern := range exactApprovePatterns {
+		// 使用 Contains 但排除已经处理过的情况
+		if strings.Contains(input, pattern) {
+			// 双重检查：确保不是疑问或条件句
+			// 已经在前面排除了，这里直接返回
+			return "approve"
 		}
 	}
 

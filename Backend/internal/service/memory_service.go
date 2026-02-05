@@ -129,8 +129,9 @@ func (s *MemoryService) AnalyzeAndUpdateMemory(ctx context.Context, userID strin
 		}
 	}
 
-	// 9. 设置更新时间
+	// 9. 设置更新时间和 AI 推测标记
 	result.UpdatedAt = now
+	result.IsAIGuess = true // LLM 分析的结果标记为 AI 推测
 
 	// 10. 缓存分析结果（Redis + MySQL）
 	if err := s.cacheAnalysisResult(ctx, userID, result); err != nil {

@@ -47,6 +47,9 @@ type VoiceScheduleService struct {
 
 	// v2 架构改进：意图分发器
 	intentDispatcher *IntentDispatcher
+
+	// v3 架构改进：恢复协调器（优雅降级）
+	recoveryOrchestrator *RecoveryOrchestrator
 }
 
 // NewVoiceScheduleService 创建语音时刻表服务
@@ -77,6 +80,8 @@ func NewVoiceScheduleService(
 		})
 		// v2 架构改进：创建意图分发器
 		svc.intentDispatcher = NewIntentDispatcher(svc.llmAdapter, svc.toolRegistry)
+		// v3 架构改进：创建恢复协调器
+		svc.recoveryOrchestrator = NewRecoveryOrchestrator(svc.llmAdapter)
 	}
 
 	return svc
@@ -230,6 +235,11 @@ func (s *VoiceScheduleService) ProcessVoiceInput(
 	// 6. 保存会话到 Redis
 	if err := s.saveSession(ctx, session); err != nil {
 		fmt.Printf("[VoiceSchedule] 保存会话失败: %v\n", err)
+		// v3 架构改进：异步通知用户（不阻塞主流程）
+		if s.recoveryOrchestrator != nil {
+			outcome := model.NewRecoverableOutcome("SESSION_SAVE_FAILED", err.Error())
+			s.recoveryOrchestrator.NotifyAsync(ctx, outcome, callback)
+		}
 	}
 
 	return session, nil
@@ -317,6 +327,11 @@ func (s *VoiceScheduleService) ProcessTextInput(
 	// 保存会话
 	if err := s.saveSession(ctx, session); err != nil {
 		fmt.Printf("[VoiceScheduleText] 保存会话失败: %v\n", err)
+		// v3 架构改进：异步通知用户
+		if s.recoveryOrchestrator != nil {
+			outcome := model.NewRecoverableOutcome("SESSION_SAVE_FAILED", err.Error())
+			s.recoveryOrchestrator.NotifyAsync(ctx, outcome, callback)
+		}
 	}
 
 	return session, nil
@@ -366,6 +381,10 @@ func (s *VoiceScheduleService) ProcessInteraction(
 
 	case model.VSActionCancel:
 		return s.handleCancelAction(ctx, session, callback)
+
+	case model.VSActionUndo:
+		// v3 新增：撤销操作
+		return s.handleUndoAction(ctx, session, callback)
 
 	default:
 		callback(&model.VoiceScheduleEvent{
@@ -420,7 +439,16 @@ func (s *VoiceScheduleService) handleAnswerAction(
 
 	s.handleLLMResult(ctx, session, result, callback)
 
-	return s.saveSession(ctx, session)
+	if err := s.saveSession(ctx, session); err != nil {
+		fmt.Printf("[VoiceSchedule] handleAnswerAction 保存会话失败: %v\n", err)
+		// v3 架构改进：异步通知用户
+		if s.recoveryOrchestrator != nil {
+			outcome := model.NewRecoverableOutcome("SESSION_SAVE_FAILED", err.Error())
+			s.recoveryOrchestrator.NotifyAsync(ctx, outcome, callback)
+		}
+		return err
+	}
+	return nil
 }
 
 // handleVoiceAction 处理语音输入（补充或回答）
@@ -475,10 +503,20 @@ func (s *VoiceScheduleService) handleVoiceAction(
 
 	s.handleLLMResult(ctx, session, result, callback)
 
-	return s.saveSession(ctx, session)
+	if err := s.saveSession(ctx, session); err != nil {
+		fmt.Printf("[VoiceSchedule] handleVoiceAction 保存会话失败: %v\n", err)
+		// v3 架构改进：异步通知用户
+		if s.recoveryOrchestrator != nil {
+			outcome := model.NewRecoverableOutcome("SESSION_SAVE_FAILED", err.Error())
+			s.recoveryOrchestrator.NotifyAsync(ctx, outcome, callback)
+		}
+		return err
+	}
+	return nil
 }
 
 // handleConfirmAction 处理确认
+// v3 架构改进：记录执行历史，支持 5 分钟内撤销
 func (s *VoiceScheduleService) handleConfirmAction(
 	ctx context.Context,
 	session *model.VoiceScheduleSession,
@@ -497,6 +535,13 @@ func (s *VoiceScheduleService) handleConfirmAction(
 		if !session.TargetDate.IsZero() {
 			scheduleDate = session.TargetDate
 			fmt.Printf("[VoiceSchedule] 保存到指定日期: %s\n", scheduleDate.Format("2006-01-02"))
+		}
+
+		// v3 新增：获取确认前的时刻表状态（用于撤销）
+		var beforeState []model.ScheduleItem
+		existingSchedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, session.UserID, scheduleDate)
+		if err == nil && existingSchedule != nil {
+			beforeState = existingSchedule.Items
 		}
 
 		schedule := &model.StatusSchedule{
@@ -521,6 +566,20 @@ func (s *VoiceScheduleService) handleConfirmAction(
 			return err
 		}
 
+		// v3 新增：记录执行历史（用于撤销）
+		execHistory := model.NewExecutionHistory(
+			session.UserID,
+			session.SessionID,
+			"save",
+			beforeState,
+			session.CurrentSchedule,
+			scheduleDate,
+		)
+		if err := s.saveExecutionHistory(ctx, execHistory); err != nil {
+			fmt.Printf("[VoiceSchedule] 保存执行历史失败: %v\n", err)
+			// 不影响主流程
+		}
+
 		// 保存到状态记忆
 		s.saveToMemory(ctx, session)
 
@@ -540,13 +599,32 @@ func (s *VoiceScheduleService) handleConfirmAction(
 			dateDesc = scheduleDate.Format("1月2日")
 		}
 
+		// v3 改进：更新会话阶段为"已确认但可撤销"
+		session.Phase = model.PhaseConfirmedUndoable
+
+		// v3 改进：返回带撤销信息的确认事件
 		callback(&model.VoiceScheduleEvent{
-			Type:    model.VSEventConfirmed,
-			Message: fmt.Sprintf("%s的时刻表已保存", dateDesc),
+			Type:          model.VSEventConfirmed,
+			Message:       fmt.Sprintf("%s的时刻表已保存。5分钟内可以说「撤销」来取消。", dateDesc),
+			Phase:         model.PhaseConfirmedUndoable,
+			CanUndo:       true,
+			UndoDeadline:  execHistory.UndoDeadline.UnixMilli(),
+			UndoRemaining: execHistory.RemainingUndoTime(),
+			AvailableActions: []model.ActionHint{
+				{Action: "undo", Label: "撤销", Shortcut: "撤销", Description: "恢复到保存前的状态"},
+			},
 		})
 
-		// 删除会话
-		s.deleteSession(ctx, session.SessionID)
+		// 不删除会话，保留用于撤销
+		// 更新会话 TTL 为 5 分钟（撤销窗口）
+		if err := s.saveSessionWithTTL(ctx, session, model.UndoWindow); err != nil {
+			fmt.Printf("[VoiceSchedule] 更新会话 TTL 失败: %v\n", err)
+			// v3 架构改进：异步通知用户
+			if s.recoveryOrchestrator != nil {
+				outcome := model.NewRecoverableOutcome("SESSION_SAVE_FAILED", err.Error())
+				s.recoveryOrchestrator.NotifyAsync(ctx, outcome, callback)
+			}
+		}
 		return nil
 	} else if session.CurrentStatusGuess != nil {
 		// 保存当前状态猜测到记忆
@@ -588,6 +666,158 @@ func (s *VoiceScheduleService) handleCancelAction(
 	// 删除会话
 	s.deleteSession(ctx, session.SessionID)
 	return nil
+}
+
+// handleUndoAction 处理撤销操作
+// v3 新增：支持确认后 5 分钟内撤销
+func (s *VoiceScheduleService) handleUndoAction(
+	ctx context.Context,
+	session *model.VoiceScheduleSession,
+	callback func(event *model.VoiceScheduleEvent),
+) error {
+	// 获取最近的执行历史
+	execHistory, err := s.getLatestExecutionHistory(ctx, session.UserID)
+	if err != nil {
+		callback(&model.VoiceScheduleEvent{
+			Type:    model.VSEventError,
+			Message: "没有可以撤销的操作",
+		})
+		return fmt.Errorf("no execution history found: %w", err)
+	}
+
+	// 检查是否还在可撤销窗口内
+	if !execHistory.IsUndoable() {
+		callback(&model.VoiceScheduleEvent{
+			Type:    model.VSEventError,
+			Message: "撤销时间已过期，无法撤销",
+		})
+		return fmt.Errorf("undo window expired")
+	}
+
+	// 执行回滚：恢复到执行前的状态
+	if len(execHistory.BeforeState) > 0 {
+		// 先取消当前的时刻表
+		_ = s.scheduleRepo.CancelUserSchedulesByDate(ctx, session.UserID, execHistory.TargetDate)
+
+		// 恢复之前的时刻表
+		schedule := &model.StatusSchedule{
+			UserID:       session.UserID,
+			ScheduleDate: execHistory.TargetDate,
+			Items:        execHistory.BeforeState,
+			CurrentIndex: 0,
+			Status:       model.ScheduleStatusActive,
+			Visibility:   session.Visibility,
+			CircleIDs:    session.CircleIDs,
+		}
+		if err := s.scheduleRepo.Create(ctx, schedule); err != nil {
+			callback(&model.VoiceScheduleEvent{
+				Type:    model.VSEventError,
+				Message: "撤销失败",
+			})
+			return fmt.Errorf("restore schedule failed: %w", err)
+		}
+
+		// 同步状态到首页
+		if execHistory.TargetDate.Truncate(24*time.Hour).Equal(time.Now().Truncate(24*time.Hour)) {
+			s.syncCurrentStatusToHome(ctx, session.UserID, execHistory.BeforeState)
+		}
+	} else {
+		// 之前没有时刻表，直接取消当前的
+		_ = s.scheduleRepo.CancelUserSchedulesByDate(ctx, session.UserID, execHistory.TargetDate)
+	}
+
+	// 标记执行历史为已撤销
+	execHistory.CanUndo = false
+	execHistory.UndoReason = "用户已撤销"
+	_ = s.saveExecutionHistory(ctx, execHistory)
+
+	// 更新会话状态
+	session.CurrentSchedule = execHistory.BeforeState
+	session.Phase = model.PhasePlanning
+
+	// 发送撤销成功事件
+	callback(&model.VoiceScheduleEvent{
+		Type:    model.VSEventCancelled,
+		Message: "已撤销。您可以继续修改时刻表。",
+		Items:   execHistory.BeforeState,
+		Phase:   model.PhasePlanning,
+		AvailableActions: []model.ActionHint{
+			{Action: "voice", Label: "继续说话", Description: "重新安排时刻表"},
+		},
+	})
+
+	fmt.Printf("[VoiceSchedule] 撤销成功: userID=%s, restored %d items\n",
+		session.UserID, len(execHistory.BeforeState))
+
+	// 更新会话
+	if err := s.saveSession(ctx, session); err != nil {
+		fmt.Printf("[VoiceSchedule] handleUndoAction 保存会话失败: %v\n", err)
+		// v3 架构改进：异步通知用户
+		if s.recoveryOrchestrator != nil {
+			outcome := model.NewRecoverableOutcome("SESSION_SAVE_FAILED", err.Error())
+			s.recoveryOrchestrator.NotifyAsync(ctx, outcome, callback)
+		}
+		return err
+	}
+	return nil
+}
+
+// ========== 执行历史存储方法 ==========
+
+const (
+	keyExecutionHistory = "exec_history:%s" // 用户执行历史 key
+)
+
+// saveExecutionHistory 保存执行历史到 Redis
+func (s *VoiceScheduleService) saveExecutionHistory(ctx context.Context, history *model.ExecutionHistory) error {
+	if s.redisClient == nil {
+		return fmt.Errorf("redis client not configured")
+	}
+
+	key := fmt.Sprintf(keyExecutionHistory, history.UserID)
+	data, err := json.Marshal(history)
+	if err != nil {
+		return fmt.Errorf("marshal execution history failed: %w", err)
+	}
+
+	// 设置 TTL 为撤销窗口 + 1 分钟的缓冲
+	ttl := model.UndoWindow + time.Minute
+	return s.redisClient.Set(ctx, key, string(data), ttl)
+}
+
+// getLatestExecutionHistory 获取用户最近的执行历史
+func (s *VoiceScheduleService) getLatestExecutionHistory(ctx context.Context, userID string) (*model.ExecutionHistory, error) {
+	if s.redisClient == nil {
+		return nil, fmt.Errorf("redis client not configured")
+	}
+
+	key := fmt.Sprintf(keyExecutionHistory, userID)
+	data, err := s.redisClient.Get(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("get execution history failed: %w", err)
+	}
+
+	var history model.ExecutionHistory
+	if err := json.Unmarshal([]byte(data), &history); err != nil {
+		return nil, fmt.Errorf("unmarshal execution history failed: %w", err)
+	}
+
+	return &history, nil
+}
+
+// saveSessionWithTTL 保存会话到 Redis（自定义 TTL）
+func (s *VoiceScheduleService) saveSessionWithTTL(ctx context.Context, session *model.VoiceScheduleSession, ttl time.Duration) error {
+	if s.redisClient == nil {
+		return fmt.Errorf("redis client not configured")
+	}
+
+	key := fmt.Sprintf(keyVoiceSession, session.SessionID)
+	data, err := json.Marshal(session)
+	if err != nil {
+		return fmt.Errorf("marshal session failed: %w", err)
+	}
+
+	return s.redisClient.Set(ctx, key, string(data), ttl)
 }
 
 // analyzeWithLLM 使用 LLM 分析语音内容（旧版，保持兼容）
@@ -688,10 +918,59 @@ func (s *VoiceScheduleService) analyzeWithLLMAndContext(
 					Reasoning:  intentResult.Thinking,
 				}, nil
 
+			case "undo":
+				// v3 新增：撤销意图
+				return &model.LLMVoiceAnalysisResult{
+					Action:    "tool_undo",
+					Reasoning: intentResult.Thinking,
+				}, nil
+
+			case "delete":
+				// v3 新增：删除意图 - 需要进入确认流程
+				fmt.Printf("[VoiceSchedule] IntentDispatcher 识别为 delete 意图\n")
+				return &model.LLMVoiceAnalysisResult{
+					Action:      "delete",
+					Operation:   "delete",
+					TargetDate:  intentResult.TargetDate,
+					TargetIndex: s.extractTargetIndex(intentResult.Entities),
+					Reasoning:   intentResult.Thinking,
+				}, nil
+
+			case "modify":
+				// v3 新增：修改意图 - 需要进入确认流程
+				fmt.Printf("[VoiceSchedule] IntentDispatcher 识别为 modify 意图\n")
+				return &model.LLMVoiceAnalysisResult{
+					Action:      "modify",
+					Operation:   "modify",
+					TargetDate:  intentResult.TargetDate,
+					TargetIndex: s.extractTargetIndex(intentResult.Entities),
+					Reasoning:   intentResult.Thinking,
+				}, nil
+
+			case "replace":
+				// v3 新增：替换意图
+				fmt.Printf("[VoiceSchedule] IntentDispatcher 识别为 replace 意图\n")
+				return &model.LLMVoiceAnalysisResult{
+					Action:     "replace",
+					Operation:  "replace",
+					TargetDate: intentResult.TargetDate,
+					Reasoning:  intentResult.Thinking,
+				}, nil
+
+			case "create":
+				// create 意图继续到 JSON 模式处理，以获取完整的时刻表数据
+				fmt.Println("[VoiceSchedule] 意图是 create，继续到 JSON 模式获取时刻表详情")
+
 			case "chat":
 				// 聊天意图，但仍然需要 LLM 生成回复
 				// 继续到 JSON 模式处理
 				fmt.Println("[VoiceSchedule] 意图是 chat，继续到 JSON 模式生成回复")
+
+			default:
+				// 【优雅降级】IntentDispatcher 返回了未明确处理的 action
+				// 记录日志，继续到 JSON 模式尝试处理
+				fmt.Printf("[VoiceSchedule] IntentDispatcher 返回未处理的 action=%s，尝试 JSON 模式\n", intentResult.Action)
+				// 不 return，继续往下走到 JSON 模式
 			}
 		} else if intentResult != nil {
 			fmt.Printf("[VoiceSchedule] IntentDispatcher 置信度不足: action=%s, confidence=%.2f，回退到 JSON 模式\n",
@@ -829,6 +1108,26 @@ func (s *VoiceScheduleService) analyzeWithLLMAndContext(
 	return result, nil
 }
 
+// extractTargetIndex 从意图实体中提取目标索引
+// v3 新增：用于 delete/modify 操作指定目标时段
+func (s *VoiceScheduleService) extractTargetIndex(entities map[string]interface{}) *int {
+	if entities == nil {
+		return nil
+	}
+
+	// 尝试从 target_index 字段提取
+	if idx, ok := entities["target_index"].(float64); ok {
+		i := int(idx)
+		return &i
+	}
+	if idx, ok := entities["index"].(float64); ok {
+		i := int(idx)
+		return &i
+	}
+
+	return nil
+}
+
 // buildUpdateStatusResult 从 IntentResult 构建 update_status 结果
 // v2 架构改进：解决 update_status vs create 混淆问题
 func (s *VoiceScheduleService) buildUpdateStatusResult(intentResult *model.IntentResult) *model.LLMVoiceAnalysisResult {
@@ -944,16 +1243,18 @@ func (s *VoiceScheduleService) buildRetryPrompt(originalPrompt, userInput, valid
 %s`, validationError, userInput, originalPrompt)
 }
 
-// isSimpleIntent 判断是否是极简单意图（仅确认、取消）
-// 【重要】只对极短的确认/取消类指令使用 Tool Calling 加速，其他都交给 LLM 理解
+// isSimpleIntent 判断是否是极简单意图（仅确认、取消、撤销）
+// 【重要】只对极短的确认/取消/撤销类指令使用 Tool Calling 加速，其他都交给 LLM 理解
 func (s *VoiceScheduleService) isSimpleIntent(transcript string) bool {
-	// 只匹配极简单的确认/取消意图
+	// 只匹配极简单的确认/取消/撤销意图
 	// "更新状态"等复杂意图交给 JSON 模式的 LLM 去理解，不用关键字匹配
 	simpleIntentWords := []string{
 		// 确认类（纯确认词）
 		"确认", "好的", "是的", "没问题", "可以", "行", "对", "保存", "就这样", "确定", "好", "嗯", "ok", "OK",
 		// 取消类（纯取消词）
 		"取消", "不要了", "算了", "不用了", "放弃", "不要",
+		// 撤销类（v3 新增）
+		"撤销", "撤回", "后悔", "恢复", "回退",
 	}
 
 	transcript = strings.ToLower(strings.TrimSpace(transcript))
@@ -1360,13 +1661,13 @@ func (s *VoiceScheduleService) parseLLMResponse(response string) (*model.LLMVoic
 
 	if err := json.Unmarshal([]byte(response), &result); err != nil {
 		fmt.Printf("[VoiceSchedule] LLM 响应解析失败: %v, response: %s\n", err, response)
-		// 返回默认的猜测结果
+		// 【优雅降级】返回友好的聊天消息，而不是令人困惑的"状态未知"
 		return &model.LLMVoiceAnalysisResult{
-			Action: "guess",
-			CurrentStatus: &model.CurrentStatusGuess{
-				Emoji:  "🤔",
-				Status: "状态未知",
-				Reason: "无法理解您的输入",
+			Action:  "chat",
+			Message: "抱歉，我没有完全理解您的意思。您可以试试：\n• 「今天下午开会」创建时刻表\n• 「看看今天的安排」查询时刻表\n• 「修改为在家休息」更新状态",
+			Reasoning: []string{
+				"LLM 响应解析失败",
+				"向用户提供帮助提示",
 			},
 		}, nil
 	}
@@ -2313,6 +2614,75 @@ func (s *VoiceScheduleService) handleLLMResult(
 			Reasoning: append([]string{"完全替换原有时刻表"}, result.Reasoning...),
 		})
 
+	case "delete":
+		// v3 新增：删除时段操作
+		fmt.Printf("[VoiceSchedule] 处理 delete action: targetIndex=%v\n", result.TargetIndex)
+
+		// 加载目标日期的时刻表
+		existingSchedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, session.UserID, targetDate)
+		if err != nil || existingSchedule == nil || len(existingSchedule.Items) == 0 {
+			callback(&model.VoiceScheduleEvent{
+				Type:    model.VSEventChat,
+				Message: fmt.Sprintf("%s没有可删除的时刻表。", targetDate.Format("1月2日")),
+			})
+			return
+		}
+
+		session.CurrentSchedule = existingSchedule.Items
+		fmt.Printf("[VoiceSchedule] delete: 当前时刻表有 %d 个时段\n", len(session.CurrentSchedule))
+
+		// 执行删除
+		var deletedSchedule []model.ScheduleItem
+		if result.TargetIndex != nil && *result.TargetIndex >= 0 && *result.TargetIndex < len(session.CurrentSchedule) {
+			// 按索引删除
+			idx := *result.TargetIndex
+			deletedSchedule = make([]model.ScheduleItem, 0, len(session.CurrentSchedule)-1)
+			for i, item := range session.CurrentSchedule {
+				if i != idx {
+					deletedSchedule = append(deletedSchedule, item)
+				}
+			}
+			fmt.Printf("[VoiceSchedule] delete: 按索引 %d 删除，剩余 %d 个时段\n", idx, len(deletedSchedule))
+		} else if len(result.Schedule) > 0 {
+			// 按匹配删除（LLM 返回要删除的时段）
+			deletedSchedule = s.removeMatchingSlots(session.CurrentSchedule, result.Schedule)
+			fmt.Printf("[VoiceSchedule] delete: 按匹配删除，剩余 %d 个时段\n", len(deletedSchedule))
+		} else {
+			// 无法确定要删除哪个时段，需要用户澄清
+			callback(&model.VoiceScheduleEvent{
+				Type:    model.VSEventClarify,
+				Message: "请告诉我要删除哪个时段？您可以说「删除第一个」或「删除开会的时段」",
+				Items:   session.CurrentSchedule,
+				Questions: []model.ClarifyQuestion{
+					{
+						ID:         "delete_target",
+						Question:   "要删除哪个时段？",
+						Options:    []string{"第一个", "第二个", "最后一个"},
+						AllowVoice: true,
+					},
+				},
+			})
+			session.State = "clarifying"
+			return
+		}
+
+		// 记录快照
+		s.recordScheduleSnapshot(session, deletedSchedule, "delete", snapshotReason)
+
+		// 更新会话
+		session.CurrentSchedule = deletedSchedule
+		session.LastOperation = model.OpDelete
+		session.State = "delete_pending"
+
+		// v3 新增：进入确认流程而不是直接保存
+		// 发送待确认事件，让用户确认删除
+		callback(&model.VoiceScheduleEvent{
+			Type:      model.VSEventSchedule,
+			Items:     deletedSchedule,
+			Reasoning: append([]string{"已删除指定时段，请确认"}, result.Reasoning...),
+			NeedsConfirmation: true,
+		})
+
 	case "query":
 		// 查询指定日期的时刻表（targetDate 已在分层防守中解析）
 		existingSchedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, session.UserID, targetDate)
@@ -2407,15 +2777,17 @@ func (s *VoiceScheduleService) handleLLMResult(
 	case "tool_confirm":
 		// 通过语音确认时刻表（等同于点击确认按钮）
 		fmt.Println("[VoiceSchedule] Tool Calling: 用户语音确认保存")
-		// 发送需要确认的事件，让前端执行确认流程
-		// 这里直接发送 confirmed 事件，表示用户已经通过语音确认
-		callback(&model.VoiceScheduleEvent{
-			Type:      model.VSEventConfirmed,
-			Message:   "已确认保存时刻表",
-			Items:     session.CurrentSchedule,
-			Reasoning: []string{"用户通过语音确认"},
-		})
-		session.State = "confirmed"
+		// v3 修复：必须调用 handleConfirmAction 来实际保存到数据库
+		// 之前的代码只发送事件，没有保存数据，导致删除等操作无法持久化
+		if err := s.handleConfirmAction(ctx, session, callback); err != nil {
+			fmt.Printf("[VoiceSchedule] 语音确认保存失败: %v\n", err)
+			callback(&model.VoiceScheduleEvent{
+				Type:    model.VSEventError,
+				Message: "保存失败，请重试",
+			})
+		}
+		// handleConfirmAction 已经设置了 session.State 和发送了事件
+		return
 
 	case "tool_cancel":
 		// 通过语音取消操作
@@ -2445,6 +2817,63 @@ func (s *VoiceScheduleService) handleLLMResult(
 			Reason:     result.CurrentStatus.Reason,
 			Reasoning:  []string{"用户请求更新状态到首页"},
 		})
+
+	case "tool_undo":
+		// v3 新增：通过语音撤销操作
+		fmt.Println("[VoiceSchedule] Tool Calling: 用户语音撤销")
+		// 调用撤销处理
+		if err := s.handleUndoAction(ctx, session, callback); err != nil {
+			// 错误已在 handleUndoAction 中通过 callback 发送
+			fmt.Printf("[VoiceSchedule] 撤销失败: %v\n", err)
+		}
+
+	default:
+		// 【v3 架构改进】使用 RecoveryOrchestrator 优雅降级
+		// 当收到无法处理的 action 时，让 LLM 生成用户友好的解释
+		fmt.Printf("[VoiceSchedule] 收到未知 action: %s，使用恢复协调器处理\n", result.Action)
+
+		// 确定错误代码
+		code := "UNKNOWN_ACTION"
+		if result.Action == "" {
+			code = "EMPTY_ACTION"
+		} else if strings.HasPrefix(result.Action, "tool_") {
+			code = "FEATURE_NOT_SUPPORTED"
+		}
+
+		// 获取用户最后输入（用于 LLM 上下文）
+		userInput := ""
+		if len(session.TranscriptHistory) > 0 {
+			userInput = session.TranscriptHistory[len(session.TranscriptHistory)-1]
+		}
+
+		// 创建操作结果
+		outcome := model.NewInfoOutcome(code, fmt.Sprintf("Unknown action: %s", result.Action)).
+			WithContext("action", result.Action).
+			WithContext("user_input", userInput)
+
+		// 使用恢复协调器处理
+		if s.recoveryOrchestrator != nil {
+			if err := s.recoveryOrchestrator.Handle(ctx, outcome, session, userInput, callback); err != nil {
+				fmt.Printf("[VoiceSchedule] 恢复协调器处理失败: %v，使用硬编码兜底\n", err)
+				// 硬编码兜底
+				callback(&model.VoiceScheduleEvent{
+					Type:    model.VSEventChat,
+					Message: "抱歉，我暂时不支持这个操作。您可以尝试创建时刻表、查询时刻表或修改状态。",
+					AvailableActions: []model.ActionHint{
+						{Action: "suggestion", Label: "创建时刻表", Shortcut: "今天下午开会"},
+						{Action: "suggestion", Label: "查询时刻表", Shortcut: "看看今天的安排"},
+						{Action: "suggestion", Label: "修改状态", Shortcut: "我现在在休息"},
+					},
+				})
+			}
+		} else {
+			// 没有恢复协调器，使用硬编码兜底
+			callback(&model.VoiceScheduleEvent{
+				Type:    model.VSEventChat,
+				Message: "抱歉，我暂时不支持这个操作。您可以尝试创建时刻表、查询时刻表或修改状态。",
+			})
+		}
+		session.State = "idle" // 重置状态，让用户可以重新开始
 	}
 }
 
@@ -3254,12 +3683,20 @@ type PhaseManager struct {
 
 // NewPhaseManager 创建阶段管理器
 func (s *VoiceScheduleService) NewPhaseManager() *PhaseManager {
+	// v3 架构改进：ApprovalHandler 支持 LLM
+	var approvalHandler *ApprovalHandler
+	if s.llmAdapter != nil {
+		approvalHandler = NewApprovalHandlerWithLLM(s.llmAdapter)
+	} else {
+		approvalHandler = NewApprovalHandler()
+	}
+
 	return &PhaseManager{
 		service:              s,
 		understandingHandler: NewUnderstandingHandler(s.llmClient),
 		discussingHandler:    NewDiscussingHandler(s.llmClient),
 		planningHandler:      NewPlanningHandler(s.llmClient),
-		approvalHandler:      NewApprovalHandler(),
+		approvalHandler:      approvalHandler,
 		executionHandler:     NewExecutionHandler(s.scheduleRepo),
 		idleHandler:          NewIdleHandler(s.llmClient),
 	}
@@ -3345,6 +3782,11 @@ func (s *VoiceScheduleService) ProcessWithStateMachine(
 	// 保存会话
 	if err := s.saveSession(ctx, session); err != nil {
 		fmt.Printf("[StateMachine] 保存会话失败: %v\n", err)
+		// v3 架构改进：异步通知用户
+		if s.recoveryOrchestrator != nil {
+			outcome := model.NewRecoverableOutcome("SESSION_SAVE_FAILED", err.Error())
+			s.recoveryOrchestrator.NotifyAsync(ctx, outcome, callback)
+		}
 	}
 
 	return session, nil

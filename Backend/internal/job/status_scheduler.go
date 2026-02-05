@@ -69,9 +69,23 @@ func (s *StatusScheduler) run() {
 
 	now := time.Now()
 	currentTime := now.Format("15:04")
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	yesterday := today.AddDate(0, 0, -1)
 
-	// 获取今天所有活跃的时刻表
-	schedules, err := s.scheduleRepo.GetAllActiveSchedules(ctx, now)
+	// ============ 第一步：凌晨时检查昨天的跨午夜时段 ============
+	if currentTime < "12:00" {
+		yesterdaySchedules, err := s.scheduleRepo.GetAllActiveSchedules(ctx, yesterday)
+		if err == nil && len(yesterdaySchedules) > 0 {
+			fmt.Printf("[StatusScheduler] 检查昨天(%s)的 %d 个跨午夜时刻表\n",
+				yesterday.Format("01-02"), len(yesterdaySchedules))
+			for _, schedule := range yesterdaySchedules {
+				s.processScheduleForCrossMidnight(ctx, schedule, currentTime)
+			}
+		}
+	}
+
+	// ============ 第二步：检查今天的时刻表 ============
+	schedules, err := s.scheduleRepo.GetAllActiveSchedules(ctx, today)
 	if err != nil {
 		fmt.Printf("[StatusScheduler] 获取时刻表失败: %v\n", err)
 		return
@@ -81,14 +95,15 @@ func (s *StatusScheduler) run() {
 		return
 	}
 
-	fmt.Printf("[StatusScheduler] 检查 %d 个活跃时刻表，当前时间: %s\n", len(schedules), currentTime)
+	fmt.Printf("[StatusScheduler] 检查今天(%s)的 %d 个活跃时刻表，当前时间: %s\n",
+		today.Format("01-02"), len(schedules), currentTime)
 
 	for _, schedule := range schedules {
 		s.processSchedule(ctx, schedule, currentTime)
 	}
 }
 
-// processSchedule 处理单个时刻表
+// processSchedule 处理单个时刻表（今天的）
 func (s *StatusScheduler) processSchedule(ctx context.Context, schedule *model.StatusSchedule, currentTime string) {
 	// 检查每个未执行的条目
 	for i, item := range schedule.Items {
@@ -96,10 +111,71 @@ func (s *StatusScheduler) processSchedule(ctx context.Context, schedule *model.S
 			continue
 		}
 
-		// 检查当前时间是否在此条目的时间范围内
-		if s.isTimeInRange(currentTime, item.StartTime, item.EndTime) {
-			fmt.Printf("[StatusScheduler] 触发状态更新 user=%s index=%d status=%s\n",
-				schedule.UserID, i, item.Status)
+		// 校验时间格式，畸形数据跳过
+		if !isValidTimeFormat(item.StartTime) || !isValidTimeFormat(item.EndTime) {
+			fmt.Printf("[StatusScheduler] 跳过畸形时间格式: user=%s index=%d start=%s end=%s\n",
+				schedule.UserID, i, item.StartTime, item.EndTime)
+			continue
+		}
+
+		// 对于跨午夜时段，只在"今天部分"（start 到 23:59）触发
+		// "第二天部分"由 processScheduleForCrossMidnight 处理
+		if item.EndTime < item.StartTime {
+			// 跨午夜时段：只匹配 start 到 23:59
+			if currentTime >= item.StartTime {
+				fmt.Printf("[StatusScheduler] 触发状态更新(跨午夜-今天部分) user=%s index=%d status=%s time=%s-%s\n",
+					schedule.UserID, i, item.Status, item.StartTime, item.EndTime)
+
+				if err := s.updateUserStatus(ctx, schedule.UserID, &item); err != nil {
+					fmt.Printf("[StatusScheduler] 更新状态失败: %v\n", err)
+					continue
+				}
+
+				if err := s.scheduleRepo.MarkItemExecuted(ctx, schedule.ID, i); err != nil {
+					fmt.Printf("[StatusScheduler] 标记已执行失败: %v\n", err)
+				}
+				break
+			}
+		} else {
+			// 普通时段：同一天内
+			if currentTime >= item.StartTime && currentTime < item.EndTime {
+				fmt.Printf("[StatusScheduler] 触发状态更新 user=%s index=%d status=%s\n",
+					schedule.UserID, i, item.Status)
+
+				if err := s.updateUserStatus(ctx, schedule.UserID, &item); err != nil {
+					fmt.Printf("[StatusScheduler] 更新状态失败: %v\n", err)
+					continue
+				}
+
+				if err := s.scheduleRepo.MarkItemExecuted(ctx, schedule.ID, i); err != nil {
+					fmt.Printf("[StatusScheduler] 标记已执行失败: %v\n", err)
+				}
+				break
+			}
+		}
+	}
+}
+
+// processScheduleForCrossMidnight 处理昨天的跨午夜时段
+// 在凌晨时检查昨天的时刻表中是否有跨午夜到今天的时段
+func (s *StatusScheduler) processScheduleForCrossMidnight(ctx context.Context, schedule *model.StatusSchedule, currentTime string) {
+	for i, item := range schedule.Items {
+		// 校验时间格式，畸形数据跳过
+		if !isValidTimeFormat(item.StartTime) || !isValidTimeFormat(item.EndTime) {
+			fmt.Printf("[StatusScheduler] 跳过畸形时间格式(跨午夜): user=%s index=%d start=%s end=%s\n",
+				schedule.UserID, i, item.StartTime, item.EndTime)
+			continue
+		}
+
+		// 只处理跨午夜的时段（end < start，如 22:00-09:00）
+		if item.EndTime >= item.StartTime {
+			continue
+		}
+
+		// 检查当前时间是否在跨午夜时段的"第二天部分"（00:00 到 end）
+		if currentTime < item.EndTime {
+			fmt.Printf("[StatusScheduler] 触发状态更新(跨午夜-第二天) user=%s index=%d status=%s time=%s-%s current=%s\n",
+				schedule.UserID, i, item.Status, item.StartTime, item.EndTime, currentTime)
 
 			// 更新用户状态
 			if err := s.updateUserStatus(ctx, schedule.UserID, &item); err != nil {
@@ -107,20 +183,23 @@ func (s *StatusScheduler) processSchedule(ctx context.Context, schedule *model.S
 				continue
 			}
 
-			// 标记为已执行
-			if err := s.scheduleRepo.MarkItemExecuted(ctx, schedule.ID, i); err != nil {
-				fmt.Printf("[StatusScheduler] 标记已执行失败: %v\n", err)
-			}
+			// 注意：跨午夜时段可能在昨天已经标记为已执行（进入 start 时），
+			// 但我们仍然需要更新状态，因为用户可能仍在这个时段内
+			// 不需要再次标记为已执行
 
-			// 每个时刻表只处理当前时间段的一个条目
 			break
 		}
 	}
 }
 
-// isTimeInRange 检查时间是否在范围内
+// isTimeInRange 检查时间是否在范围内（支持跨午夜）
 func (s *StatusScheduler) isTimeInRange(current, start, end string) bool {
-	// 简单字符串比较（HH:MM 格式）
+	// 处理跨午夜的情况（如 22:00-09:00）
+	if end < start {
+		// 跨午夜：当前时间 >= start 或 < end
+		return current >= start || current < end
+	}
+	// 普通情况：同一天内
 	return current >= start && current < end
 }
 
@@ -140,6 +219,7 @@ func (s *StatusScheduler) updateUserStatus(ctx context.Context, userID string, i
 			Description: item.Status,
 		},
 		UpdatedAt: time.Now(),
+		IsAIGuess: item.IsAIGuess, // 保留原始的 AI 推测标记
 	}
 
 	// 缓存到 Redis
@@ -162,6 +242,14 @@ func (s *StatusScheduler) updateUserStatus(ctx context.Context, userID string, i
 			CreatedAt: time.Now(),
 		}
 		_ = s.memoryRepo.SaveUserStatusMemory(ctx, memory)
+
+		// 关键：同时写入 MySQL 分析缓存，让首页能读取到最新状态
+		if err := s.memoryRepo.SaveAnalysisCache(ctx, userID, analysisResult); err != nil {
+			fmt.Printf("[StatusScheduler] 写入 MySQL 缓存失败: %v\n", err)
+		} else {
+			fmt.Printf("[StatusScheduler] 状态已同步到首页: user=%s emoji=%s status=%s\n",
+				userID, item.Emoji, item.Status)
+		}
 	}
 
 	return nil
@@ -213,4 +301,36 @@ func findSubstring(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// isValidTimeFormat 检查时间格式是否有效（HH:MM 格式）
+func isValidTimeFormat(t string) bool {
+	// 必须是 HH:MM 格式（5个字符）
+	if len(t) != 5 {
+		return false
+	}
+	// 检查冒号位置
+	if t[2] != ':' {
+		return false
+	}
+	// 检查小时部分（00-23）
+	h1, h2 := t[0], t[1]
+	if h1 < '0' || h1 > '2' {
+		return false
+	}
+	if h1 == '2' && h2 > '3' {
+		return false
+	}
+	if h2 < '0' || h2 > '9' {
+		return false
+	}
+	// 检查分钟部分（00-59）
+	m1, m2 := t[3], t[4]
+	if m1 < '0' || m1 > '5' {
+		return false
+	}
+	if m2 < '0' || m2 > '9' {
+		return false
+	}
+	return true
 }

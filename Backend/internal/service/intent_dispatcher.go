@@ -127,6 +127,7 @@ func (d *IntentDispatcher) buildSystemPrompt(session *model.VoiceScheduleSession
 - modify: 修改已有时段（"把下午的会改到4点"）
 - replace: 完全替换时刻表（"重新安排"）
 - delete: 删除时段（"删掉下午的会"）
+- undo: 撤销操作（"撤销"/"撤回"/"后悔了"/"恢复"）
 
 `)
 
@@ -192,7 +193,7 @@ func (d *IntentDispatcher) buildDecideActionTool() *agent.Tool {
 				"action": {
 					Type:        "string",
 					Description: "决定的操作类型",
-					Enum:        []string{"create", "modify", "confirm", "cancel", "update_status", "query", "chat", "replace", "delete"},
+					Enum:        []string{"create", "modify", "confirm", "cancel", "update_status", "query", "chat", "replace", "delete", "undo"},
 				},
 				"confidence": {
 					Type:        "number",

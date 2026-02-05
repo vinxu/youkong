@@ -32,6 +32,8 @@ type ScheduleRepositoryInterface interface {
 	GetUserOldestScheduleDate(ctx context.Context, userID string) (string, error)
 	CountUserSchedules(ctx context.Context, userID string) (int, error)
 	GetActiveByUserAndDate(ctx context.Context, userID string, date time.Time) (*model.StatusSchedule, error)
+	Create(ctx context.Context, schedule *model.StatusSchedule) error
+	Update(ctx context.Context, schedule *model.StatusSchedule) error
 }
 
 // NewAgentHandler 创建 Agent 处理器
@@ -94,6 +96,9 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 
 	fmt.Printf("[上报] 分析完成 user=%s status=%s\n", userID, result.Availability.Status)
 
+	// 同步 AI 推测状态到时刻表（异步执行，不阻塞响应）
+	go h.syncAIGuessToSchedule(context.Background(), userID, result)
+
 	// 返回分析结果
 	response.Success(c, gin.H{
 		"success":  true,
@@ -108,33 +113,92 @@ func (h *AgentHandler) checkActiveScheduleStatus(ctx context.Context, userID str
 		return nil
 	}
 
-	// 获取今天的活跃时刻表
 	now := time.Now()
+	currentTime := now.Format("15:04")
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	yesterday := today.AddDate(0, 0, -1)
 
+	// ============ 第一步：检查昨天的跨午夜时段 ============
+	// 凌晨时段（00:00-12:00），优先检查昨天的时刻表中是否有跨午夜到今天的时段
+	if currentTime < "12:00" {
+		yesterdaySchedule, err := h.scheduleRepo.GetActiveByUserAndDate(ctx, userID, yesterday)
+		if err == nil && yesterdaySchedule != nil && len(yesterdaySchedule.Items) > 0 {
+			for _, item := range yesterdaySchedule.Items {
+				// 只检查跨午夜的时段（end < start，如 22:00-09:00）
+				if item.EndTime < item.StartTime {
+					// 当前时间在跨午夜时段的"第二天部分"（00:00 到 end）
+					if currentTime < item.EndTime {
+						fmt.Printf("[Schedule] 匹配到昨天(%s)的跨午夜时段: %s-%s %s\n",
+							yesterday.Format("01-02"), item.StartTime, item.EndTime, item.Status)
+						return &model.AnalysisResult{
+							Availability: model.AvailabilityAnalysis{
+								Status:      getScheduleStatusText(item.Status),
+								Probability: guessScheduleProbability(item.Status),
+								Reason:      item.Status,
+								Confidence:  "high",
+							},
+							LifeStatus: model.LifeStatus{
+								Emoji:       item.Emoji,
+								Label:       item.Status,
+								Description: item.Status,
+							},
+							UpdatedAt: now,
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// ============ 第二步：检查今天的时刻表 ============
 	schedule, err := h.scheduleRepo.GetActiveByUserAndDate(ctx, userID, today)
 	if err != nil || schedule == nil || len(schedule.Items) == 0 {
 		return nil
 	}
 
-	// 检查当前时间是否在某个时段内
-	currentTime := now.Format("15:04")
+	// 检查当前时间是否在今天某个时段内
 	for _, item := range schedule.Items {
-		if isTimeInRange(currentTime, item.StartTime, item.EndTime) {
-			// 找到当前时段，返回时刻表状态
-			return &model.AnalysisResult{
-				Availability: model.AvailabilityAnalysis{
-					Status:      getScheduleStatusText(item.Status),
-					Probability: guessScheduleProbability(item.Status),
-					Reason:      item.Status,
-					Confidence:  "high",
-				},
-				LifeStatus: model.LifeStatus{
-					Emoji:       item.Emoji,
-					Label:       item.Status,
-					Description: item.Status,
-				},
-				UpdatedAt: now,
+		// 对于跨午夜时段（end < start），只有当前时间 >= start 时才匹配
+		// 跨午夜时段的"第二天部分"已在第一步处理
+		if item.EndTime < item.StartTime {
+			// 跨午夜：只匹配"今天部分"（start 到 23:59）
+			if currentTime >= item.StartTime {
+				fmt.Printf("[Schedule] 匹配到今天(%s)的跨午夜时段(今天部分): %s-%s %s\n",
+					today.Format("01-02"), item.StartTime, item.EndTime, item.Status)
+				return &model.AnalysisResult{
+					Availability: model.AvailabilityAnalysis{
+						Status:      getScheduleStatusText(item.Status),
+						Probability: guessScheduleProbability(item.Status),
+						Reason:      item.Status,
+						Confidence:  "high",
+					},
+					LifeStatus: model.LifeStatus{
+						Emoji:       item.Emoji,
+						Label:       item.Status,
+						Description: item.Status,
+					},
+					UpdatedAt: now,
+				}
+			}
+		} else {
+			// 普通时段（同一天内）
+			if currentTime >= item.StartTime && currentTime < item.EndTime {
+				fmt.Printf("[Schedule] 匹配到今天(%s)的普通时段: %s-%s %s\n",
+					today.Format("01-02"), item.StartTime, item.EndTime, item.Status)
+				return &model.AnalysisResult{
+					Availability: model.AvailabilityAnalysis{
+						Status:      getScheduleStatusText(item.Status),
+						Probability: guessScheduleProbability(item.Status),
+						Reason:      item.Status,
+						Confidence:  "high",
+					},
+					LifeStatus: model.LifeStatus{
+						Emoji:       item.Emoji,
+						Label:       item.Status,
+						Description: item.Status,
+					},
+					UpdatedAt: now,
+				}
 			}
 		}
 	}
@@ -191,6 +255,109 @@ func containsStr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// syncAIGuessToSchedule 同步 AI 推测状态到时刻表
+// 规则：
+// 1. 获取或创建今日时刻表
+// 2. 计算当前时段（向下取整到30分钟）
+// 3. 如果该时段已有用户设置的状态（IsAIGuess=false），则不覆盖
+// 4. 否则添加/更新当前时段条目，设置 IsAIGuess=true
+func (h *AgentHandler) syncAIGuessToSchedule(ctx context.Context, userID string, result *model.AnalysisResult) {
+	if h.scheduleRepo == nil || result == nil {
+		return
+	}
+
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	startTime, endTime := getCurrentTimeSlot(now)
+
+	// 获取或创建今日时刻表
+	schedule, err := h.scheduleRepo.GetActiveByUserAndDate(ctx, userID, today)
+	if err != nil {
+		// 没有活跃时刻表，创建新的
+		schedule = &model.StatusSchedule{
+			UserID:       userID,
+			ScheduleDate: today,
+			Items:        model.ScheduleItems{},
+			CurrentIndex: 0,
+			Status:       model.ScheduleStatusActive,
+			Visibility:   model.VisibilityAllFriends,
+		}
+	}
+
+	// 检查是否有重叠时段
+	found := false
+	for i, item := range schedule.Items {
+		// 检查时段是否重叠
+		if item.StartTime == startTime || (item.StartTime <= startTime && item.EndTime > startTime) {
+			// 如果已有用户设置的状态（IsAIGuess=false），不覆盖
+			if !item.IsAIGuess {
+				fmt.Printf("[AI同步] 跳过：已有用户设置的状态 user=%s slot=%s-%s\n",
+					userID, item.StartTime, item.EndTime)
+				return
+			}
+			// 更新 AI 推测状态
+			schedule.Items[i] = model.ScheduleItem{
+				StartTime: startTime,
+				EndTime:   endTime,
+				Emoji:     result.LifeStatus.Emoji,
+				Status:    result.LifeStatus.Label,
+				Executed:  false,
+				IsAIGuess: true,
+			}
+			found = true
+			break
+		}
+	}
+
+	// 如果没有找到重叠时段，添加新条目
+	if !found {
+		schedule.Items = append(schedule.Items, model.ScheduleItem{
+			StartTime: startTime,
+			EndTime:   endTime,
+			Emoji:     result.LifeStatus.Emoji,
+			Status:    result.LifeStatus.Label,
+			Executed:  false,
+			IsAIGuess: true,
+		})
+	}
+
+	// 保存时刻表
+	if schedule.ID == 0 {
+		err = h.scheduleRepo.Create(ctx, schedule)
+	} else {
+		err = h.scheduleRepo.Update(ctx, schedule)
+	}
+
+	if err != nil {
+		fmt.Printf("[AI同步] 保存时刻表失败 user=%s error=%v\n", userID, err)
+	} else {
+		fmt.Printf("[AI同步] 成功 user=%s slot=%s-%s emoji=%s status=%s\n",
+			userID, startTime, endTime, result.LifeStatus.Emoji, result.LifeStatus.Label)
+	}
+}
+
+// getCurrentTimeSlot 获取当前时段（向下取整到30分钟）
+// 返回 (startTime, endTime)，格式为 "HH:MM"
+func getCurrentTimeSlot(now time.Time) (string, string) {
+	hour := now.Hour()
+	minute := now.Minute()
+
+	// 向下取整到30分钟
+	if minute >= 30 {
+		minute = 30
+	} else {
+		minute = 0
+	}
+
+	start := fmt.Sprintf("%02d:%02d", hour, minute)
+
+	// 结束时间 +30 分钟
+	endTime := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location()).Add(30 * time.Minute)
+	end := endTime.Format("15:04")
+
+	return start, end
 }
 
 // GetFreeProbability 获取好友有空概率列表（增强版，带生活状态）

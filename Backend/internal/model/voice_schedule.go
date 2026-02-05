@@ -4,6 +4,8 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -226,6 +228,23 @@ type VoiceScheduleEvent struct {
 	DraftPlan      *DraftPlan          `json:"draft_plan,omitempty"`      // 计划草案
 	Clarifications []ClarificationItem `json:"clarifications,omitempty"` // 待澄清项
 	CanApprove     bool                `json:"can_approve,omitempty"`     // 是否可以审批
+
+	// ========== v3 架构改进：撤销与 UX 增强 ==========
+	AwaitingAction   string       `json:"awaiting_action,omitempty"`   // 等待的操作类型：approval/input/undo/none
+	AvailableActions []ActionHint `json:"available_actions,omitempty"` // 可执行的操作提示
+	CanUndo            bool         `json:"can_undo,omitempty"`            // 是否可撤销
+	UndoDeadline       int64        `json:"undo_deadline,omitempty"`       // 撤销截止时间（Unix 毫秒）
+	UndoRemaining      int64        `json:"undo_remaining,omitempty"`      // 剩余撤销时间（秒）
+	NeedsConfirmation  bool         `json:"needs_confirmation,omitempty"`  // 需要用户确认（delete/modify 操作）
+	PendingOperation   string       `json:"pending_operation,omitempty"`   // 待确认的操作类型
+}
+
+// ActionHint 操作提示（用于客户端显示快捷按钮）
+type ActionHint struct {
+	Action      string `json:"action"`                // 操作类型：confirm/reject/modify/undo
+	Label       string `json:"label"`                 // 显示文本
+	Shortcut    string `json:"shortcut,omitempty"`    // 快捷指令，如 "好的"
+	Description string `json:"description,omitempty"` // 操作说明
 }
 
 // CircleInfoCompact 圈子信息（用于语音时刻表可见性选择）
@@ -246,6 +265,7 @@ const (
 	VSActionSupplement VoiceScheduleAction = "supplement"
 	VSActionConfirm    VoiceScheduleAction = "confirm"
 	VSActionCancel     VoiceScheduleAction = "cancel"
+	VSActionUndo       VoiceScheduleAction = "undo" // v3 新增：撤销操作
 )
 
 // VoiceScheduleInteractionRequest 后续交互请求
@@ -429,17 +449,109 @@ const (
 // ========== 多阶段对话状态机 ==========
 
 // ConversationPhase 对话阶段
+// v3 架构改进：统一 Phase 状态机，废弃 V1 的 State
 type ConversationPhase string
 
 const (
-	PhaseUnderstanding ConversationPhase = "understanding" // 理解意图
-	PhaseDiscussing    ConversationPhase = "discussing"    // 讨论确认
-	PhasePlanning      ConversationPhase = "planning"      // 生成计划
-	PhaseApproval      ConversationPhase = "approval"      // 等待审批
-	PhaseExecution     ConversationPhase = "execution"     // 执行保存
-	PhaseCompleted     ConversationPhase = "completed"     // 完成
-	PhaseIdle          ConversationPhase = "idle"          // 聊天/非时刻表
+	PhaseIdle               ConversationPhase = "idle"                // 闲置/聊天
+	PhaseUnderstanding      ConversationPhase = "understanding"       // 理解意图
+	PhaseDiscussing         ConversationPhase = "discussing"          // 讨论确认
+	PhasePlanning           ConversationPhase = "planning"            // 生成计划
+	PhaseAwaitingApproval   ConversationPhase = "awaiting_approval"   // 显式等待确认状态
+	PhaseProcessingApproval ConversationPhase = "processing_approval" // 处理审批中
+	PhaseApproval           ConversationPhase = "approval"            // 等待审批（兼容旧代码）
+	PhaseExecution          ConversationPhase = "execution"           // 执行保存
+	PhaseConfirmedUndoable  ConversationPhase = "confirmed_undoable"  // 已确认但可撤销（5分钟内）
+	PhaseCompleted          ConversationPhase = "completed"           // 完成
 )
+
+// ValidPhaseTransitions 有效的阶段转换映射
+// v3 架构改进：严格的状态转换验证
+var ValidPhaseTransitions = map[ConversationPhase][]ConversationPhase{
+	PhaseIdle:               {PhaseUnderstanding},
+	PhaseUnderstanding:      {PhasePlanning, PhaseDiscussing, PhaseIdle},
+	PhaseDiscussing:         {PhasePlanning, PhaseDiscussing, PhaseIdle},
+	PhasePlanning:           {PhaseAwaitingApproval, PhasePlanning, PhaseApproval},
+	PhaseAwaitingApproval:   {PhaseProcessingApproval, PhasePlanning, PhaseIdle},
+	PhaseProcessingApproval: {PhaseExecution, PhasePlanning, PhaseIdle},
+	PhaseApproval:           {PhaseExecution, PhasePlanning, PhaseIdle},           // 兼容
+	PhaseExecution:          {PhaseConfirmedUndoable, PhaseCompleted},
+	PhaseConfirmedUndoable:  {PhaseCompleted, PhasePlanning},                      // 撤销后回到 Planning
+	PhaseCompleted:          {PhaseIdle, PhaseUnderstanding},
+}
+
+// IsValidTransition 检查阶段转换是否有效
+func IsValidTransition(from, to ConversationPhase) bool {
+	validTargets, exists := ValidPhaseTransitions[from]
+	if !exists {
+		return false
+	}
+	for _, valid := range validTargets {
+		if valid == to {
+			return true
+		}
+	}
+	return false
+}
+
+// ========== v3 架构改进：执行历史与撤销机制 ==========
+
+// ExecutionHistory 执行历史记录（用于回滚/撤销）
+type ExecutionHistory struct {
+	ID            string         `json:"id"`
+	UserID        string         `json:"user_id"`
+	SessionID     string         `json:"session_id"`
+	Action        string         `json:"action"`                   // save/modify/delete
+	BeforeState   []ScheduleItem `json:"before_state"`             // 执行前的时刻表状态
+	AfterState    []ScheduleItem `json:"after_state"`              // 执行后的时刻表状态
+	TargetDate    time.Time      `json:"target_date"`              // 目标日期
+	Timestamp     time.Time      `json:"timestamp"`                // 执行时间
+	CanUndo       bool           `json:"can_undo"`                 // 是否可撤销
+	UndoDeadline  time.Time      `json:"undo_deadline"`            // 撤销截止时间
+	UndoReason    string         `json:"undo_reason,omitempty"`    // 如果不可撤销，原因是什么
+}
+
+// UndoWindow 撤销窗口时长
+const UndoWindow = 5 * time.Minute
+
+// executionHistoryCounter 用于生成唯一 ID 的原子计数器
+var executionHistoryCounter uint64
+
+// NewExecutionHistory 创建执行历史记录
+// 使用时间戳+原子计数器确保高并发下 ID 唯一性
+func NewExecutionHistory(userID, sessionID, action string, before, after []ScheduleItem, targetDate time.Time) *ExecutionHistory {
+	now := time.Now()
+	// 使用原子操作增加计数器，确保并发安全
+	counter := atomic.AddUint64(&executionHistoryCounter, 1)
+	return &ExecutionHistory{
+		ID:           fmt.Sprintf("exec_%d_%d", now.UnixNano(), counter),
+		UserID:       userID,
+		SessionID:    sessionID,
+		Action:       action,
+		BeforeState:  before,
+		AfterState:   after,
+		TargetDate:   targetDate,
+		Timestamp:    now,
+		CanUndo:      true,
+		UndoDeadline: now.Add(UndoWindow),
+	}
+}
+
+// IsUndoable 检查是否还在可撤销窗口内
+func (h *ExecutionHistory) IsUndoable() bool {
+	if !h.CanUndo {
+		return false
+	}
+	return time.Now().Before(h.UndoDeadline)
+}
+
+// RemainingUndoTime 返回剩余可撤销时间（秒）
+func (h *ExecutionHistory) RemainingUndoTime() int64 {
+	if !h.IsUndoable() {
+		return 0
+	}
+	return int64(time.Until(h.UndoDeadline).Seconds())
+}
 
 // IntentSummary 意图摘要（Understanding 阶段输出）
 type IntentSummary struct {

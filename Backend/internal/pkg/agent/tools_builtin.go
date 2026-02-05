@@ -794,3 +794,82 @@ func createDecideActionHandler(deps *BuiltinToolDeps) ToolHandler {
 		}, nil
 	}
 }
+
+// ========== v3 架构改进：ApprovalHandler LLM 化 ==========
+
+// AnalyzeUserDecisionTool 返回用于分析用户审批决策的工具定义
+// 用于解决模式匹配的误判问题（如"这个时间好像不对"被识别为确认）
+func AnalyzeUserDecisionTool() *Tool {
+	return &Tool{
+		Name: "analyze_user_decision",
+		Description: `分析用户对计划的反馈，判断用户的真实意图。
+
+用户意图类型：
+1. unconditional_approve - 无条件同意（"好的"/"确认"/"没问题"/"可以"）
+2. conditional_approve - 有条件同意（"好的，但是把XX改成YY"/"行，不过把时间调一下"）
+3. reject - 拒绝/取消（"不要了"/"取消"/"算了"/"不用了"）
+4. need_clarification - 需要澄清（"这个时间是什么意思？"/"能解释一下吗？"）
+5. modify_request - 修改请求（"把开会改到11点"/"下午的时间太长了"）
+
+【关键判断规则】
+- "好像不对"、"有问题"、"不太对" → modify_request 或 need_clarification（不是 approve！）
+- "好的，但是..." → conditional_approve
+- 纯粹的 "好的"、"确认"、"没问题" → unconditional_approve
+- 包含具体修改内容（时间、活动、顺序）→ modify_request
+- 疑问句式 → need_clarification`,
+		Parameters: ToolParameters{
+			Type: "object",
+			Properties: map[string]ToolParam{
+				"thinking": {
+					Type:        "array",
+					Description: "分析过程，必须先填写，至少3条分析",
+					Items:       &ToolParam{Type: "string"},
+				},
+				"decision": {
+					Type:        "string",
+					Description: "用户决策类型",
+					Enum:        []string{"unconditional_approve", "conditional_approve", "reject", "need_clarification", "modify_request"},
+				},
+				"condition": {
+					Type:        "string",
+					Description: "如果是 conditional_approve，用户的条件是什么；如果是 modify_request，具体修改内容",
+				},
+				"confidence": {
+					Type:        "number",
+					Description: "置信度 0.0-1.0",
+				},
+			},
+			Required: []string{"thinking", "decision", "confidence"},
+		},
+		Handler: nil, // Handler 在 service 层设置
+	}
+}
+
+// UserDecisionResult 用户决策分析结果
+type UserDecisionResult struct {
+	Thinking   []string `json:"thinking"`
+	Decision   string   `json:"decision"`
+	Condition  string   `json:"condition,omitempty"`
+	Confidence float64  `json:"confidence"`
+}
+
+// ========== v3 架构改进：撤销/回滚工具 ==========
+
+// UndoScheduleTool 返回用于撤销时刻表操作的工具定义
+func UndoScheduleTool() *Tool {
+	return &Tool{
+		Name: "undo_schedule",
+		Description: `撤销最近的时刻表操作。当用户说"撤销"、"撤回"、"恢复"、"后悔了"时调用。
+
+撤销条件：
+- 距离上次确认不超过 5 分钟
+- 有可撤销的执行历史记录
+
+注意：如果撤销窗口已过期，需要告知用户无法撤销。`,
+		Parameters: ToolParameters{
+			Type:       "object",
+			Properties: map[string]ToolParam{},
+		},
+		Handler: nil, // Handler 在 service 层设置
+	}
+}
