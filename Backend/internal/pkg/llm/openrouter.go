@@ -1,16 +1,16 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
-
-import "strings"
 
 const (
 	// OpenRouter API
@@ -280,7 +280,13 @@ type ThinkingResponse struct {
 }
 
 // ChatWithThinking 使用思考模式发送请求，返回内容和思考过程
+// 注意：思考模型（如 qwq-plus-latest）只支持流式模式
 func (c *OpenRouterClient) ChatWithThinking(ctx context.Context, requestBody map[string]interface{}) (*ThinkingResponse, error) {
+	// 强制启用流式模式（思考模型只支持流式）
+	requestBody["stream"] = true
+	// 启用增量输出
+	requestBody["stream_options"] = map[string]bool{"include_usage": true}
+
 	body, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -293,6 +299,7 @@ func (c *OpenRouterClient) ChatWithThinking(ctx context.Context, requestBody map
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	httpReq.Header.Set("Accept", "text/event-stream")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -300,27 +307,73 @@ func (c *OpenRouterClient) ChatWithThinking(ctx context.Context, requestBody map
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+	// 解析流式响应
+	var contentBuilder strings.Builder
+	var reasoningBuilder strings.Builder
+
+	scanner := bufio.NewScanner(resp.Body)
+	// 增大 buffer 以处理长行
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// 跳过空行
+		if line == "" {
+			continue
+		}
+
+		// 跳过非数据行
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+
+		// 提取 JSON 数据
+		data := strings.TrimPrefix(line, "data:")
+		data = strings.TrimSpace(data)
+
+		// 检查是否结束
+		if data == "[DONE]" {
+			break
+		}
+
+		// 解析 SSE 事件
+		var event struct {
+			Choices []struct {
+				Delta struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+				} `json:"delta"`
+			} `json:"choices"`
+			Error *struct {
+				Message string `json:"message"`
+				Code    string `json:"code"`
+			} `json:"error"`
+		}
+
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			// 忽略解析失败的行
+			continue
+		}
+
+		if event.Error != nil {
+			return nil, fmt.Errorf("api error: %s (code: %s)", event.Error.Message, event.Error.Code)
+		}
+
+		if len(event.Choices) > 0 {
+			contentBuilder.WriteString(event.Choices[0].Delta.Content)
+			reasoningBuilder.WriteString(event.Choices[0].Delta.ReasoningContent)
+		}
 	}
 
-	var chatResp ChatResponse
-	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return nil, fmt.Errorf("unmarshal response: %w", err)
-	}
-
-	if chatResp.Error != nil {
-		return nil, fmt.Errorf("api error: %s (code: %s)", chatResp.Error.Message, chatResp.Error.Code)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return nil, fmt.Errorf("no response choices")
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read stream: %w", err)
 	}
 
 	return &ThinkingResponse{
-		Content:          chatResp.Choices[0].Message.Content,
-		ReasoningContent: chatResp.Choices[0].Message.ReasoningContent,
+		Content:          contentBuilder.String(),
+		ReasoningContent: reasoningBuilder.String(),
 	}, nil
 }
 
