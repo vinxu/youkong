@@ -486,14 +486,28 @@ func (c *OpenRouterClient) PredictSchedule(ctx context.Context, userContext stri
 		return nil, fmt.Errorf("思考模型调用失败: %w", err)
 	}
 
+	// 清理可能的 markdown 代码块标记
+	content := resp.Content
+	content = strings.TrimSpace(content)
+	if strings.HasPrefix(content, "```json") {
+		content = strings.TrimPrefix(content, "```json")
+	}
+	if strings.HasPrefix(content, "```") {
+		content = strings.TrimPrefix(content, "```")
+	}
+	if strings.HasSuffix(content, "```") {
+		content = strings.TrimSuffix(content, "```")
+	}
+	content = strings.TrimSpace(content)
+
 	// 解析 JSON 结果
 	var result struct {
 		Schedule       []ScheduleItemResult `json:"schedule"`
 		ReasoningSteps []string             `json:"reasoning_steps"`
 	}
 
-	if err := json.Unmarshal([]byte(resp.Content), &result); err != nil {
-		return nil, fmt.Errorf("解析推测结果失败: %w, 原始内容: %s", err, resp.Content)
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return nil, fmt.Errorf("解析推测结果失败: %w, 原始内容: %s", err, content)
 	}
 
 	return &PredictionResult{
