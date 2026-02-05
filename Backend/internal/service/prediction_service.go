@@ -138,12 +138,16 @@ func (s *PredictionService) executePrediction(task *model.PredictionTask) {
 	existingJSON, _ := json.Marshal(existingItems)
 	userContextStr := s.formatUserContext(userContext)
 
+	// 格式化时间范围（包含日期，让 LLM 理解跨天）
+	startTimeStr := task.StartTime.Format("2006-01-02 15:04")
+	endTimeStr := task.EndTime.Format("2006-01-02 15:04")
+
 	result, err := s.llmClient.PredictSchedule(
 		ctx,
 		userContextStr,
 		string(existingJSON),
-		task.StartTime.Format("15:04"),
-		task.EndTime.Format("15:04"),
+		startTimeStr,
+		endTimeStr,
 	)
 	if err != nil {
 		s.failTask(ctx, task.ID, fmt.Sprintf("AI 推测失败: %v", err))

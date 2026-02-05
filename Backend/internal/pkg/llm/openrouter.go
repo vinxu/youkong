@@ -441,17 +441,50 @@ func (c *OpenRouterClient) PredictSchedule(ctx context.Context, userContext stri
 %s
 
 ## 推测时间范围
-从 %s 到 %s
+开始：%s
+结束：%s
+（注意：这是未来约 24 小时的时间范围，可能跨越两天）
 
 ## 任务要求
-1. **只推测空缺时段**：不要覆盖用户已有的安排
-2. **基于用户画像推理**：考虑用户的职业、作息习惯、历史行为规律
-3. **合理推测**：给出符合逻辑的状态推测，使用合适的 emoji
-4. **时间连贯**：确保时段之间无缝衔接，无重叠
+1. **推测完整时段**：将推测时间范围划分为多个合理的时段（如：工作、午餐、休息、睡眠等）
+2. **只推测空缺时段**：如果已有安排，不要覆盖
+3. **基于用户画像推理**：考虑用户的职业、作息习惯、历史行为规律
+4. **合理划分**：每个时段通常 1-4 小时，睡眠时段可以更长
+5. **时间格式**：使用 HH:MM 格式（如 09:00、23:30）
 
 ## 输出格式（JSON）
 {
   "schedule": [
+    {
+      "start_time": "19:44",
+      "end_time": "22:00",
+      "emoji": "🏠",
+      "status": "在家休息"
+    },
+    {
+      "start_time": "22:00",
+      "end_time": "23:30",
+      "emoji": "📺",
+      "status": "看电视"
+    },
+    {
+      "start_time": "23:30",
+      "end_time": "07:00",
+      "emoji": "😴",
+      "status": "睡觉"
+    },
+    {
+      "start_time": "07:00",
+      "end_time": "08:00",
+      "emoji": "🍳",
+      "status": "早餐"
+    },
+    {
+      "start_time": "08:00",
+      "end_time": "09:00",
+      "emoji": "🚇",
+      "status": "通勤"
+    },
     {
       "start_time": "09:00",
       "end_time": "12:00",
@@ -460,13 +493,16 @@ func (c *OpenRouterClient) PredictSchedule(ctx context.Context, userContext stri
     }
   ],
   "reasoning_steps": [
-    "分析用户画像：用户是上班族，通常朝九晚五",
-    "检查历史规律：工作日上午通常在工作",
-    "推测结果：09:00-12:00 应该在上班"
+    "分析用户画像：用户是上班族，弹性工作",
+    "检查历史规律：晚上通常在家，有熬夜习惯",
+    "推测晚间时段：19:44-22:00 在家休息，22:00-23:30 娱乐",
+    "推测睡眠时段：23:30-07:00 睡觉",
+    "推测早间时段：07:00-09:00 早餐和通勤",
+    "推测工作时段：09:00 开始上班"
   ]
 }
 
-请严格按照 JSON 格式输出，不要包含其他内容。`, userContext, existingSchedule, startTime, endTime)
+请严格按照 JSON 格式输出，确保覆盖从开始到结束的完整时间段。`, userContext, existingSchedule, startTime, endTime)
 
 	// 使用思考模型
 	thinkingModel := "qwq-plus-latest" // 通义千问思考模型
