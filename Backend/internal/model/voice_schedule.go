@@ -107,6 +107,7 @@ func (s *StringArray) Scan(value interface{}) error {
 // UserSchedulePreference 用户时刻表偏好设置
 type UserSchedulePreference struct {
 	UserID            string             `db:"user_id" json:"user_id"`
+	HidePastEvents    bool               `db:"hide_past_events" json:"hide_past_events"`
 	DefaultVisibility ScheduleVisibility `db:"default_visibility" json:"default_visibility"`
 	DefaultCircleIDs  StringArray        `db:"default_circle_ids" json:"default_circle_ids,omitempty"`
 	CreatedAt         time.Time          `db:"created_at" json:"created_at"`
@@ -709,14 +710,22 @@ func (s *V4Session) ClearPendingSchedule() {
 type V4EventType string
 
 const (
-	V4EventTypeSessionStart     V4EventType = "session_start"
-	V4EventTypeTranscript       V4EventType = "transcript"
-	V4EventTypeThinking         V4EventType = "thinking"
-	V4EventTypeSchedulePreview  V4EventType = "schedule_preview"
-	V4EventTypeScheduleSaved    V4EventType = "schedule_saved"
-	V4EventTypeStatusUpdated    V4EventType = "status_updated"
-	V4EventTypeChat             V4EventType = "chat"
-	V4EventTypeError            V4EventType = "error"
+	V4EventTypeSessionStart       V4EventType = "session_start"
+	V4EventTypeTranscript         V4EventType = "transcript"
+	V4EventTypeThinking           V4EventType = "thinking"
+	V4EventTypeSchedulePreview    V4EventType = "schedule_preview"
+	V4EventTypeScheduleSaved      V4EventType = "schedule_saved"
+	V4EventTypeStatusUpdated      V4EventType = "status_updated"
+	V4EventTypePreferenceUpdated  V4EventType = "preference_updated"
+	V4EventTypeChat               V4EventType = "chat"
+	V4EventTypeChatStream         V4EventType = "chat_stream"     // 流式文本片段
+	V4EventTypeChatStreamEnd      V4EventType = "chat_stream_end" // 流式输出结束
+	V4EventTypeError              V4EventType = "error"
+
+	// 阶段暴露事件（让用户知道当前在做什么）
+	V4EventTypePhase     V4EventType = "phase"      // 处理阶段（理解请求、调用工具、生成回复）
+	V4EventTypeToolStart V4EventType = "tool_start" // 工具开始执行
+	V4EventTypeToolEnd   V4EventType = "tool_end"   // 工具执行完成
 )
 
 // V4Event V4 版本的 SSE 事件
@@ -731,4 +740,9 @@ type V4Event struct {
 
 	// 查询模式标识（查询已有时刻表时为 true，前端不显示确认按钮）
 	IsQuery bool `json:"is_query,omitempty"`
+
+	// 阶段暴露字段
+	Phase    string `json:"phase,omitempty"`     // 阶段名称：understanding, tool_calling, generating
+	ToolName string `json:"tool_name,omitempty"` // 工具名称（tool_start/tool_end 时使用）
+	Loop     int    `json:"loop,omitempty"`      // 当前循环次数
 }
