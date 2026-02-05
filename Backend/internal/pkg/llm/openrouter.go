@@ -362,6 +362,94 @@ func (c *OpenRouterClient) ChatWithOptions(ctx context.Context, messages []ChatM
 	return c.chatWithRequestBody(ctx, requestBody)
 }
 
+// PredictionResult AI 推测结果
+type PredictionResult struct {
+	Schedule         []ScheduleItemResult `json:"schedule"`          // 推测的时刻表
+	ReasoningContent string               `json:"reasoning_content"` // 思考过程
+	ReasoningSteps   []string             `json:"reasoning_steps"`   // 推理步骤
+}
+
+// ScheduleItemResult 推测的时刻表项
+type ScheduleItemResult struct {
+	StartTime string `json:"start_time"` // HH:MM
+	EndTime   string `json:"end_time"`   // HH:MM
+	Emoji     string `json:"emoji"`
+	Status    string `json:"status"`
+}
+
+// PredictSchedule 使用思考模型推测用户未来24小时的状态
+func (c *OpenRouterClient) PredictSchedule(ctx context.Context, userContext string, existingSchedule string, startTime string, endTime string) (*PredictionResult, error) {
+	prompt := fmt.Sprintf(`你是一个智能助手，需要根据用户的画像和历史行为规律，推测用户在指定时间段内可能的状态。
+
+## 用户上下文
+%s
+
+## 已有安排（请勿覆盖）
+%s
+
+## 推测时间范围
+从 %s 到 %s
+
+## 任务要求
+1. **只推测空缺时段**：不要覆盖用户已有的安排
+2. **基于用户画像推理**：考虑用户的职业、作息习惯、历史行为规律
+3. **合理推测**：给出符合逻辑的状态推测，使用合适的 emoji
+4. **时间连贯**：确保时段之间无缝衔接，无重叠
+
+## 输出格式（JSON）
+{
+  "schedule": [
+    {
+      "start_time": "09:00",
+      "end_time": "12:00",
+      "emoji": "💼",
+      "status": "上班工作"
+    }
+  ],
+  "reasoning_steps": [
+    "分析用户画像：用户是上班族，通常朝九晚五",
+    "检查历史规律：工作日上午通常在工作",
+    "推测结果：09:00-12:00 应该在上班"
+  ]
+}
+
+请严格按照 JSON 格式输出，不要包含其他内容。`, userContext, existingSchedule, startTime, endTime)
+
+	// 使用思考模型
+	thinkingModel := "qwq-plus-latest" // 通义千问思考模型
+
+	requestBody := map[string]interface{}{
+		"model": thinkingModel,
+		"messages": []ChatMessage{
+			{Role: "user", Content: prompt},
+		},
+		"response_format": map[string]string{
+			"type": "json_object",
+		},
+	}
+
+	resp, err := c.ChatWithThinking(ctx, requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("思考模型调用失败: %w", err)
+	}
+
+	// 解析 JSON 结果
+	var result struct {
+		Schedule       []ScheduleItemResult `json:"schedule"`
+		ReasoningSteps []string             `json:"reasoning_steps"`
+	}
+
+	if err := json.Unmarshal([]byte(resp.Content), &result); err != nil {
+		return nil, fmt.Errorf("解析推测结果失败: %w, 原始内容: %s", err, resp.Content)
+	}
+
+	return &PredictionResult{
+		Schedule:         result.Schedule,
+		ReasoningContent: resp.ReasoningContent,
+		ReasoningSteps:   result.ReasoningSteps,
+	}, nil
+}
+
 // GenerateFreeReason 生成隐私安全的有空理由
 func (c *OpenRouterClient) GenerateFreeReason(ctx context.Context, state SanitizedUserState) (string, error) {
 	prompt := fmt.Sprintf(`你是一个帮助用户判断朋友是否有空的助手。

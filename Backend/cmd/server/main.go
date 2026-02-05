@@ -132,6 +132,7 @@ func main() {
 	userProfileRepo := repository.NewUserProfileRepository(db)
 	scheduleRepo := repository.NewScheduleRepository(db)
 	userSettingsRepo := repository.NewUserSettingsRepository(db)
+	predictionRepo := repository.NewPredictionRepository(db)
 
 	// 初始化微信客户端
 	var wechatClient *wechat.Client
@@ -195,6 +196,7 @@ func main() {
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo, redisClient)
 	voiceScheduleService := service.NewVoiceScheduleService(scheduleRepo, memoryRepo, userProfileService, redisClient, asrClient, llmClient, cfg.LLM.APIKey)
+	predictionService := service.NewPredictionService(predictionRepo, scheduleRepo, memoryRepo, userProfileService, llmClient)
 
 	// 初始化 Agent Chat Service（Tool Agent 框架）
 	var agentChatService *service.AgentChatService
@@ -230,6 +232,7 @@ func main() {
 	deviceHandler := handler.NewDeviceHandler(notificationService)
 	homeHandler := handler.NewHomeHandler(homeService)
 	userProfileHandler := handler.NewUserProfileHandler(userProfileService)
+	predictionHandler := handler.NewPredictionHandler(predictionService)
 
 	// 设置Gin模式
 	gin.SetMode(cfg.Server.Mode)
@@ -379,6 +382,14 @@ func main() {
 				agent.POST("/chat", agentHandler.AgentChat)                                       // Tool Agent 聊天（非流式）
 				agent.POST("/voice/stream", agentHandler.AgentVoiceChatStream)                    // Tool Agent 语音聊天（SSE）
 				agent.GET("/my-schedule/history", agentHandler.GetMyScheduleHistory)              // 我的状态时刻表历史（分页）
+
+				// AI 状态推测
+				agent.POST("/prediction/start", predictionHandler.StartPrediction)      // 开始推测任务
+				agent.GET("/prediction/latest", predictionHandler.GetLatestPrediction)  // 获取最近的推测任务
+				agent.GET("/prediction/pending", predictionHandler.GetPendingPrediction) // 获取待确认的推测任务
+				agent.GET("/prediction/:id", predictionHandler.GetPrediction)           // 获取推测任务状态
+				agent.POST("/prediction/:id/confirm", predictionHandler.ConfirmPrediction) // 确认推测结果
+				agent.POST("/prediction/:id/reject", predictionHandler.RejectPrediction)  // 放弃推测结果
 			}
 
 			// 通讯录模块
