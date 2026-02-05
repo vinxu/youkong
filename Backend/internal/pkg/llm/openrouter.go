@@ -504,14 +504,13 @@ func (c *OpenRouterClient) PredictSchedule(ctx context.Context, userContext stri
 
 请严格按照 JSON 格式输出，确保覆盖从开始到结束的完整时间段。`, userContext, existingSchedule, startTime, endTime)
 
-	// 使用思考模型
-	thinkingModel := "qwq-plus-latest" // 通义千问思考模型
-
+	// 使用 qwen3-max 并开启思考模式
 	requestBody := map[string]interface{}{
-		"model": thinkingModel,
+		"model": defaultModel, // qwen3-max-2026-01-23
 		"messages": []ChatMessage{
 			{Role: "user", Content: prompt},
 		},
+		"enable_thinking": true, // 开启思考模式
 		"response_format": map[string]string{
 			"type": "json_object",
 		},
