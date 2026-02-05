@@ -210,8 +210,8 @@ func (s *PredictionService) buildUserContextForPrediction(ctx context.Context, u
 				workSchedule = "弹性工作"
 			case model.WorkScheduleShift:
 				workSchedule = "倒班制"
-			case model.WorkScheduleNight:
-				workSchedule = "夜班"
+			case model.WorkScheduleIrregular:
+				workSchedule = "不规律"
 			}
 			result.ProfileSummary = fmt.Sprintf("%s，%s", profileType, workSchedule)
 		}
@@ -221,9 +221,9 @@ func (s *PredictionService) buildUserContextForPrediction(ctx context.Context, u
 	if s.memoryRepo != nil {
 		coreMemory, err := s.memoryRepo.GetCoreMemory(ctx, userID)
 		if err == nil && coreMemory != nil {
-			result.BehaviorInsights = coreMemory.BehaviorPatterns
-			result.TimePatterns = coreMemory.PreferredActivities
-			result.LocationPrefs = coreMemory.LocationHabits
+			result.BehaviorInsights = coreMemory.BehaviorInsights
+			result.TimePatterns = coreMemory.TimePatterns
+			result.LocationPrefs = coreMemory.LocationPreferences
 		}
 
 		// 获取最近的状态记忆
@@ -444,10 +444,4 @@ func (s *PredictionService) RejectPrediction(ctx context.Context, taskID string,
 
 	fmt.Printf("[PredictionService] 推测已放弃: %s\n", taskID)
 	return nil
-}
-
-// getChineseWeekday 获取中文星期
-func getChineseWeekday(weekday time.Weekday) string {
-	weekdays := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
-	return weekdays[weekday]
 }
