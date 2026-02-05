@@ -155,11 +155,12 @@ func (s *VoiceScheduleServiceV4) processLoop(
 			break
 		}
 
-		// 4. 执行工具调用
-		shouldBreak := s.executeToolCalls(ctx, session, response.ToolCalls, callback)
-
-		// 添加 assistant 消息（包含工具调用）
+		// 4. 先添加 assistant 消息（包含 tool_calls）
+		// 重要：必须在添加 tool 结果之前添加，否则 LLM API 会报错
 		session.AddAssistantMessageWithToolCalls(response.Content, s.convertToolCalls(response.ToolCalls))
+
+		// 5. 执行工具调用（会添加 tool 结果到消息历史）
+		shouldBreak := s.executeToolCalls(ctx, session, response.ToolCalls, callback)
 
 		if shouldBreak {
 			break
