@@ -74,6 +74,15 @@ func (t *Tool) ToOpenAIFormat() map[string]interface{} {
 	}
 }
 
+// ToClaudeFormat 转换为 Claude/Anthropic 格式
+func (t *Tool) ToClaudeFormat() map[string]interface{} {
+	return map[string]interface{}{
+		"name":         t.Name,
+		"description":  t.Description,
+		"input_schema": t.Parameters,
+	}
+}
+
 // FormatToolResult 格式化工具结果为字符串（注入到消息）
 func FormatToolResult(result *ToolResult, err error) string {
 	if err != nil {

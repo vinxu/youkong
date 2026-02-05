@@ -939,7 +939,7 @@ func (h *AgentHandler) SelectStatus(c *gin.Context) {
 	})
 }
 
-// VoiceScheduleStream 语音状态时刻表 SSE 流
+// VoiceScheduleStream 语音状态时刻表 SSE 流（V4 版本）
 // POST /api/agent/voice-schedule/stream
 // Content-Type: multipart/form-data
 func (h *AgentHandler) VoiceScheduleStream(c *gin.Context) {
@@ -949,7 +949,8 @@ func (h *AgentHandler) VoiceScheduleStream(c *gin.Context) {
 		return
 	}
 
-	if h.voiceScheduleService == nil {
+	// 优先使用 V4 服务
+	if h.voiceScheduleServiceV4 == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "语音服务未启用"})
 		return
 	}
@@ -988,7 +989,7 @@ func (h *AgentHandler) VoiceScheduleStream(c *gin.Context) {
 	// 获取可选的 session_id（用于多轮对话保持上下文）
 	sessionID := c.PostForm("session_id")
 
-	fmt.Printf("[VoiceSchedule] 收到音频 user=%s size=%d format=%s session=%s\n", userID, len(audioData), audioFormat, sessionID)
+	fmt.Printf("[VoiceScheduleV4] 收到音频 user=%s size=%d format=%s session=%s\n", userID, len(audioData), audioFormat, sessionID)
 
 	// 设置 SSE 响应头
 	c.Header("Content-Type", "text/event-stream")
@@ -998,8 +999,8 @@ func (h *AgentHandler) VoiceScheduleStream(c *gin.Context) {
 
 	w := c.Writer
 
-	// 流式处理语音输入（传入 sessionID 以恢复会话）
-	_, err = h.voiceScheduleService.ProcessVoiceInput(c.Request.Context(), userID, sessionID, audioData, audioFormat, func(event *model.VoiceScheduleEvent) {
+	// 使用 V4 服务处理语音输入
+	_, err = h.voiceScheduleServiceV4.ProcessVoiceInput(c.Request.Context(), userID, sessionID, audioData, audioFormat, func(event *model.V4Event) {
 		data, err := json.Marshal(event)
 		if err != nil {
 			return
@@ -1009,8 +1010,8 @@ func (h *AgentHandler) VoiceScheduleStream(c *gin.Context) {
 	})
 
 	if err != nil {
-		errEvent := model.VoiceScheduleEvent{
-			Type:    model.VSEventError,
+		errEvent := model.V4Event{
+			Type:    model.V4EventTypeError,
 			Message: err.Error(),
 		}
 		data, _ := json.Marshal(errEvent)
@@ -1107,7 +1108,7 @@ func (h *AgentHandler) VoiceScheduleInteract(c *gin.Context) {
 	w.Flush()
 }
 
-// VoiceScheduleText 语音时刻表文本测试接口（用于测试，跳过语音识别）
+// VoiceScheduleText 语音时刻表文本测试接口（V4 版本，跳过语音识别）
 // POST /api/agent/voice-schedule/text
 func (h *AgentHandler) VoiceScheduleText(c *gin.Context) {
 	userID := middleware.GetUserID(c)
@@ -1116,7 +1117,8 @@ func (h *AgentHandler) VoiceScheduleText(c *gin.Context) {
 		return
 	}
 
-	if h.voiceScheduleService == nil {
+	// 优先使用 V4 服务
+	if h.voiceScheduleServiceV4 == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "语音服务未启用"})
 		return
 	}
@@ -1131,7 +1133,7 @@ func (h *AgentHandler) VoiceScheduleText(c *gin.Context) {
 		return
 	}
 
-	fmt.Printf("[VoiceScheduleText] user=%s session=%s text=%s\n", userID, req.SessionID, req.Text)
+	fmt.Printf("[VoiceScheduleTextV4] user=%s session=%s text=%s\n", userID, req.SessionID, req.Text)
 
 	// 设置 SSE 响应头
 	c.Header("Content-Type", "text/event-stream")
@@ -1141,8 +1143,8 @@ func (h *AgentHandler) VoiceScheduleText(c *gin.Context) {
 
 	w := c.Writer
 
-	// 使用文本处理（跳过语音识别）
-	_, err := h.voiceScheduleService.ProcessTextInput(c.Request.Context(), userID, req.SessionID, req.Text, func(event *model.VoiceScheduleEvent) {
+	// 使用 V4 服务处理文本输入
+	_, err := h.voiceScheduleServiceV4.ProcessTextInput(c.Request.Context(), userID, req.SessionID, req.Text, func(event *model.V4Event) {
 		data, err := json.Marshal(event)
 		if err != nil {
 			return
@@ -1152,8 +1154,8 @@ func (h *AgentHandler) VoiceScheduleText(c *gin.Context) {
 	})
 
 	if err != nil {
-		errEvent := model.VoiceScheduleEvent{
-			Type:    model.VSEventError,
+		errEvent := model.V4Event{
+			Type:    model.V4EventTypeError,
 			Message: err.Error(),
 		}
 		data, _ := json.Marshal(errEvent)
@@ -1362,6 +1364,169 @@ func parseLimit(s string) (int, error) {
 	var limit int
 	_, err := fmt.Sscanf(s, "%d", &limit)
 	return limit, err
+}
+
+// UpdateScheduleItemRequest 更新时刻表条目请求
+type UpdateScheduleItemRequest struct {
+	OldStartTime string `json:"old_start_time" binding:"required"`
+	OldEndTime   string `json:"old_end_time" binding:"required"`
+	NewStartTime string `json:"new_start_time" binding:"required"`
+	NewEndTime   string `json:"new_end_time" binding:"required"`
+	Emoji        string `json:"emoji" binding:"required"`
+	Status       string `json:"status" binding:"required"`
+}
+
+// UpdateScheduleItem 更新时刻表条目
+// PUT /api/agent/my-schedule/:date/item
+func (h *AgentHandler) UpdateScheduleItem(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.scheduleRepo == nil {
+		response.InternalError(c, "时刻表服务未启用")
+		return
+	}
+
+	date := c.Param("date")
+	if date == "" {
+		response.ParamError(c, "日期不能为空")
+		return
+	}
+
+	var req UpdateScheduleItemRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "参数错误")
+		return
+	}
+
+	// 解析日期
+	scheduleDate, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		response.ParamError(c, "日期格式错误，应为 YYYY-MM-DD")
+		return
+	}
+
+	// 获取当天的时刻表
+	schedule, err := h.scheduleRepo.GetActiveByUserAndDate(c.Request.Context(), userID, scheduleDate)
+	if err != nil || schedule == nil {
+		response.NotFound(c, "未找到该日期的时刻表")
+		return
+	}
+
+	// 查找并更新条目
+	found := false
+	for i, item := range schedule.Items {
+		if item.StartTime == req.OldStartTime && item.EndTime == req.OldEndTime {
+			schedule.Items[i] = model.ScheduleItem{
+				StartTime: req.NewStartTime,
+				EndTime:   req.NewEndTime,
+				Emoji:     req.Emoji,
+				Status:    req.Status,
+				Executed:  item.Executed,
+				IsAIGuess: false, // 用户编辑后不再是 AI 推测
+			}
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		response.NotFound(c, "未找到该时段")
+		return
+	}
+
+	// 保存更新
+	if err := h.scheduleRepo.Update(c.Request.Context(), schedule); err != nil {
+		fmt.Printf("[UpdateScheduleItem] 保存失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "保存失败")
+		return
+	}
+
+	fmt.Printf("[UpdateScheduleItem] 成功 user=%s date=%s slot=%s-%s\n",
+		userID, date, req.NewStartTime, req.NewEndTime)
+
+	response.Success(c, gin.H{
+		"success": true,
+		"message": "更新成功",
+	})
+}
+
+// DeleteScheduleItem 删除时刻表条目
+// DELETE /api/agent/my-schedule/:date/item
+func (h *AgentHandler) DeleteScheduleItem(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.scheduleRepo == nil {
+		response.InternalError(c, "时刻表服务未启用")
+		return
+	}
+
+	date := c.Param("date")
+	if date == "" {
+		response.ParamError(c, "日期不能为空")
+		return
+	}
+
+	startTime := c.Query("start_time")
+	endTime := c.Query("end_time")
+	if startTime == "" || endTime == "" {
+		response.ParamError(c, "start_time 和 end_time 必填")
+		return
+	}
+
+	// 解析日期
+	scheduleDate, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		response.ParamError(c, "日期格式错误，应为 YYYY-MM-DD")
+		return
+	}
+
+	// 获取当天的时刻表
+	schedule, err := h.scheduleRepo.GetActiveByUserAndDate(c.Request.Context(), userID, scheduleDate)
+	if err != nil || schedule == nil {
+		response.NotFound(c, "未找到该日期的时刻表")
+		return
+	}
+
+	// 查找并删除条目
+	found := false
+	newItems := make(model.ScheduleItems, 0, len(schedule.Items))
+	for _, item := range schedule.Items {
+		if item.StartTime == startTime && item.EndTime == endTime {
+			found = true
+			continue
+		}
+		newItems = append(newItems, item)
+	}
+
+	if !found {
+		response.NotFound(c, "未找到该时段")
+		return
+	}
+
+	schedule.Items = newItems
+
+	// 保存更新
+	if err := h.scheduleRepo.Update(c.Request.Context(), schedule); err != nil {
+		fmt.Printf("[DeleteScheduleItem] 保存失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "保存失败")
+		return
+	}
+
+	fmt.Printf("[DeleteScheduleItem] 成功 user=%s date=%s slot=%s-%s\n",
+		userID, date, startTime, endTime)
+
+	response.Success(c, gin.H{
+		"success": true,
+		"message": "删除成功",
+	})
 }
 
 // DayScheduleResponse 按日期分组的时刻表响应
@@ -1653,5 +1818,66 @@ func (h *AgentHandler) TestModelByCategory(c *gin.Context) {
 		"category": req.Category,
 		"provider": req.Provider,
 		"results":  results,
+	})
+}
+
+// ========== 当下状态推理接口 ==========
+
+// InferStatus AI 推断当下状态
+// POST /api/v1/agent/infer-status
+func (h *AgentHandler) InferStatus(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	// 解析传感器数据（可选，如果前端没传就用最近缓存的）
+	var req model.ExtendedStatusReportRequest
+	c.ShouldBindJSON(&req)
+
+	// 调用 AgentService 进行推理
+	result, err := h.agentService.InferCurrentStatus(c.Request.Context(), userID, &req)
+	if err != nil {
+		fmt.Printf("[InferStatus] 推理失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "推理失败")
+		return
+	}
+
+	fmt.Printf("[InferStatus] 推理成功 user=%s emoji=%s activity=%s is_available=%v\n",
+		userID, result.Emoji, result.Activity, result.IsAvailable)
+
+	response.Success(c, result)
+}
+
+// StatusFeedback 状态反馈（用户修正状态，存入记忆）
+// POST /api/v1/agent/status-feedback
+func (h *AgentHandler) StatusFeedback(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	var req model.StatusFeedbackRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "参数错误")
+		return
+	}
+
+	// 保存到记忆
+	err := h.agentService.SaveStatusFeedback(c.Request.Context(), userID, &req)
+	if err != nil {
+		fmt.Printf("[StatusFeedback] 保存失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "保存失败")
+		return
+	}
+
+	fmt.Printf("[StatusFeedback] 保存成功 user=%s corrected=%s %s\n",
+		userID, req.CorrectedEmoji, req.CorrectedActivity)
+
+	response.Success(c, gin.H{
+		"success": true,
+		"message": "反馈已记录",
 	})
 }

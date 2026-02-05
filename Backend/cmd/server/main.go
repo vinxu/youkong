@@ -192,7 +192,7 @@ func main() {
 	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
 	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo, friendRequestRepo)
 	userProfileService := service.NewUserProfileService(userProfileRepo)
-	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, userProfileService, llmClient)
+	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, memoryRepo, userProfileService, llmClient)
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo, redisClient)

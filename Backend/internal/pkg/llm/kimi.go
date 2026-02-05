@@ -15,7 +15,7 @@ import (
 const (
 	// Kimi/Moonshot API
 	kimiAPIURL       = "https://api.moonshot.cn/v1/chat/completions"
-	defaultKimiModel = "kimi-k2.5-preview"
+	defaultKimiModel = "kimi-k2.5" // Kimi 2.5 模型，支持 Tool Calling 和思考过程
 )
 
 // KimiClient Kimi/Moonshot API 客户端
@@ -145,7 +145,10 @@ func (c *KimiClient) ChatWithMessages(ctx context.Context, messages []KimiMessag
 
 // ChatWithTools 带工具调用的聊天
 func (c *KimiClient) ChatWithTools(ctx context.Context, messages []KimiMessage, tools []KimiTool, temperature float64) (*KimiToolResponse, error) {
-	if temperature <= 0 {
+	// kimi-k2.5 模型要求 temperature 必须为 1
+	if strings.HasPrefix(c.model, "kimi-k2") {
+		temperature = 1.0
+	} else if temperature <= 0 {
 		temperature = 0.6
 	}
 
@@ -175,7 +178,10 @@ func (c *KimiClient) ChatWithTools(ctx context.Context, messages []KimiMessage, 
 
 // ChatWithToolsStream 流式带工具调用的聊天
 func (c *KimiClient) ChatWithToolsStream(ctx context.Context, messages []KimiMessage, tools []KimiTool, temperature float64, callback func(chunk string)) (*KimiToolResponse, error) {
-	if temperature <= 0 {
+	// kimi-k2.5 模型要求 temperature 必须为 1
+	if strings.HasPrefix(c.model, "kimi-k2") {
+		temperature = 1.0
+	} else if temperature <= 0 {
 		temperature = 0.6
 	}
 

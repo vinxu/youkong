@@ -15,9 +15,10 @@ import (
 type LLMProvider string
 
 const (
-	ProviderQwen LLMProvider = "qwen"
-	ProviderKimi LLMProvider = "kimi"
-	ProviderAuto LLMProvider = "auto" // 自动检测
+	ProviderQwen   LLMProvider = "qwen"
+	ProviderKimi   LLMProvider = "kimi"
+	ProviderClaude LLMProvider = "claude"
+	ProviderAuto   LLMProvider = "auto" // 自动检测
 )
 
 // LLMAdapter LLM 工具调用适配器
@@ -52,6 +53,9 @@ func NewLLMAdapter(config *LLMAdapterConfig) *LLMAdapter {
 		} else if strings.HasPrefix(config.APIKey, "sk-Kua") || strings.Contains(config.APIKey, "moonshot") {
 			// Kimi API Key 前缀检测
 			provider = ProviderKimi
+		} else if strings.HasPrefix(config.APIKey, "sk-ant-") {
+			// Claude/Anthropic API Key 前缀检测
+			provider = ProviderClaude
 		} else {
 			provider = ProviderQwen
 		}
@@ -62,6 +66,8 @@ func NewLLMAdapter(config *LLMAdapterConfig) *LLMAdapter {
 		switch provider {
 		case ProviderKimi:
 			apiURL = "https://api.moonshot.cn/v1/chat/completions"
+		case ProviderClaude:
+			apiURL = "https://api.anthropic.com/v1/messages"
 		case ProviderQwen:
 			fallthrough
 		default:
@@ -73,6 +79,8 @@ func NewLLMAdapter(config *LLMAdapterConfig) *LLMAdapter {
 		switch provider {
 		case ProviderKimi:
 			model = "kimi-k2.5" // Kimi 2.5 模型
+		case ProviderClaude:
+			model = "claude-sonnet-4-20250514" // Claude Sonnet 4
 		case ProviderQwen:
 			fallthrough
 		default:
@@ -119,12 +127,17 @@ func (a *LLMAdapter) SetProvider(provider LLMProvider, apiKey string) {
 	switch provider {
 	case ProviderKimi:
 		a.apiURL = "https://api.moonshot.cn/v1/chat/completions"
-		if a.model == "" || a.model == "qwen3-max-2026-01-23" || a.model == "qwen-max" {
+		if a.model == "" || a.model == "qwen3-max-2026-01-23" || a.model == "qwen-max" || strings.HasPrefix(a.model, "claude-") {
 			a.model = "kimi-k2.5"
+		}
+	case ProviderClaude:
+		a.apiURL = "https://api.anthropic.com/v1/messages"
+		if a.model == "" || a.model == "qwen-max" || a.model == "kimi-k2.5" {
+			a.model = "claude-sonnet-4-20250514"
 		}
 	case ProviderQwen:
 		a.apiURL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-		if a.model == "" || a.model == "kimi-k2.5" || strings.HasPrefix(a.model, "moonshot-") {
+		if a.model == "" || a.model == "kimi-k2.5" || strings.HasPrefix(a.model, "moonshot-") || strings.HasPrefix(a.model, "claude-") {
 			a.model = "qwen-max"
 		}
 	}
@@ -150,6 +163,17 @@ type LLMResponse struct {
 
 // ChatWithTools 带工具的聊天请求
 func (a *LLMAdapter) ChatWithTools(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
+	// Claude API 使用不同的格式
+	if a.provider == ProviderClaude {
+		return a.chatWithToolsClaude(ctx, req)
+	}
+
+	// OpenAI 兼容格式（Qwen、Kimi）
+	return a.chatWithToolsOpenAI(ctx, req)
+}
+
+// chatWithToolsOpenAI OpenAI 兼容格式的 API 调用
+func (a *LLMAdapter) chatWithToolsOpenAI(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
 	// 构建请求体
 	requestBody := map[string]interface{}{
 		"model":    a.model,
@@ -257,6 +281,135 @@ func (a *LLMAdapter) ChatWithTools(ctx context.Context, req *LLMRequest) (*LLMRe
 		ToolCalls: choice.Message.ToolCalls,
 		Reasoning: choice.Message.ReasoningContent,
 	}, nil
+}
+
+// chatWithToolsClaude Claude API 格式的调用
+func (a *LLMAdapter) chatWithToolsClaude(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
+	// 提取 system message 和 user/assistant messages
+	var systemPrompt string
+	var messages []map[string]interface{}
+
+	for _, msg := range req.Messages {
+		if msg.Role == "system" {
+			systemPrompt = msg.Content
+		} else {
+			messages = append(messages, map[string]interface{}{
+				"role":    msg.Role,
+				"content": msg.Content,
+			})
+		}
+	}
+
+	// 构建 Claude 格式的请求体
+	requestBody := map[string]interface{}{
+		"model":      a.model,
+		"max_tokens": 1024,
+		"messages":   messages,
+	}
+
+	if systemPrompt != "" {
+		requestBody["system"] = systemPrompt
+	}
+
+	// 添加工具定义（Claude 格式）
+	if len(req.Tools) > 0 {
+		tools := make([]map[string]interface{}, len(req.Tools))
+		for i, tool := range req.Tools {
+			tools[i] = tool.ToClaudeFormat()
+		}
+		requestBody["tools"] = tools
+	}
+
+	// 添加温度
+	if req.Temperature > 0 {
+		requestBody["temperature"] = req.Temperature
+	} else {
+		requestBody["temperature"] = 0.7
+	}
+
+	// 添加最大 Token
+	if req.MaxTokens > 0 {
+		requestBody["max_tokens"] = req.MaxTokens
+	}
+
+	// 序列化请求
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("序列化请求失败: %w", err)
+	}
+
+	// 创建 HTTP 请求
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", a.apiURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", a.apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	// 发送请求
+	resp, err := a.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("发送请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 读取响应
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应失败: %w", err)
+	}
+
+	// 解析 Claude 响应
+	var claudeResp struct {
+		ID      string `json:"id"`
+		Type    string `json:"type"`
+		Role    string `json:"role"`
+		Content []struct {
+			Type  string `json:"type"`
+			Text  string `json:"text,omitempty"`
+			ID    string `json:"id,omitempty"`
+			Name  string `json:"name,omitempty"`
+			Input json.RawMessage `json:"input,omitempty"`
+		} `json:"content"`
+		StopReason string `json:"stop_reason"`
+		Error      *struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+
+	if err := json.Unmarshal(respBody, &claudeResp); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w, body: %s", err, string(respBody))
+	}
+
+	// 检查错误
+	if claudeResp.Error != nil {
+		return nil, fmt.Errorf("Claude API 错误: %s (%s)", claudeResp.Error.Message, claudeResp.Error.Type)
+	}
+
+	// 解析响应内容
+	result := &LLMResponse{}
+	for _, content := range claudeResp.Content {
+		switch content.Type {
+		case "text":
+			result.Content += content.Text
+		case "tool_use":
+			// 转换为统一的 ToolCall 格式
+			tc := ToolCall{
+				ID:   content.ID,
+				Type: "function",
+				Function: ToolCallFunction{
+					Name:      content.Name,
+					Arguments: string(content.Input),
+				},
+			}
+			result.ToolCalls = append(result.ToolCalls, tc)
+		}
+	}
+
+	return result, nil
 }
 
 // Chat 简单聊天请求（不带工具）

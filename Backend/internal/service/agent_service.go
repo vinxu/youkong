@@ -28,6 +28,7 @@ type AgentService struct {
 	redisClient        *tencent.RedisClient
 	userRepo           *repository.UserRepository
 	friendshipRepo     *repository.FriendshipRepository
+	memoryRepo         *repository.MemoryRepository
 	userProfileService *UserProfileService
 	llmClient          *llm.OpenRouterClient
 	holmesAnalyzer     *llm.HolmesAnalyzer
@@ -38,6 +39,7 @@ func NewAgentService(
 	redisClient *tencent.RedisClient,
 	userRepo *repository.UserRepository,
 	friendshipRepo *repository.FriendshipRepository,
+	memoryRepo *repository.MemoryRepository,
 	userProfileService *UserProfileService,
 	llmClient *llm.OpenRouterClient,
 ) *AgentService {
@@ -49,6 +51,7 @@ func NewAgentService(
 		redisClient:        redisClient,
 		userRepo:           userRepo,
 		friendshipRepo:     friendshipRepo,
+		memoryRepo:         memoryRepo,
 		userProfileService: userProfileService,
 		llmClient:          llmClient,
 		holmesAnalyzer:     holmesAnalyzer,
@@ -1200,4 +1203,173 @@ func (s *AgentService) ReportExtendedStatus2Stream(ctx context.Context, userID s
 	}
 
 	return result, nil
+}
+
+// ========== 当下状态推理 ==========
+
+const (
+	keyStatusFeedback = "agent:feedback:%s" // 状态反馈记忆
+	feedbackTTL       = 7 * 24 * time.Hour  // 反馈记忆保留7天
+)
+
+// InferCurrentStatus 推理用户当下状态
+func (s *AgentService) InferCurrentStatus(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest) (*model.CurrentStatusInference, error) {
+	// 1. 如果没有传感器数据，尝试从缓存获取
+	if sensorData == nil || (sensorData.Screen == nil && sensorData.Location == nil) {
+		cached := s.getCachedSensorData(ctx, userID)
+		if cached != nil {
+			sensorData = cached
+		}
+	}
+
+	// 2. 获取用户画像
+	var userProfile *model.UserProfileData
+	if s.userProfileService != nil {
+		userProfile, _ = s.userProfileService.GetProfile(userID)
+	}
+
+	// 3. 获取状态反馈记忆
+	feedbackMemory := s.getStatusFeedbackMemory(ctx, userID)
+
+	// 4. 构建推理输入
+	now := time.Now()
+	input := &llm.StatusInferInput{
+		SensorData:   sensorData,
+		UserProfile:  userProfile,
+		StatusMemory: feedbackMemory,
+		Timestamp:    now,
+		Weekday:      getWeekdayNameCN(now.Weekday()),
+		Hour:         now.Hour(),
+	}
+
+	// 5. 创建推理器并执行推理
+	inferrer := llm.NewStatusInferrer(s.llmClient)
+	result, err := inferrer.Infer(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("infer status: %w", err)
+	}
+
+	return result, nil
+}
+
+// SaveStatusFeedback 保存状态反馈（用户修正记忆）并更新首页状态
+func (s *AgentService) SaveStatusFeedback(ctx context.Context, userID string, req *model.StatusFeedbackRequest) error {
+	// 获取当前传感器数据作为上下文
+	sensorData := s.getCachedSensorData(ctx, userID)
+	contextJSON := "{}"
+	if sensorData != nil {
+		if data, err := json.Marshal(sensorData); err == nil {
+			contextJSON = string(data)
+		}
+	}
+
+	// 创建记忆条目
+	entry := &model.StatusMemoryEntry{
+		UserID:               userID,
+		OriginalEmoji:        req.OriginalEmoji,
+		OriginalActivity:     req.OriginalActivity,
+		CorrectedEmoji:       req.CorrectedEmoji,
+		CorrectedActivity:    req.CorrectedActivity,
+		CorrectedPlace:       req.CorrectedPlace,
+		CorrectedIsAvailable: req.CorrectedIsAvailable != nil && *req.CorrectedIsAvailable,
+		DeviceContext:        contextJSON,
+		CreatedAt:            time.Now().Format(time.RFC3339),
+	}
+
+	// 获取现有记忆列表
+	memories := s.getStatusFeedbackMemory(ctx, userID)
+
+	// 添加新记忆（最多保留20条）
+	memories = append([]*model.StatusMemoryEntry{entry}, memories...)
+	if len(memories) > 20 {
+		memories = memories[:20]
+	}
+
+	// 保存到 Redis
+	data, err := json.Marshal(memories)
+	if err != nil {
+		return fmt.Errorf("marshal feedback memory: %w", err)
+	}
+
+	key := fmt.Sprintf(keyStatusFeedback, userID)
+	if err := s.redisClient.Set(ctx, key, data, feedbackTTL); err != nil {
+		return fmt.Errorf("save feedback to redis: %w", err)
+	}
+
+	// 同时更新首页状态（user_analysis_cache 表）
+	isAvailable := req.CorrectedIsAvailable != nil && *req.CorrectedIsAvailable
+	availabilityStatus := "忙碌"
+	if isAvailable {
+		availabilityStatus = "有空"
+	}
+
+	analysisResult := &model.AnalysisResult{
+		Availability: model.AvailabilityAnalysis{
+			Status:      availabilityStatus,
+			Probability: 100,
+			Reason:      "用户手动设置",
+			Confidence:  "high",
+		},
+		LifeStatus: model.LifeStatus{
+			Emoji:       req.CorrectedEmoji,
+			Label:       req.CorrectedActivity,
+			Description: req.CorrectedPlace,
+		},
+		UpdatedAt: time.Now(),
+		IsAIGuess: false, // 用户确认的状态，不是 AI 猜测
+	}
+
+	if s.memoryRepo != nil {
+		if err := s.memoryRepo.SaveAnalysisCache(ctx, userID, analysisResult); err != nil {
+			fmt.Printf("[SaveStatusFeedback] 更新首页状态失败 user=%s error=%v\n", userID, err)
+			// 不返回错误，反馈已保存成功
+		} else {
+			fmt.Printf("[SaveStatusFeedback] 首页状态已更新 user=%s emoji=%s status=%s is_available=%v\n",
+				userID, req.CorrectedEmoji, req.CorrectedActivity, isAvailable)
+		}
+	}
+
+	return nil
+}
+
+// getCachedSensorData 获取缓存的传感器数据
+func (s *AgentService) getCachedSensorData(ctx context.Context, userID string) *model.ExtendedStatusReportRequest {
+	key := fmt.Sprintf(keyUserStatus, userID)
+	data, err := s.redisClient.GetBytes(ctx, key)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+
+	var status model.UserRealtimeStatus
+	if err := json.Unmarshal(data, &status); err != nil {
+		return nil
+	}
+
+	// 转换为 ExtendedStatusReportRequest
+	return &model.ExtendedStatusReportRequest{
+		Screen:   &status.Screen,
+		Location: &status.Location,
+	}
+}
+
+// getStatusFeedbackMemory 获取状态反馈记忆
+func (s *AgentService) getStatusFeedbackMemory(ctx context.Context, userID string) []*model.StatusMemoryEntry {
+	key := fmt.Sprintf(keyStatusFeedback, userID)
+	data, err := s.redisClient.GetBytes(ctx, key)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+
+	var memories []*model.StatusMemoryEntry
+	if err := json.Unmarshal(data, &memories); err != nil {
+		return nil
+	}
+
+	return memories
+}
+
+// getWeekdayNameCN 获取中文星期名
+func getWeekdayNameCN(w time.Weekday) string {
+	names := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
+	return names[w]
 }

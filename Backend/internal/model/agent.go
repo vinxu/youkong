@@ -147,3 +147,39 @@ type GeoPoint struct {
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
 }
+
+// CurrentStatusInference 当下状态推理结果
+type CurrentStatusInference struct {
+	Emoji        string `json:"emoji"`                   // 1-3个emoji，如"🎮"或"🎮🎧"
+	Place        string `json:"place,omitempty"`         // 可选，如"家里"、"公司"、"咖啡厅"
+	Activity     string `json:"activity"`                // 活动描述，如"打游戏"、"休息中"
+	IsAvailable  bool   `json:"is_available"`            // 是否有空
+	DurationHint string `json:"duration_hint,omitempty"` // 预计持续时长，如"约2小时"、"半天"
+	Confidence   string `json:"confidence"`              // 置信度：high/medium/low
+	InferredAt   int64  `json:"inferred_at"`             // 推理时间戳（毫秒）
+	Reasoning    string `json:"reasoning,omitempty"`     // 推理依据（内部使用，可选返回）
+}
+
+// StatusFeedbackRequest 状态反馈请求（用户修正状态）
+type StatusFeedbackRequest struct {
+	OriginalEmoji       string `json:"original_emoji,omitempty"`
+	OriginalActivity    string `json:"original_activity,omitempty"`
+	CorrectedEmoji      string `json:"corrected_emoji" binding:"required"`
+	CorrectedActivity   string `json:"corrected_activity" binding:"required"`
+	CorrectedPlace      string `json:"corrected_place,omitempty"`
+	CorrectedIsAvailable *bool `json:"corrected_is_available,omitempty"`
+}
+
+// StatusMemoryEntry 状态记忆条目（存储用户修正历史，用于改进推理）
+type StatusMemoryEntry struct {
+	ID              int64  `json:"id" db:"id"`
+	UserID          string `json:"user_id" db:"user_id"`
+	OriginalEmoji   string `json:"original_emoji" db:"original_emoji"`
+	OriginalActivity string `json:"original_activity" db:"original_activity"`
+	CorrectedEmoji  string `json:"corrected_emoji" db:"corrected_emoji"`
+	CorrectedActivity string `json:"corrected_activity" db:"corrected_activity"`
+	CorrectedPlace  string `json:"corrected_place" db:"corrected_place"`
+	CorrectedIsAvailable bool `json:"corrected_is_available" db:"corrected_is_available"`
+	DeviceContext   string `json:"device_context" db:"device_context"` // JSON: 当时的设备状态
+	CreatedAt       string `json:"created_at" db:"created_at"`
+}

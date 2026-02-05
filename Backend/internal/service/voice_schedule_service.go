@@ -45,9 +45,6 @@ type VoiceScheduleService struct {
 	llmAdapter   *agent.LLMAdapter
 	toolRegistry *agent.ToolRegistry
 
-	// v2 架构改进：意图分发器
-	intentDispatcher *IntentDispatcher
-
 	// v3 架构改进：恢复协调器（优雅降级）
 	recoveryOrchestrator *RecoveryOrchestrator
 }
@@ -78,8 +75,6 @@ func NewVoiceScheduleService(
 			APIKey: llmAPIKey,
 			Model:  "qwen-max",
 		})
-		// v2 架构改进：创建意图分发器
-		svc.intentDispatcher = NewIntentDispatcher(svc.llmAdapter, svc.toolRegistry)
 		// v3 架构改进：创建恢复协调器
 		svc.recoveryOrchestrator = NewRecoveryOrchestrator(svc.llmAdapter)
 	}
@@ -877,108 +872,7 @@ func (s *VoiceScheduleService) analyzeWithLLMAndContext(
 		compressedCtx = &model.CompressedUserContext{}
 	}
 
-	// ============ 第一步：使用意图分发器识别意图（v2 架构改进）============
-	// 特别处理 update_status vs create 的混淆问题
-	if s.intentDispatcher != nil {
-		intentResult, err := s.intentDispatcher.Dispatch(ctx, session, transcript)
-		if err != nil {
-			fmt.Printf("[VoiceSchedule] IntentDispatcher 调用失败: %v，回退到 JSON 模式\n", err)
-		} else if intentResult != nil && intentResult.Confidence >= 0.7 {
-			fmt.Printf("[VoiceSchedule] IntentDispatcher 识别成功: action=%s, confidence=%.2f, thinking=%v\n",
-				intentResult.Action, intentResult.Confidence, intentResult.Thinking)
-
-			// 根据意图类型转换为 LLMVoiceAnalysisResult
-			switch intentResult.Action {
-			case "update_status":
-				// 从 entities 中提取状态信息
-				result := s.buildUpdateStatusResult(intentResult)
-				if result != nil {
-					fmt.Printf("[VoiceSchedule] 返回 update_status 结果: %s %s\n",
-						result.CurrentStatus.Emoji, result.CurrentStatus.Status)
-					return result, nil
-				}
-				fmt.Println("[VoiceSchedule] update_status 但无法提取状态，回退到 JSON 模式")
-
-			case "confirm":
-				return &model.LLMVoiceAnalysisResult{
-					Action:    "tool_confirm",
-					Reasoning: intentResult.Thinking,
-				}, nil
-
-			case "cancel":
-				return &model.LLMVoiceAnalysisResult{
-					Action:    "tool_cancel",
-					Reasoning: intentResult.Thinking,
-				}, nil
-
-			case "query":
-				return &model.LLMVoiceAnalysisResult{
-					Action:     "query",
-					TargetDate: intentResult.TargetDate,
-					Reasoning:  intentResult.Thinking,
-				}, nil
-
-			case "undo":
-				// v3 新增：撤销意图
-				return &model.LLMVoiceAnalysisResult{
-					Action:    "tool_undo",
-					Reasoning: intentResult.Thinking,
-				}, nil
-
-			case "delete":
-				// v3 新增：删除意图 - 需要进入确认流程
-				fmt.Printf("[VoiceSchedule] IntentDispatcher 识别为 delete 意图\n")
-				return &model.LLMVoiceAnalysisResult{
-					Action:      "delete",
-					Operation:   "delete",
-					TargetDate:  intentResult.TargetDate,
-					TargetIndex: s.extractTargetIndex(intentResult.Entities),
-					Reasoning:   intentResult.Thinking,
-				}, nil
-
-			case "modify":
-				// v3 新增：修改意图 - 需要进入确认流程
-				fmt.Printf("[VoiceSchedule] IntentDispatcher 识别为 modify 意图\n")
-				return &model.LLMVoiceAnalysisResult{
-					Action:      "modify",
-					Operation:   "modify",
-					TargetDate:  intentResult.TargetDate,
-					TargetIndex: s.extractTargetIndex(intentResult.Entities),
-					Reasoning:   intentResult.Thinking,
-				}, nil
-
-			case "replace":
-				// v3 新增：替换意图
-				fmt.Printf("[VoiceSchedule] IntentDispatcher 识别为 replace 意图\n")
-				return &model.LLMVoiceAnalysisResult{
-					Action:     "replace",
-					Operation:  "replace",
-					TargetDate: intentResult.TargetDate,
-					Reasoning:  intentResult.Thinking,
-				}, nil
-
-			case "create":
-				// create 意图继续到 JSON 模式处理，以获取完整的时刻表数据
-				fmt.Println("[VoiceSchedule] 意图是 create，继续到 JSON 模式获取时刻表详情")
-
-			case "chat":
-				// 聊天意图，但仍然需要 LLM 生成回复
-				// 继续到 JSON 模式处理
-				fmt.Println("[VoiceSchedule] 意图是 chat，继续到 JSON 模式生成回复")
-
-			default:
-				// 【优雅降级】IntentDispatcher 返回了未明确处理的 action
-				// 记录日志，继续到 JSON 模式尝试处理
-				fmt.Printf("[VoiceSchedule] IntentDispatcher 返回未处理的 action=%s，尝试 JSON 模式\n", intentResult.Action)
-				// 不 return，继续往下走到 JSON 模式
-			}
-		} else if intentResult != nil {
-			fmt.Printf("[VoiceSchedule] IntentDispatcher 置信度不足: action=%s, confidence=%.2f，回退到 JSON 模式\n",
-				intentResult.Action, intentResult.Confidence)
-		}
-	}
-
-	// ============ 第一步（备用）：尝试用 Tool Calling 识别简单意图 ============
+	// ============ 第一步：尝试用 Tool Calling 识别简单意图 ============
 	// 当用户说"确认"、"取消"等简单指令时，优先使用 Tool Calling
 	if s.llmAdapter != nil && s.isSimpleIntent(transcript) {
 		result, handled := s.tryToolCalling(ctx, userID, transcript, session)

@@ -12,8 +12,9 @@ import (
 
 // ModelTestService 模型对比测试服务
 type ModelTestService struct {
-	qwenAPIKey string
-	kimiAPIKey string
+	qwenAPIKey   string
+	kimiAPIKey   string
+	claudeAPIKey string
 
 	// 测试用例
 	testCases []TestCase
@@ -55,13 +56,15 @@ type ToolCallInfo struct {
 
 // ModelComparisonReport 模型对比报告
 type ModelComparisonReport struct {
-	TestTime       time.Time              `json:"test_time"`
-	TotalCases     int                    `json:"total_cases"`
-	QwenResults    []TestResult           `json:"qwen_results"`
-	KimiResults    []TestResult           `json:"kimi_results"`
-	QwenSummary    ModelSummary           `json:"qwen_summary"`
-	KimiSummary    ModelSummary           `json:"kimi_summary"`
-	Recommendation string                 `json:"recommendation"`
+	TestTime        time.Time    `json:"test_time"`
+	TotalCases      int          `json:"total_cases"`
+	QwenResults     []TestResult `json:"qwen_results"`
+	KimiResults     []TestResult `json:"kimi_results"`
+	ClaudeResults   []TestResult `json:"claude_results"`
+	QwenSummary     ModelSummary `json:"qwen_summary"`
+	KimiSummary     ModelSummary `json:"kimi_summary"`
+	ClaudeSummary   ModelSummary `json:"claude_summary"`
+	Recommendation  string       `json:"recommendation"`
 }
 
 // ModelSummary 模型测试汇总
@@ -79,10 +82,11 @@ type ModelSummary struct {
 }
 
 // NewModelTestService 创建模型测试服务
-func NewModelTestService(qwenAPIKey, kimiAPIKey string) *ModelTestService {
+func NewModelTestService(qwenAPIKey, kimiAPIKey, claudeAPIKey string) *ModelTestService {
 	svc := &ModelTestService{
-		qwenAPIKey: qwenAPIKey,
-		kimiAPIKey: kimiAPIKey,
+		qwenAPIKey:   qwenAPIKey,
+		kimiAPIKey:   kimiAPIKey,
+		claudeAPIKey: claudeAPIKey,
 	}
 	svc.initTestCases()
 	return svc
@@ -202,6 +206,8 @@ func (s *ModelTestService) RunSingleTest(ctx context.Context, testCase TestCase,
 		apiKey = s.kimiAPIKey
 	case agent.ProviderQwen:
 		apiKey = s.qwenAPIKey
+	case agent.ProviderClaude:
+		apiKey = s.claudeAPIKey
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", provider)
 	}
@@ -289,22 +295,41 @@ func (s *ModelTestService) RunComparison(ctx context.Context) (*ModelComparisonR
 
 	// 测试 Qwen
 	if s.qwenAPIKey != "" {
+		fmt.Println("\n🔄 开始测试 Qwen...")
 		qwenResults, err := s.RunAllTests(ctx, agent.ProviderQwen)
 		if err != nil {
-			return nil, fmt.Errorf("Qwen tests failed: %w", err)
+			fmt.Printf("⚠️ Qwen tests failed: %v\n", err)
+		} else {
+			report.QwenResults = qwenResults
+			report.QwenSummary = s.summarizeResults(qwenResults, "qwen")
+			fmt.Printf("✅ Qwen 测试完成: %d/%d 成功\n", report.QwenSummary.SuccessCount, report.QwenSummary.TotalTests)
 		}
-		report.QwenResults = qwenResults
-		report.QwenSummary = s.summarizeResults(qwenResults, "qwen")
 	}
 
 	// 测试 Kimi
 	if s.kimiAPIKey != "" {
+		fmt.Println("\n🔄 开始测试 Kimi...")
 		kimiResults, err := s.RunAllTests(ctx, agent.ProviderKimi)
 		if err != nil {
-			return nil, fmt.Errorf("Kimi tests failed: %w", err)
+			fmt.Printf("⚠️ Kimi tests failed: %v\n", err)
+		} else {
+			report.KimiResults = kimiResults
+			report.KimiSummary = s.summarizeResults(kimiResults, "kimi")
+			fmt.Printf("✅ Kimi 测试完成: %d/%d 成功\n", report.KimiSummary.SuccessCount, report.KimiSummary.TotalTests)
 		}
-		report.KimiResults = kimiResults
-		report.KimiSummary = s.summarizeResults(kimiResults, "kimi")
+	}
+
+	// 测试 Claude
+	if s.claudeAPIKey != "" {
+		fmt.Println("\n🔄 开始测试 Claude...")
+		claudeResults, err := s.RunAllTests(ctx, agent.ProviderClaude)
+		if err != nil {
+			fmt.Printf("⚠️ Claude tests failed: %v\n", err)
+		} else {
+			report.ClaudeResults = claudeResults
+			report.ClaudeSummary = s.summarizeResults(claudeResults, "claude")
+			fmt.Printf("✅ Claude 测试完成: %d/%d 成功\n", report.ClaudeSummary.SuccessCount, report.ClaudeSummary.TotalTests)
+		}
 	}
 
 	// 生成推荐
@@ -486,17 +511,65 @@ func (s *ModelTestService) calculateSpeedScore(avgMs int64) float64 {
 
 // generateRecommendation 生成推荐建议
 func (s *ModelTestService) generateRecommendation(report *ModelComparisonReport) string {
-	qwenScore := report.QwenSummary.OverallScore
-	kimiScore := report.KimiSummary.OverallScore
+	// 收集有效的模型得分
+	type modelScore struct {
+		name  string
+		score float64
+	}
+	var scores []modelScore
 
-	diff := qwenScore - kimiScore
+	if report.QwenSummary.TotalTests > 0 {
+		scores = append(scores, modelScore{"Qwen", report.QwenSummary.OverallScore})
+	}
+	if report.KimiSummary.TotalTests > 0 {
+		scores = append(scores, modelScore{"Kimi", report.KimiSummary.OverallScore})
+	}
+	if report.ClaudeSummary.TotalTests > 0 {
+		scores = append(scores, modelScore{"Claude", report.ClaudeSummary.OverallScore})
+	}
 
+	if len(scores) == 0 {
+		return "未能完成任何模型测试"
+	}
+
+	if len(scores) == 1 {
+		return fmt.Sprintf("仅测试了 %s（综合得分 %.1f）", scores[0].name, scores[0].score)
+	}
+
+	// 找出最高分和最低分
+	best := scores[0]
+	for _, s := range scores[1:] {
+		if s.score > best.score {
+			best = s
+		}
+	}
+
+	// 构建得分列表字符串
+	var scoreStrs []string
+	for _, s := range scores {
+		scoreStrs = append(scoreStrs, fmt.Sprintf("%s: %.1f", s.name, s.score))
+	}
+
+	// 判断差异
+	var secondBest modelScore
+	for _, s := range scores {
+		if s.name != best.name {
+			if secondBest.name == "" || s.score > secondBest.score {
+				secondBest = s
+			}
+		}
+	}
+
+	diff := best.score - secondBest.score
 	if diff > 10 {
-		return fmt.Sprintf("推荐使用 Qwen（综合得分 %.1f vs %.1f）：工具调用准确率和响应质量更优", qwenScore, kimiScore)
-	} else if diff < -10 {
-		return fmt.Sprintf("推荐使用 Kimi（综合得分 %.1f vs %.1f）：工具调用准确率和响应质量更优", kimiScore, qwenScore)
+		return fmt.Sprintf("推荐使用 %s（综合得分 %.1f）：显著优于其他模型。得分对比：%s",
+			best.name, best.score, strings.Join(scoreStrs, ", "))
+	} else if diff > 5 {
+		return fmt.Sprintf("推荐使用 %s（综合得分 %.1f）：略优于其他模型。得分对比：%s",
+			best.name, best.score, strings.Join(scoreStrs, ", "))
 	} else {
-		return fmt.Sprintf("两者表现相近（Qwen: %.1f, Kimi: %.1f），可根据具体场景选择", qwenScore, kimiScore)
+		return fmt.Sprintf("多个模型表现相近，可根据响应速度和成本选择。得分对比：%s",
+			strings.Join(scoreStrs, ", "))
 	}
 }
 
@@ -504,32 +577,126 @@ func (s *ModelTestService) generateRecommendation(report *ModelComparisonReport)
 func (s *ModelTestService) GenerateMarkdownReport(report *ModelComparisonReport) string {
 	var sb strings.Builder
 
-	sb.WriteString("# Qwen vs Kimi 2.5 模型对比测试报告\n\n")
-	sb.WriteString(fmt.Sprintf("## 测试概要\n"))
+	// 收集有效的模型名称
+	var modelNames []string
+	if report.QwenSummary.TotalTests > 0 {
+		modelNames = append(modelNames, fmt.Sprintf("Qwen (%s)", report.QwenSummary.Model))
+	}
+	if report.KimiSummary.TotalTests > 0 {
+		modelNames = append(modelNames, fmt.Sprintf("Kimi (%s)", report.KimiSummary.Model))
+	}
+	if report.ClaudeSummary.TotalTests > 0 {
+		modelNames = append(modelNames, fmt.Sprintf("Claude (%s)", report.ClaudeSummary.Model))
+	}
+
+	sb.WriteString("# 语音时刻表 Agent 模型对比测试报告\n\n")
+	sb.WriteString("## 测试概要\n")
 	sb.WriteString(fmt.Sprintf("- **测试时间**: %s\n", report.TestTime.Format("2006-01-02 15:04:05")))
 	sb.WriteString(fmt.Sprintf("- **测试用例数**: %d 个\n", report.TotalCases))
-	sb.WriteString(fmt.Sprintf("- **测试模型**: Qwen (%s) vs Kimi (%s)\n\n", report.QwenSummary.Model, report.KimiSummary.Model))
+	sb.WriteString(fmt.Sprintf("- **测试模型**: %s\n\n", strings.Join(modelNames, " vs ")))
 
-	// 总分对比
+	// 参数对齐说明
+	sb.WriteString("### 测试参数对齐\n\n")
+	sb.WriteString("| 参数 | 值 | 说明 |\n")
+	sb.WriteString("|------|-----|------|\n")
+	sb.WriteString("| temperature | 0.7 | 控制输出随机性 |\n")
+	sb.WriteString("| max_tokens | 1024 | 最大输出长度 |\n")
+	sb.WriteString("| system_prompt | 统一 | 所有模型使用相同提示词 |\n")
+	sb.WriteString("| tools | 4个 | get_schedule, update_schedule, update_current_status, save_schedule |\n\n")
+
+	// 总分对比 - 动态生成表头
 	sb.WriteString("## 一、总分对比\n\n")
-	sb.WriteString("| 维度 | Qwen | Kimi | 差异 |\n")
-	sb.WriteString("|------|------|------|------|\n")
-	sb.WriteString(fmt.Sprintf("| 成功率 | %.1f%% | %.1f%% | %.1f%% |\n",
-		float64(report.QwenSummary.SuccessCount)/float64(report.QwenSummary.TotalTests)*100,
-		float64(report.KimiSummary.SuccessCount)/float64(report.KimiSummary.TotalTests)*100,
-		float64(report.QwenSummary.SuccessCount-report.KimiSummary.SuccessCount)/float64(report.QwenSummary.TotalTests)*100))
-	sb.WriteString(fmt.Sprintf("| Tool Calling 准确率 | %.1f%% | %.1f%% | %.1f%% |\n",
-		report.QwenSummary.ToolCallAccuracy, report.KimiSummary.ToolCallAccuracy,
-		report.QwenSummary.ToolCallAccuracy-report.KimiSummary.ToolCallAccuracy))
-	sb.WriteString(fmt.Sprintf("| 平均响应时间 | %dms | %dms | %dms |\n",
-		report.QwenSummary.AvgResponseTimeMs, report.KimiSummary.AvgResponseTimeMs,
-		report.QwenSummary.AvgResponseTimeMs-report.KimiSummary.AvgResponseTimeMs))
-	sb.WriteString(fmt.Sprintf("| 平均自然度 | %.1f | %.1f | %.1f |\n",
-		report.QwenSummary.AvgNaturalnessScore, report.KimiSummary.AvgNaturalnessScore,
-		report.QwenSummary.AvgNaturalnessScore-report.KimiSummary.AvgNaturalnessScore))
-	sb.WriteString(fmt.Sprintf("| **综合评分** | **%.1f** | **%.1f** | **%.1f** |\n\n",
-		report.QwenSummary.OverallScore, report.KimiSummary.OverallScore,
-		report.QwenSummary.OverallScore-report.KimiSummary.OverallScore))
+
+	// 构建表头
+	sb.WriteString("| 维度 |")
+	if report.QwenSummary.TotalTests > 0 {
+		sb.WriteString(" Qwen |")
+	}
+	if report.KimiSummary.TotalTests > 0 {
+		sb.WriteString(" Kimi |")
+	}
+	if report.ClaudeSummary.TotalTests > 0 {
+		sb.WriteString(" Claude |")
+	}
+	sb.WriteString("\n")
+
+	// 表头分隔
+	sb.WriteString("|------|")
+	if report.QwenSummary.TotalTests > 0 {
+		sb.WriteString("------|")
+	}
+	if report.KimiSummary.TotalTests > 0 {
+		sb.WriteString("------|")
+	}
+	if report.ClaudeSummary.TotalTests > 0 {
+		sb.WriteString("------|")
+	}
+	sb.WriteString("\n")
+
+	// 成功率
+	sb.WriteString("| 成功率 |")
+	if report.QwenSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" %.1f%% |", float64(report.QwenSummary.SuccessCount)/float64(report.QwenSummary.TotalTests)*100))
+	}
+	if report.KimiSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" %.1f%% |", float64(report.KimiSummary.SuccessCount)/float64(report.KimiSummary.TotalTests)*100))
+	}
+	if report.ClaudeSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" %.1f%% |", float64(report.ClaudeSummary.SuccessCount)/float64(report.ClaudeSummary.TotalTests)*100))
+	}
+	sb.WriteString("\n")
+
+	// Tool Calling 准确率
+	sb.WriteString("| Tool Calling 准确率 |")
+	if report.QwenSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" %.1f%% |", report.QwenSummary.ToolCallAccuracy))
+	}
+	if report.KimiSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" %.1f%% |", report.KimiSummary.ToolCallAccuracy))
+	}
+	if report.ClaudeSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" %.1f%% |", report.ClaudeSummary.ToolCallAccuracy))
+	}
+	sb.WriteString("\n")
+
+	// 平均响应时间
+	sb.WriteString("| 平均响应时间 |")
+	if report.QwenSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" %dms |", report.QwenSummary.AvgResponseTimeMs))
+	}
+	if report.KimiSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" %dms |", report.KimiSummary.AvgResponseTimeMs))
+	}
+	if report.ClaudeSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" %dms |", report.ClaudeSummary.AvgResponseTimeMs))
+	}
+	sb.WriteString("\n")
+
+	// 平均自然度
+	sb.WriteString("| 平均自然度 |")
+	if report.QwenSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" %.1f |", report.QwenSummary.AvgNaturalnessScore))
+	}
+	if report.KimiSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" %.1f |", report.KimiSummary.AvgNaturalnessScore))
+	}
+	if report.ClaudeSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" %.1f |", report.ClaudeSummary.AvgNaturalnessScore))
+	}
+	sb.WriteString("\n")
+
+	// 综合评分
+	sb.WriteString("| **综合评分** |")
+	if report.QwenSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" **%.1f** |", report.QwenSummary.OverallScore))
+	}
+	if report.KimiSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" **%.1f** |", report.KimiSummary.OverallScore))
+	}
+	if report.ClaudeSummary.TotalTests > 0 {
+		sb.WriteString(fmt.Sprintf(" **%.1f** |", report.ClaudeSummary.OverallScore))
+	}
+	sb.WriteString("\n\n")
 
 	// 分类详细结果
 	sb.WriteString("## 二、分类详细评估\n\n")
@@ -547,15 +714,24 @@ func (s *ModelTestService) GenerateMarkdownReport(report *ModelComparisonReport)
 	}
 
 	for _, cat := range categories {
-		qwenCat := s.filterResultsByCategory(report.QwenResults, cat.name)
-		kimiCat := s.filterResultsByCategory(report.KimiResults, cat.name)
-
-		qwenAcc := s.calculateCategoryAccuracy(qwenCat)
-		kimiAcc := s.calculateCategoryAccuracy(kimiCat)
-
 		sb.WriteString(fmt.Sprintf("### %s\n", cat.label))
-		sb.WriteString(fmt.Sprintf("- Qwen 准确率: %.1f%% (%d/%d)\n", qwenAcc, s.countCorrect(qwenCat), len(qwenCat)))
-		sb.WriteString(fmt.Sprintf("- Kimi 准确率: %.1f%% (%d/%d)\n\n", kimiAcc, s.countCorrect(kimiCat), len(kimiCat)))
+
+		if report.QwenSummary.TotalTests > 0 {
+			qwenCat := s.filterResultsByCategory(report.QwenResults, cat.name)
+			qwenAcc := s.calculateCategoryAccuracy(qwenCat)
+			sb.WriteString(fmt.Sprintf("- Qwen 准确率: %.1f%% (%d/%d)\n", qwenAcc, s.countCorrect(qwenCat), len(qwenCat)))
+		}
+		if report.KimiSummary.TotalTests > 0 {
+			kimiCat := s.filterResultsByCategory(report.KimiResults, cat.name)
+			kimiAcc := s.calculateCategoryAccuracy(kimiCat)
+			sb.WriteString(fmt.Sprintf("- Kimi 准确率: %.1f%% (%d/%d)\n", kimiAcc, s.countCorrect(kimiCat), len(kimiCat)))
+		}
+		if report.ClaudeSummary.TotalTests > 0 {
+			claudeCat := s.filterResultsByCategory(report.ClaudeResults, cat.name)
+			claudeAcc := s.calculateCategoryAccuracy(claudeCat)
+			sb.WriteString(fmt.Sprintf("- Claude 准确率: %.1f%% (%d/%d)\n", claudeAcc, s.countCorrect(claudeCat), len(claudeCat)))
+		}
+		sb.WriteString("\n")
 	}
 
 	// 典型案例对比
@@ -564,26 +740,124 @@ func (s *ModelTestService) GenerateMarkdownReport(report *ModelComparisonReport)
 	for _, caseID := range typicalCases {
 		qwenResult := s.findResultByID(report.QwenResults, caseID)
 		kimiResult := s.findResultByID(report.KimiResults, caseID)
+		claudeResult := s.findResultByID(report.ClaudeResults, caseID)
 
-		if qwenResult == nil || kimiResult == nil {
+		// 找到第一个有效结果获取测试用例信息
+		var testCase *TestCase
+		if qwenResult != nil {
+			testCase = &qwenResult.TestCase
+		} else if kimiResult != nil {
+			testCase = &kimiResult.TestCase
+		} else if claudeResult != nil {
+			testCase = &claudeResult.TestCase
+		}
+
+		if testCase == nil {
 			continue
 		}
 
-		sb.WriteString(fmt.Sprintf("### 案例 %d: %s\n", caseID, qwenResult.TestCase.Description))
-		sb.WriteString(fmt.Sprintf("**输入**: %s\n\n", qwenResult.TestCase.Input))
+		sb.WriteString(fmt.Sprintf("### 案例 %d: %s\n", caseID, testCase.Description))
+		sb.WriteString(fmt.Sprintf("**输入**: %s\n\n", testCase.Input))
+
+		// 动态表头
 		sb.WriteString("| 模型 | 工具调用 | 响应时间 | 评分 |\n")
 		sb.WriteString("|------|---------|---------|------|\n")
-		sb.WriteString(fmt.Sprintf("| Qwen | %s | %dms | %.1f |\n",
-			s.formatToolCalls(qwenResult.ToolCalls), qwenResult.TotalMs, qwenResult.ScoreOverall))
-		sb.WriteString(fmt.Sprintf("| Kimi | %s | %dms | %.1f |\n\n",
-			s.formatToolCalls(kimiResult.ToolCalls), kimiResult.TotalMs, kimiResult.ScoreOverall))
+
+		if qwenResult != nil {
+			sb.WriteString(fmt.Sprintf("| Qwen | %s | %dms | %.1f |\n",
+				s.formatToolCalls(qwenResult.ToolCalls), qwenResult.TotalMs, qwenResult.ScoreOverall))
+		}
+		if kimiResult != nil {
+			sb.WriteString(fmt.Sprintf("| Kimi | %s | %dms | %.1f |\n",
+				s.formatToolCalls(kimiResult.ToolCalls), kimiResult.TotalMs, kimiResult.ScoreOverall))
+		}
+		if claudeResult != nil {
+			sb.WriteString(fmt.Sprintf("| Claude | %s | %dms | %.1f |\n",
+				s.formatToolCalls(claudeResult.ToolCalls), claudeResult.TotalMs, claudeResult.ScoreOverall))
+		}
+		sb.WriteString("\n")
 	}
 
+	// 响应时间分布
+	sb.WriteString("## 四、响应时间分布\n\n")
+	sb.WriteString("| 时间区间 |")
+	if report.QwenSummary.TotalTests > 0 {
+		sb.WriteString(" Qwen |")
+	}
+	if report.KimiSummary.TotalTests > 0 {
+		sb.WriteString(" Kimi |")
+	}
+	if report.ClaudeSummary.TotalTests > 0 {
+		sb.WriteString(" Claude |")
+	}
+	sb.WriteString("\n")
+	sb.WriteString("|---------|")
+	if report.QwenSummary.TotalTests > 0 {
+		sb.WriteString("------|")
+	}
+	if report.KimiSummary.TotalTests > 0 {
+		sb.WriteString("------|")
+	}
+	if report.ClaudeSummary.TotalTests > 0 {
+		sb.WriteString("------|")
+	}
+	sb.WriteString("\n")
+
+	// 统计各时间区间
+	timeRanges := []struct {
+		label string
+		min   int64
+		max   int64
+	}{
+		{"< 1s", 0, 1000},
+		{"1-2s", 1000, 2000},
+		{"2-3s", 2000, 3000},
+		{"3-5s", 3000, 5000},
+		{"> 5s", 5000, 999999},
+	}
+
+	for _, tr := range timeRanges {
+		sb.WriteString(fmt.Sprintf("| %s |", tr.label))
+		if report.QwenSummary.TotalTests > 0 {
+			count := s.countInTimeRange(report.QwenResults, tr.min, tr.max)
+			sb.WriteString(fmt.Sprintf(" %d |", count))
+		}
+		if report.KimiSummary.TotalTests > 0 {
+			count := s.countInTimeRange(report.KimiResults, tr.min, tr.max)
+			sb.WriteString(fmt.Sprintf(" %d |", count))
+		}
+		if report.ClaudeSummary.TotalTests > 0 {
+			count := s.countInTimeRange(report.ClaudeResults, tr.min, tr.max)
+			sb.WriteString(fmt.Sprintf(" %d |", count))
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+
 	// 结论
-	sb.WriteString("## 四、结论与建议\n\n")
-	sb.WriteString(fmt.Sprintf("### %s\n\n", report.Recommendation))
+	sb.WriteString("## 五、结论与建议\n\n")
+	sb.WriteString(fmt.Sprintf("%s\n\n", report.Recommendation))
+
+	// 综合评分计算说明
+	sb.WriteString("### 评分计算说明\n\n")
+	sb.WriteString("综合评分 = Tool Calling 准确率 × 0.4 + 自然度 × 0.3 + 响应速度得分 × 0.3\n\n")
+	sb.WriteString("响应速度得分：\n")
+	sb.WriteString("- ≤1s: 100分\n")
+	sb.WriteString("- 1-10s: 线性递减\n")
+	sb.WriteString("- ≥10s: 0分\n")
 
 	return sb.String()
+}
+
+// countInTimeRange 统计在指定时间范围内的结果数量
+func (s *ModelTestService) countInTimeRange(results []TestResult, minMs, maxMs int64) int {
+	count := 0
+	for _, r := range results {
+		if r.TotalMs >= minMs && r.TotalMs < maxMs {
+			count++
+		}
+	}
+	return count
 }
 
 // 辅助函数

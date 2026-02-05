@@ -22,13 +22,14 @@ type ScheduleToolDeps struct {
 	CurrentSessionID string
 }
 
-// V4ScheduleTools 返回 V4 架构使用的 4 个核心工具
+// V4ScheduleTools 返回 V4 架构使用的 5 个核心工具
 func V4ScheduleTools() []*Tool {
 	return []*Tool{
 		v4GetScheduleTool(),
 		v4UpdateScheduleTool(),
 		v4UpdateCurrentStatusTool(),
 		v4SaveScheduleTool(),
+		v4UpdatePreferenceTool(),
 	}
 }
 
@@ -36,26 +37,37 @@ func V4ScheduleTools() []*Tool {
 func v4GetScheduleTool() *Tool {
 	return &Tool{
 		Name: "get_schedule",
-		Description: `获取用户某一天的时刻表安排。
+		Description: `获取用户的时刻表安排。
 
 【何时调用】
 - 用户问"我今天有什么安排"、"查看时刻表"、"看看明天"
-- 用户想了解某天的已有安排
+- 用户问"调出来看看"、"帮我查一下安排"
+- 用户问"从现在到明天有什么安排"（使用时间范围过滤）
+- 用户想了解某天或某个时间范围的已有安排
 
 【何时不调用】
 - 用户描述新安排时（应该用 update_schedule）
 - 用户确认保存时（应该用 save_schedule）
-- 你已经在系统提示中看到了用户时刻表（不需要重复获取）
 
 【参数示例】
 - 获取今天：{"date": "2024-01-15"} 或不传 date
-- 获取明天：{"date": "2024-01-16"}`,
+- 获取明天：{"date": "2024-01-16"}
+- 查询时间范围：{"date": "2024-01-15", "start_time": "14:00", "end_time": "18:00"}
+- 从现在到明天中午：{"date": "2024-01-15", "start_time": "15:30"} + {"date": "2024-01-16", "end_time": "12:00"}`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
 				"date": {
 					Type:        "string",
 					Description: "日期，YYYY-MM-DD 格式。不填则获取今天的时刻表。",
+				},
+				"start_time": {
+					Type:        "string",
+					Description: "可选，开始时间 HH:MM 格式。用于过滤只显示该时间之后的安排。",
+				},
+				"end_time": {
+					Type:        "string",
+					Description: "可选，结束时间 HH:MM 格式。用于过滤只显示该时间之前的安排。",
 				},
 			},
 		},
@@ -199,6 +211,38 @@ func v4SaveScheduleTool() *Tool {
 					Description: "可见性设置。默认 all_friends",
 					Enum:        []string{"all_friends", "circles", "private"},
 					Default:     "all_friends",
+				},
+			},
+		},
+	}
+}
+
+// v4UpdatePreferenceTool 更新用户偏好设置工具
+func v4UpdatePreferenceTool() *Tool {
+	return &Tool{
+		Name: "update_preference",
+		Description: `更新用户的时刻表显示偏好设置。
+
+【何时调用】
+- 用户说"过去的日程不要显示了"、"隐藏已过的安排"
+- 用户说"以后只显示未来的安排"
+- 用户要修改时刻表的默认可见性
+
+【参数示例】
+- 隐藏过去日程：{"hide_past_events": true}
+- 显示过去日程：{"hide_past_events": false}
+- 修改默认可见性：{"default_visibility": "private"}`,
+		Parameters: ToolParameters{
+			Type: "object",
+			Properties: map[string]ToolParam{
+				"hide_past_events": {
+					Type:        "boolean",
+					Description: "是否隐藏过去的日程。true=隐藏已过去的时段，false=显示所有时段。",
+				},
+				"default_visibility": {
+					Type:        "string",
+					Description: "时刻表默认可见性设置。",
+					Enum:        []string{"all_friends", "circles", "private"},
 				},
 			},
 		},

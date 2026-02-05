@@ -39,6 +39,7 @@ type FriendGridItem struct {
 	UpdatedAt    string `json:"updated_at"`
 	RelativeTime string `json:"relative_time"`
 	City         string `json:"city,omitempty"` // 城市名称（如"上海"、"北京"）
+	IsAvailable  bool   `json:"is_available"`   // 是否有空（用于高亮显示）
 }
 
 // GridResponse 宫格响应
@@ -93,6 +94,7 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 		emoji := "🤔"
 		status := "未知"
 		updatedAt := time.Now()
+		isAvailable := false
 
 		if analysis != nil {
 			emoji = analysis.LifeStatus.Emoji
@@ -106,6 +108,11 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 			if status == "" {
 				status = "未知"
 			}
+
+			// 判断是否有空（Availability.Status == "有空"）
+			if analysis.Availability.Status == "有空" {
+				isAvailable = true
+			}
 		}
 
 		friends = append(friends, FriendGridItem{
@@ -117,6 +124,7 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 			UpdatedAt:    updatedAt.Format(time.RFC3339),
 			RelativeTime: formatRelativeTime(updatedAt),
 			City:         cityMap[fid],
+			IsAvailable:  isAvailable,
 		})
 
 		// 最多显示 16 个（包括自己）
