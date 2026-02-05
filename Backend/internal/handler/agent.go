@@ -19,11 +19,12 @@ import (
 
 // AgentHandler Agent 处理器
 type AgentHandler struct {
-	agentService         *service.AgentService
-	memoryService        *service.MemoryService
-	voiceScheduleService *service.VoiceScheduleService
-	agentChatService     *service.AgentChatService
-	scheduleRepo         ScheduleRepositoryInterface
+	agentService           *service.AgentService
+	memoryService          *service.MemoryService
+	voiceScheduleService   *service.VoiceScheduleService
+	voiceScheduleServiceV4 *service.VoiceScheduleServiceV4 // V4 版本
+	agentChatService       *service.AgentChatService
+	scheduleRepo           ScheduleRepositoryInterface
 }
 
 // ScheduleRepositoryInterface 时刻表 Repository 接口
@@ -45,6 +46,11 @@ func NewAgentHandler(agentService *service.AgentService, memoryService *service.
 		agentChatService:     agentChatService,
 		scheduleRepo:         scheduleRepo,
 	}
+}
+
+// SetVoiceScheduleServiceV4 设置 V4 版本语音时刻表服务
+func (h *AgentHandler) SetVoiceScheduleServiceV4(svc *service.VoiceScheduleServiceV4) {
+	h.voiceScheduleServiceV4 = svc
 }
 
 // ReportStatus 上报状态（简化版，仅用于手动触发分析）
@@ -1148,6 +1154,66 @@ func (h *AgentHandler) VoiceScheduleText(c *gin.Context) {
 	if err != nil {
 		errEvent := model.VoiceScheduleEvent{
 			Type:    model.VSEventError,
+			Message: err.Error(),
+		}
+		data, _ := json.Marshal(errEvent)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+		return
+	}
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	w.Flush()
+}
+
+// VoiceScheduleTextV4 V4 版本语音时刻表文本接口
+// POST /api/agent/voice-schedule/v4/text
+// 新架构：简化的 while 循环 + 工具调用，不使用状态机
+func (h *AgentHandler) VoiceScheduleTextV4(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权"})
+		return
+	}
+
+	if h.voiceScheduleServiceV4 == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "V4 语音服务未启用"})
+		return
+	}
+
+	var req struct {
+		SessionID string `json:"session_id"` // 可选，用于继续会话
+		Text      string `json:"text" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误: text 必填"})
+		return
+	}
+
+	fmt.Printf("[VoiceScheduleTextV4] user=%s session=%s text=%s\n", userID, req.SessionID, req.Text)
+
+	// 设置 SSE 响应头
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	w := c.Writer
+
+	// 使用 V4 服务处理
+	_, err := h.voiceScheduleServiceV4.ProcessTextInput(c.Request.Context(), userID, req.SessionID, req.Text, func(event *model.V4Event) {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+	})
+
+	if err != nil {
+		errEvent := model.V4Event{
+			Type:    model.V4EventTypeError,
 			Message: err.Error(),
 		}
 		data, _ := json.Marshal(errEvent)

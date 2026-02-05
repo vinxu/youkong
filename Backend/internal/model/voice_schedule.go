@@ -598,3 +598,137 @@ type PhaseTransition struct {
 	Reason    string            `json:"reason"`    // 转换原因
 	Timestamp time.Time         `json:"timestamp"` // 转换时间
 }
+
+// ========== V4 架构：简化的 Session 和消息结构 ==========
+
+// V4Message V4 版本的消息结构（兼容 OpenAI 格式）
+type V4Message struct {
+	Role       string        `json:"role"`                  // system, user, assistant, tool
+	Content    string        `json:"content,omitempty"`     // 消息内容
+	ToolCalls  []V4ToolCall  `json:"tool_calls,omitempty"`  // 工具调用（assistant 消息）
+	ToolCallID string        `json:"tool_call_id,omitempty"` // 工具调用 ID（tool 消息）
+	Name       string        `json:"name,omitempty"`        // 工具名称（tool 消息）
+}
+
+// V4ToolCall V4 版本的工具调用
+type V4ToolCall struct {
+	ID       string         `json:"id"`
+	Type     string         `json:"type"` // function
+	Function V4ToolFunction `json:"function"`
+}
+
+// V4ToolFunction 工具函数信息
+type V4ToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON 字符串
+}
+
+// V4Session V4 版本的简化会话结构
+// 设计理念：像 Claude CLI 一样，不使用复杂的状态机，只保存消息历史
+type V4Session struct {
+	UserID    string    `json:"user_id"`
+	SessionID string    `json:"session_id"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// 消息历史（核心：包含完整的对话上下文）
+	Messages []V4Message `json:"messages"`
+
+	// 待确认的时刻表（调用 update_schedule 后保存，等待用户确认）
+	PendingSchedule []ScheduleItem `json:"pending_schedule,omitempty"`
+	PendingDate     time.Time      `json:"pending_date,omitempty"`
+
+	// 目标日期（从用户输入中解析）
+	TargetDate time.Time `json:"target_date,omitempty"`
+
+	// 当前时刻表（从数据库加载）
+	CurrentSchedule []ScheduleItem `json:"current_schedule,omitempty"`
+
+	// 可见性设置
+	Visibility ScheduleVisibility `json:"visibility,omitempty"`
+	CircleIDs  []string           `json:"circle_ids,omitempty"`
+}
+
+// NewV4Session 创建新的 V4 会话
+func NewV4Session(userID, sessionID string) *V4Session {
+	return &V4Session{
+		UserID:    userID,
+		SessionID: sessionID,
+		CreatedAt: time.Now(),
+		Messages:  []V4Message{},
+	}
+}
+
+// AddMessage 添加消息到历史
+func (s *V4Session) AddMessage(role, content string) {
+	s.Messages = append(s.Messages, V4Message{
+		Role:    role,
+		Content: content,
+	})
+}
+
+// AddAssistantMessageWithToolCalls 添加带工具调用的 assistant 消息
+func (s *V4Session) AddAssistantMessageWithToolCalls(content string, toolCalls []V4ToolCall) {
+	s.Messages = append(s.Messages, V4Message{
+		Role:      "assistant",
+		Content:   content,
+		ToolCalls: toolCalls,
+	})
+}
+
+// AddToolResult 添加工具执行结果
+func (s *V4Session) AddToolResult(toolCallID, toolName, result string) {
+	s.Messages = append(s.Messages, V4Message{
+		Role:       "tool",
+		Content:    result,
+		ToolCallID: toolCallID,
+		Name:       toolName,
+	})
+}
+
+// GetRecentMessages 获取最近的消息（用于构建 Prompt，控制上下文长度）
+func (s *V4Session) GetRecentMessages(maxTurns int) []V4Message {
+	if len(s.Messages) <= maxTurns*2 {
+		return s.Messages
+	}
+	// 保留最近的 N 轮对话
+	return s.Messages[len(s.Messages)-maxTurns*2:]
+}
+
+// HasPendingSchedule 是否有待确认的时刻表
+func (s *V4Session) HasPendingSchedule() bool {
+	return len(s.PendingSchedule) > 0
+}
+
+// ClearPendingSchedule 清除待确认的时刻表
+func (s *V4Session) ClearPendingSchedule() {
+	s.PendingSchedule = nil
+	s.PendingDate = time.Time{}
+}
+
+// V4EventType V4 版本的 SSE 事件类型
+type V4EventType string
+
+const (
+	V4EventTypeSessionStart     V4EventType = "session_start"
+	V4EventTypeTranscript       V4EventType = "transcript"
+	V4EventTypeThinking         V4EventType = "thinking"
+	V4EventTypeSchedulePreview  V4EventType = "schedule_preview"
+	V4EventTypeScheduleSaved    V4EventType = "schedule_saved"
+	V4EventTypeStatusUpdated    V4EventType = "status_updated"
+	V4EventTypeChat             V4EventType = "chat"
+	V4EventTypeError            V4EventType = "error"
+)
+
+// V4Event V4 版本的 SSE 事件
+type V4Event struct {
+	Type      V4EventType    `json:"type"`
+	SessionID string         `json:"session_id,omitempty"`
+	Message   string         `json:"message,omitempty"`
+	Items     []ScheduleItem `json:"items,omitempty"`
+	Date      string         `json:"date,omitempty"`
+	Emoji     string         `json:"emoji,omitempty"`
+	Status    string         `json:"status,omitempty"`
+
+	// 查询模式标识（查询已有时刻表时为 true，前端不显示确认按钮）
+	IsQuery bool `json:"is_query,omitempty"`
+}

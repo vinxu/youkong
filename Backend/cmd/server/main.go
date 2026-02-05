@@ -196,6 +196,7 @@ func main() {
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo, redisClient)
 	voiceScheduleService := service.NewVoiceScheduleService(scheduleRepo, memoryRepo, userProfileService, redisClient, asrClient, llmClient, cfg.LLM.APIKey)
+	voiceScheduleServiceV4 := service.NewVoiceScheduleServiceV4(scheduleRepo, memoryRepo, userProfileService, redisClient, cfg.LLM.APIKey)
 	predictionService := service.NewPredictionService(predictionRepo, scheduleRepo, memoryRepo, userProfileService, llmClient)
 
 	// 初始化 Agent Chat Service（Tool Agent 框架）
@@ -226,6 +227,7 @@ func main() {
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
 	friendshipHandler := handler.NewFriendshipHandler(friendshipService)
 	agentHandler := handler.NewAgentHandler(agentService, memoryService, voiceScheduleService, agentChatService, scheduleRepo)
+	agentHandler.SetVoiceScheduleServiceV4(voiceScheduleServiceV4) // 设置 V4 服务
 	contactHandler := handler.NewContactHandler(contactService)
 	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
 	wsHandler := handler.NewWSHandler(wsManager, jwtManager)
@@ -378,6 +380,7 @@ func main() {
 				agent.POST("/voice-schedule/stream", agentHandler.VoiceScheduleStream)            // 语音时刻表（SSE）
 				agent.POST("/voice-schedule/interact", agentHandler.VoiceScheduleInteract)        // 语音时刻表交互
 				agent.POST("/voice-schedule/text", agentHandler.VoiceScheduleText)                // 语音时刻表文本测试
+				agent.POST("/voice-schedule/v4/text", agentHandler.VoiceScheduleTextV4)           // V4 版本语音时刻表（简化架构）
 				agent.POST("/chat/stream", agentHandler.AgentChatStream)                          // Tool Agent 聊天（SSE）
 				agent.POST("/chat", agentHandler.AgentChat)                                       // Tool Agent 聊天（非流式）
 				agent.POST("/voice/stream", agentHandler.AgentVoiceChatStream)                    // Tool Agent 语音聊天（SSE）
