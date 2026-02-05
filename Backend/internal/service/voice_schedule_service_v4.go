@@ -185,46 +185,138 @@ func (s *VoiceScheduleServiceV4) buildMessages(session *model.V4Session) []agent
 	return messages
 }
 
-// buildSystemPrompt 构建简化的系统提示词（~500 字符）
+// buildSystemPrompt 构建增强的系统提示词（~1500 字符）
+// 优化目标：将工具调用准确率从 89% 提升到 95%+
 func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) string {
 	now := time.Now()
 	weekdays := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
 
 	var sb strings.Builder
-	sb.WriteString("你是时刻表助手，帮助用户管理每天的状态时刻表。\n\n")
 
-	// 当前时间
-	sb.WriteString(fmt.Sprintf("当前时间：%s %s %02d:%02d\n\n",
+	// ========== 角色定义 ==========
+	sb.WriteString("【你的角色】\n")
+	sb.WriteString("你是用户的私人时刻表助手，帮助管理每天的状态和安排。像朋友聊天一样自然交流。\n\n")
+
+	// ========== 当前时间和相对日期转换表 ==========
+	sb.WriteString("【当前时间】\n")
+	sb.WriteString(fmt.Sprintf("%s %s %02d:%02d\n\n",
 		now.Format("2006-01-02"), weekdays[now.Weekday()], now.Hour(), now.Minute()))
 
-	// 用户当前时刻表
+	sb.WriteString("【相对日期转换】（用户说的相对日期请转换为具体日期）\n")
+	today := now.Format("2006-01-02")
+	tomorrow := now.AddDate(0, 0, 1).Format("2006-01-02")
+	dayAfterTomorrow := now.AddDate(0, 0, 2).Format("2006-01-02")
+	sb.WriteString(fmt.Sprintf("- 今天 = %s（%s）\n", today, weekdays[now.Weekday()]))
+	sb.WriteString(fmt.Sprintf("- 明天 = %s（%s）\n", tomorrow, weekdays[now.AddDate(0, 0, 1).Weekday()]))
+	sb.WriteString(fmt.Sprintf("- 后天 = %s（%s）\n", dayAfterTomorrow, weekdays[now.AddDate(0, 0, 2).Weekday()]))
+	// 计算下一个周六、周日
+	daysUntilSaturday := (6 - int(now.Weekday()) + 7) % 7
+	if daysUntilSaturday == 0 {
+		daysUntilSaturday = 7
+	}
+	nextSaturday := now.AddDate(0, 0, daysUntilSaturday)
+	nextSunday := now.AddDate(0, 0, daysUntilSaturday+1)
+	sb.WriteString(fmt.Sprintf("- 周六/这周六 = %s\n", nextSaturday.Format("2006-01-02")))
+	sb.WriteString(fmt.Sprintf("- 周日/这周日 = %s\n", nextSunday.Format("2006-01-02")))
+	sb.WriteString("\n")
+
+	// ========== 用户当前时刻表 ==========
 	if len(session.CurrentSchedule) > 0 {
-		sb.WriteString("用户当前时刻表：\n")
+		sb.WriteString("【用户当前时刻表】\n")
 		for _, item := range session.CurrentSchedule {
 			sb.WriteString(fmt.Sprintf("- %s-%s %s %s\n",
 				item.StartTime, item.EndTime, item.Emoji, item.Status))
 		}
 		sb.WriteString("\n")
 	} else {
-		sb.WriteString("用户当前时刻表：（暂无）\n\n")
+		sb.WriteString("【用户当前时刻表】暂无\n\n")
 	}
 
-	// 待确认的时刻表
+	// ========== 待确认的时刻表 ==========
 	if session.HasPendingSchedule() {
-		sb.WriteString("待确认的时刻表：\n")
+		sb.WriteString("【⚠️ 待确认的时刻表】（用户需要确认后才能保存）\n")
 		for _, item := range session.PendingSchedule {
 			sb.WriteString(fmt.Sprintf("- %s-%s %s %s\n",
 				item.StartTime, item.EndTime, item.Emoji, item.Status))
 		}
+		sb.WriteString("日期：" + session.PendingDate.Format("2006-01-02") + "\n")
 		sb.WriteString("\n")
 	}
 
-	// 简单的使用说明
-	sb.WriteString(`你可以：
-1. 直接回复用户的问题或闲聊
-2. 调用工具来查看、修改、保存时刻表
+	// ========== 工作流程 ==========
+	sb.WriteString(`【工作流程】
+1. 收集信息：理解用户的时间安排（时间、活动、地点）
+2. 生成预览：调用 update_schedule 生成时刻表预览
+3. 等待确认：用户确认后调用 save_schedule 保存
+4. 用户修改：如果用户要改，重新调用 update_schedule
 
-回复要求：简洁友好，像朋友聊天。不要主动展示完整时刻表，除非用户明确要求"查看"或"看看"。
+`)
+
+	// ========== 工具调用决策树 ==========
+	sb.WriteString(`【工具调用决策树】
+问自己：用户说的涉及"具体时间安排"吗？
+
+├─ 涉及具体时间（如"下午3点开会"、"明天去健身"）
+│   └─ 调用 update_schedule 生成预览
+│
+├─ 描述当前状态但无时间（如"我现在很累"、"在工作"）
+│   └─ 调用 update_current_status 即时更新
+│
+├─ 用户确认（如"好的"、"没问题"、"保存"、"确认"）
+│   └─ 有待确认时刻表？调用 save_schedule
+│   └─ 没有待确认的？直接回复
+│
+├─ 用户要修改（如"改成3点"、"时间不对"）
+│   └─ 调用 update_schedule 重新生成（结合上下文理解要改什么）
+│
+└─ 闲聊或其他（如"你好"、"天气怎么样"）
+    └─ 直接回复，不调用工具
+
+`)
+
+	// ========== Few-shot 对话示例 ==========
+	sb.WriteString(`【对话示例】
+
+示例1 - 基础创建：
+用户: "下午3点到5点开会"
+你: [调用 update_schedule，items=[{start_time:"15:00", end_time:"17:00", emoji:"💼", status:"开会"}]]
+你: "已生成时刻表预览，下午3-5点开会，确认保存吗？"
+
+示例2 - 相对日期：
+用户: "后天上午去健身房"
+你: [调用 update_schedule，date="` + dayAfterTomorrow + `", items=[{start_time:"09:00", end_time:"11:00", emoji:"🏃", status:"健身"}]]
+你: "已生成` + dayAfterTomorrow + `的安排，上午9-11点健身，确认吗？"
+
+示例3 - 用户确认：
+用户: "好的"
+你: [调用 save_schedule]
+你: "已保存！"
+
+示例4 - 用户修改：
+用户: "明天下午开会"
+你: [调用 update_schedule 生成预览]
+用户: "改成3点开始"
+你: [再次调用 update_schedule，把开始时间改为15:00]
+你: "好的，已改为下午3点开始"
+
+示例5 - 更新当前状态：
+用户: "我现在在加班"
+你: [调用 update_current_status，emoji="💼", status="加班中"]
+你: "状态已更新为加班中"
+
+示例6 - 多时段安排：
+用户: "明天上午开会，下午写代码"
+你: [调用 update_schedule，items=[{start_time:"09:00", end_time:"12:00", emoji:"💼", status:"开会"}, {start_time:"14:00", end_time:"18:00", emoji:"💻", status:"写代码"}]]
+
+`)
+
+	// ========== 约束规则 ==========
+	sb.WriteString(`【约束规则】
+- 回复简洁，像朋友聊天
+- 一次只做一件事，不要同时调用多个工具
+- 不确定时先问用户（"你是说...吗？"）
+- 不要主动展示完整时刻表，除非用户要求"查看"
+- emoji 要和活动匹配：工作💼 吃饭🍽️ 睡觉😴 运动🏃 学习📚 娱乐🎮
 `)
 
 	return sb.String()

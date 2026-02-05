@@ -35,8 +35,21 @@ func V4ScheduleTools() []*Tool {
 // v4GetScheduleTool 获取时刻表工具
 func v4GetScheduleTool() *Tool {
 	return &Tool{
-		Name:        "get_schedule",
-		Description: "获取用户的时刻表。用于查看用户某一天的安排。",
+		Name: "get_schedule",
+		Description: `获取用户某一天的时刻表安排。
+
+【何时调用】
+- 用户问"我今天有什么安排"、"查看时刻表"、"看看明天"
+- 用户想了解某天的已有安排
+
+【何时不调用】
+- 用户描述新安排时（应该用 update_schedule）
+- 用户确认保存时（应该用 save_schedule）
+- 你已经在系统提示中看到了用户时刻表（不需要重复获取）
+
+【参数示例】
+- 获取今天：{"date": "2024-01-15"} 或不传 date
+- 获取明天：{"date": "2024-01-16"}`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
@@ -53,34 +66,55 @@ func v4GetScheduleTool() *Tool {
 func v4UpdateScheduleTool() *Tool {
 	return &Tool{
 		Name: "update_schedule",
-		Description: `更新时刻表（生成预览）。根据用户描述创建或修改时刻表，返回预览供用户确认。
+		Description: `创建或修改时刻表（生成预览，不直接保存）。
 
-调用时机：
-- 用户描述了时间安排，如"下午3点到5点开会"
-- 用户要修改时刻表，如"把开会改到4点"
-- 用户要添加新的时段
+【何时调用】
+- 用户描述时间安排："下午3点到5点开会"、"明天去健身"
+- 用户要修改预览："改成3点"、"时间不对"
+- 用户要添加新时段
 
-items 数组中每个元素是一个对象，包含 start_time（开始时间 HH:MM）、end_time（结束时间 HH:MM）、emoji（状态表情）、status（状态描述）。
+【何时不调用】
+- 用户说当前状态但没时间范围（应该用 update_current_status）
+- 用户确认保存（应该用 save_schedule）
 
-注意：此工具只生成预览，不会直接保存。用户确认后需要调用 save_schedule 保存。`,
+【重要】
+- 此工具只生成预览，不保存！用户确认后才调用 save_schedule
+- 用户说"改成X点"时，要结合上下文理解是改开始还是结束时间
+- 相对日期（今天/明天/后天/周六）请转换为 YYYY-MM-DD 格式
+
+【参数示例】
+示例1 - 单时段：
+{
+  "date": "2024-01-15",
+  "items": [{"start_time": "15:00", "end_time": "17:00", "emoji": "💼", "status": "开会"}]
+}
+
+示例2 - 多时段：
+{
+  "date": "2024-01-16",
+  "items": [
+    {"start_time": "09:00", "end_time": "12:00", "emoji": "💼", "status": "开会"},
+    {"start_time": "14:00", "end_time": "18:00", "emoji": "💻", "status": "写代码"}
+  ]
+}`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
 				"date": {
 					Type:        "string",
-					Description: "目标日期，YYYY-MM-DD 格式。不填则使用今天。",
+					Description: "目标日期，YYYY-MM-DD 格式（如 2024-01-15）。不填则使用今天。相对日期请转换为具体日期。",
 				},
 				"items": {
 					Type:        "array",
-					Description: "时刻表条目列表。每个元素包含：start_time（开始时间HH:MM）、end_time（结束时间HH:MM）、emoji（状态表情如💼🍽️😴）、status（状态描述2-10字）",
+					Description: "时刻表条目数组。每个元素：{start_time: HH:MM, end_time: HH:MM, emoji: 表情, status: 状态描述}",
 					Items: &ToolParam{
 						Type:        "object",
-						Description: "时刻表条目",
+						Description: "时刻表条目对象",
 					},
 				},
 				"operation": {
 					Type:        "string",
-					Description: "操作类型：create（新建）、modify（修改）、replace（替换全部）",
+					Description: "操作类型：create（新建）、modify（修改现有）、replace（替换全部）",
 					Enum:        []string{"create", "modify", "replace"},
 				},
 			},
@@ -93,24 +127,36 @@ items 数组中每个元素是一个对象，包含 start_time（开始时间 HH
 func v4UpdateCurrentStatusTool() *Tool {
 	return &Tool{
 		Name: "update_current_status",
-		Description: `更新用户当前显示在首页的状态。
+		Description: `即时更新用户当前显示在首页的状态（不是时刻表规划）。
 
-调用时机：
-- 用户想更新当前状态，如"我现在睡不着"、"修改为在工作"
-- 用户描述当前状态但没有时间范围
-- 用户说"帮我更新状态"、"同步到首页"
+【何时调用】
+- 用户描述当前状态但没有具体时间范围
+- "我现在很累"、"在加班"、"睡不着"
+- "帮我更新状态"、"改成在工作"
 
-注意：这是即时更新，不是时刻表规划。`,
+【何时不调用】
+- 用户说了具体时间（如"下午3点开会"）→ 用 update_schedule
+- 用户要保存时刻表 → 用 save_schedule
+
+【注意】
+- 这是即时生效的，会直接更新用户首页显示的状态
+- 不需要用户确认，调用后立即生效
+
+【参数示例】
+- 加班中：{"emoji": "💼", "status": "加班中"}
+- 睡不着：{"emoji": "😵", "status": "睡不着"}
+- 在家休息：{"emoji": "🏠", "status": "在家休息"}
+- 健身中：{"emoji": "🏃", "status": "健身中"}`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
 				"emoji": {
 					Type:        "string",
-					Description: "状态表情，如 😵、💼、🏠",
+					Description: "状态表情（1个emoji）。常用：💼工作 🏠在家 😴睡觉 🏃运动 📚学习 🎮娱乐 😵疲惫 ☕休息",
 				},
 				"status": {
 					Type:        "string",
-					Description: "状态描述，2-6 个字，如「睡不着」「工作中」「在家休息」",
+					Description: "状态描述，2-6个字。如：加班中、在家休息、睡不着、健身中",
 				},
 			},
 			Required: []string{"emoji", "status"},
@@ -122,23 +168,35 @@ func v4UpdateCurrentStatusTool() *Tool {
 func v4SaveScheduleTool() *Tool {
 	return &Tool{
 		Name: "save_schedule",
-		Description: `保存时刻表。在用户确认预览后调用此工具保存。
+		Description: `保存待确认的时刻表（用户确认后调用）。
 
-调用时机：
-- 用户说"好的"、"确认"、"没问题"、"可以"、"保存"等肯定词
-- 用户对预览的时刻表表示同意
+【何时调用】
+- 用户对预览表示同意：
+  "好的"、"确认"、"没问题"、"可以"、"保存"、"OK"、"行"、"就这样"
 
-注意：必须在 update_schedule 生成预览后，用户确认才能调用。`,
+【何时不调用】
+- 没有待确认的时刻表（系统提示中没有"待确认的时刻表"）
+- 用户还在描述安排（应该先用 update_schedule）
+- 用户表示要修改（应该用 update_schedule 重新生成）
+
+【前置条件】
+- 必须先调用 update_schedule 生成预览
+- 系统提示中会显示"待确认的时刻表"
+- 如果没有待确认内容，不要调用此工具
+
+【参数说明】
+- 通常不需要传参数，系统会使用待确认的日期
+- visibility 默认 all_friends（所有好友可见）`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
 				"date": {
 					Type:        "string",
-					Description: "保存的目标日期，YYYY-MM-DD 格式",
+					Description: "保存的目标日期，YYYY-MM-DD 格式。通常不需要传，使用待确认时刻表的日期。",
 				},
 				"visibility": {
 					Type:        "string",
-					Description: "可见性：all_friends（所有好友）、circles（指定圈子）、private（仅自己）",
+					Description: "可见性设置。默认 all_friends",
 					Enum:        []string{"all_friends", "circles", "private"},
 					Default:     "all_friends",
 				},

@@ -72,7 +72,7 @@ func NewLLMAdapter(config *LLMAdapterConfig) *LLMAdapter {
 	if model == "" {
 		switch provider {
 		case ProviderKimi:
-			model = "kimi-k2.5-preview"
+			model = "kimi-k2.5" // Kimi 2.5 模型
 		case ProviderQwen:
 			fallthrough
 		default:
@@ -120,11 +120,11 @@ func (a *LLMAdapter) SetProvider(provider LLMProvider, apiKey string) {
 	case ProviderKimi:
 		a.apiURL = "https://api.moonshot.cn/v1/chat/completions"
 		if a.model == "" || a.model == "qwen3-max-2026-01-23" || a.model == "qwen-max" {
-			a.model = "kimi-k2.5-preview"
+			a.model = "kimi-k2.5"
 		}
 	case ProviderQwen:
 		a.apiURL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-		if a.model == "" || a.model == "kimi-k2.5-preview" {
+		if a.model == "" || a.model == "kimi-k2.5" || strings.HasPrefix(a.model, "moonshot-") {
 			a.model = "qwen-max"
 		}
 	}
@@ -132,11 +132,13 @@ func (a *LLMAdapter) SetProvider(provider LLMProvider, apiKey string) {
 
 // LLMRequest LLM 请求
 type LLMRequest struct {
-	Messages    []AgentMessage `json:"messages"`
-	Tools       []*Tool        `json:"tools,omitempty"`
-	ToolChoice  string         `json:"tool_choice,omitempty"` // "auto", "none", "required"
-	Temperature float64        `json:"temperature,omitempty"`
-	MaxTokens   int            `json:"max_tokens,omitempty"`
+	Messages       []AgentMessage `json:"messages"`
+	Tools          []*Tool        `json:"tools,omitempty"`
+	ToolChoice     string         `json:"tool_choice,omitempty"` // "auto", "none", "required"
+	Temperature    float64        `json:"temperature,omitempty"`
+	MaxTokens      int            `json:"max_tokens,omitempty"`
+	EnableThinking bool           `json:"enable_thinking,omitempty"` // 是否启用思考模式
+	ThinkingBudget int            `json:"thinking_budget,omitempty"` // 思考预算（Token 数）
 }
 
 // LLMResponse LLM 响应
@@ -169,8 +171,10 @@ func (a *LLMAdapter) ChatWithTools(ctx context.Context, req *LLMRequest) (*LLMRe
 		}
 	}
 
-	// 添加温度
-	if req.Temperature > 0 {
+	// 添加温度（kimi-k2.5 模型要求 temperature 必须为 1）
+	if strings.HasPrefix(a.model, "kimi-k2") {
+		requestBody["temperature"] = 1.0
+	} else if req.Temperature > 0 {
 		requestBody["temperature"] = req.Temperature
 	} else {
 		requestBody["temperature"] = 0.7
@@ -179,6 +183,14 @@ func (a *LLMAdapter) ChatWithTools(ctx context.Context, req *LLMRequest) (*LLMRe
 	// 添加最大 Token
 	if req.MaxTokens > 0 {
 		requestBody["max_tokens"] = req.MaxTokens
+	}
+
+	// 添加思考模式（仅 Qwen 支持）
+	if req.EnableThinking && a.provider == ProviderQwen {
+		requestBody["enable_thinking"] = true
+		if req.ThinkingBudget > 0 {
+			requestBody["thinking_budget"] = req.ThinkingBudget
+		}
 	}
 
 	// 序列化请求
@@ -279,6 +291,153 @@ func (a *LLMAdapter) GenerateSummary(ctx context.Context, messages []AgentMessag
 	return generator.GenerateSummary(ctx, messages, previousSummary)
 }
 
+// ChatWithAdaptiveThinking 自适应思考模式的聊天请求
+// 根据输入复杂度自动决定是否启用思考模式和思考预算
+func (a *LLMAdapter) ChatWithAdaptiveThinking(ctx context.Context, req *LLMRequest, userInput string, dataSize int) (*LLMResponse, *AdaptiveThinkingResult, error) {
+	// 创建复杂度分析器
+	analyzer := NewComplexityAnalyzer()
+	score := analyzer.Analyze(userInput, dataSize)
+
+	// 根据复杂度配置思考模式
+	req.EnableThinking = score.EnableThinking
+	req.ThinkingBudget = score.ThinkingBudget
+
+	// 调用 LLM
+	resp, err := a.ChatWithTools(ctx, req)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return resp, &AdaptiveThinkingResult{
+		ComplexityScore:   score,
+		ThinkingEnabled:   score.EnableThinking,
+		ThinkingBudget:    score.ThinkingBudget,
+		ComplexityLevel:   string(score.Level),
+		EstimatedTimeMs:   score.EstimatedTimeMs,
+		ReasoningContent:  resp.Reasoning,
+	}, nil
+}
+
+// AdaptiveThinkingResult 自适应思考结果
+type AdaptiveThinkingResult struct {
+	ComplexityScore   *ComplexityScore `json:"complexity_score"`
+	ThinkingEnabled   bool             `json:"thinking_enabled"`
+	ThinkingBudget    int              `json:"thinking_budget"`
+	ComplexityLevel   string           `json:"complexity_level"`
+	EstimatedTimeMs   int              `json:"estimated_time_ms"`
+	ReasoningContent  string           `json:"reasoning_content,omitempty"`
+}
+
+// ComplexityScore 复杂度评分（从 llm 包引用）
+type ComplexityScore struct {
+	Score           int      `json:"score"`
+	Level           string   `json:"level"`
+	Factors         []string `json:"factors"`
+	EnableThinking  bool     `json:"enable_thinking"`
+	ThinkingBudget  int      `json:"thinking_budget"`
+	EstimatedTimeMs int      `json:"estimated_time_ms"`
+}
+
+// ComplexityAnalyzer 复杂度分析器（简化版，避免循环依赖）
+type ComplexityAnalyzer struct {
+	deepKeywords  []string
+	quickKeywords []string
+}
+
+// NewComplexityAnalyzer 创建复杂度分析器
+func NewComplexityAnalyzer() *ComplexityAnalyzer {
+	return &ComplexityAnalyzer{
+		deepKeywords: []string{
+			"为什么", "分析", "对比", "比较", "解释", "推理",
+			"规律", "总结", "评估", "预测", "建议",
+		},
+		quickKeywords: []string{
+			"快点", "简单说", "一句话", "直接",
+			"好的", "确认", "保存", "没问题",
+		},
+	}
+}
+
+// Analyze 分析输入复杂度
+func (a *ComplexityAnalyzer) Analyze(input string, dataSize int) *ComplexityScore {
+	score := 0
+	factors := make([]string, 0)
+
+	// 深度问题检测
+	for _, keyword := range a.deepKeywords {
+		if strings.Contains(input, keyword) {
+			score += 30
+			factors = append(factors, "深度问题")
+			break
+		}
+	}
+
+	// 输入长度
+	if len(input) > 200 {
+		score += 20
+		factors = append(factors, "长输入")
+	}
+
+	// 数据量
+	if dataSize > 100 {
+		score += 25
+		factors = append(factors, "大数据量")
+	}
+
+	// 快速请求减分
+	for _, keyword := range a.quickKeywords {
+		if strings.Contains(input, keyword) {
+			score -= 15
+			factors = append(factors, "快速请求")
+			break
+		}
+	}
+
+	// 简单确认减分
+	inputLower := strings.ToLower(strings.TrimSpace(input))
+	simplePatterns := []string{"好", "行", "ok", "可以", "谢谢", "你好"}
+	for _, pattern := range simplePatterns {
+		if inputLower == pattern {
+			score -= 20
+			factors = append(factors, "简单确认")
+			break
+		}
+	}
+
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+
+	// 分类
+	result := &ComplexityScore{Score: score, Factors: factors}
+	switch {
+	case score < 30:
+		result.Level = "simple"
+		result.EnableThinking = false
+		result.ThinkingBudget = 0
+		result.EstimatedTimeMs = 1000
+	case score < 50:
+		result.Level = "medium"
+		result.EnableThinking = true
+		result.ThinkingBudget = 4096
+		result.EstimatedTimeMs = 5000
+	case score < 70:
+		result.Level = "complex"
+		result.EnableThinking = true
+		result.ThinkingBudget = 8192
+		result.EstimatedTimeMs = 10000
+	default:
+		result.Level = "very_complex"
+		result.EnableThinking = true
+		result.ThinkingBudget = 16384
+		result.EstimatedTimeMs = 20000
+	}
+	return result
+}
+
 // StreamChatWithTools 流式带工具的聊天请求
 func (a *LLMAdapter) StreamChatWithTools(ctx context.Context, req *LLMRequest, callback func(chunk string)) (*LLMResponse, error) {
 	// 构建请求体
@@ -298,7 +457,10 @@ func (a *LLMAdapter) StreamChatWithTools(ctx context.Context, req *LLMRequest, c
 		requestBody["tool_choice"] = "auto"
 	}
 
-	if req.Temperature > 0 {
+	// 添加温度（kimi-k2.5 模型要求 temperature 必须为 1）
+	if strings.HasPrefix(a.model, "kimi-k2") {
+		requestBody["temperature"] = 1.0
+	} else if req.Temperature > 0 {
 		requestBody["temperature"] = req.Temperature
 	} else {
 		requestBody["temperature"] = 0.7

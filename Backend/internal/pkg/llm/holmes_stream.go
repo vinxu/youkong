@@ -17,14 +17,236 @@ import (
 
 // HolmesStreamEvent 流式事件类型
 type HolmesStreamEvent struct {
-	Type    string      `json:"type"`    // clue, feature, thinking, conclusion, error
-	Phase   string      `json:"phase"`   // collecting, extracting, reasoning, done
-	Content string      `json:"content"` // 显示内容
-	Data    interface{} `json:"data,omitempty"`
+	Type             string      `json:"type"`                        // clue, feature, thinking, conclusion, error, thinking_start, thinking_progress, thinking_end
+	Phase            string      `json:"phase"`                       // collecting, extracting, reasoning, done
+	Content          string      `json:"content"`                     // 显示内容
+	Data             interface{} `json:"data,omitempty"`
+	Progress         int         `json:"progress,omitempty"`          // 思考进度 0-100
+	EstimatedSeconds int         `json:"estimated_seconds,omitempty"` // 预估剩余时间
+	ThinkingEnabled  bool        `json:"thinking_enabled,omitempty"`  // 是否启用思考模式
+	ComplexityLevel  string      `json:"complexity_level,omitempty"`  // 复杂度级别
 }
 
 // HolmesStreamCallback 流式回调函数
 type HolmesStreamCallback func(event *HolmesStreamEvent)
+
+// AnalyzeStreamWithAdaptiveThinking 带自适应思考模式的流式分析
+// 根据输入复杂度自动决定是否启用思考模式
+func (h *HolmesAnalyzer) AnalyzeStreamWithAdaptiveThinking(ctx context.Context, input *HolmesInput, userQuestion string, callback HolmesStreamCallback) (*model.HolmesResult, error) {
+	// 分析复杂度（数据大小使用历史记录数量）
+	analyzer := NewComplexityAnalyzer()
+	dataSize := 0
+	if input.RecentHistory != nil {
+		dataSize = len(input.RecentHistory)
+	}
+	score := analyzer.Analyze(userQuestion, dataSize)
+
+	// 发送思考配置事件
+	callback(&HolmesStreamEvent{
+		Type:             "thinking_config",
+		ThinkingEnabled:  score.EnableThinking,
+		ComplexityLevel:  string(score.Level),
+		EstimatedSeconds: score.EstimatedTimeMs / 1000,
+		Content:          h.getThinkingHint(score),
+	})
+
+	// 根据复杂度调用不同的分析方法
+	if score.EnableThinking {
+		return h.AnalyzeStreamWithThinking(ctx, input, score.ThinkingBudget, callback)
+	}
+	return h.AnalyzeStreamFast(ctx, input, callback)
+}
+
+// getThinkingHint 根据复杂度获取提示文案
+func (h *HolmesAnalyzer) getThinkingHint(score *ComplexityScore) string {
+	switch score.Level {
+	case ComplexitySimple:
+		return "快速分析中..."
+	case ComplexityMedium:
+		return "正在思考..."
+	case ComplexityComplex:
+		return "深度分析中，预计需要 10 秒..."
+	case ComplexityVeryComplex:
+		return "这是个复杂问题，需要约 20 秒深度思考..."
+	default:
+		return "分析中..."
+	}
+}
+
+// AnalyzeStreamWithThinking 带思考模式的流式分析（用于复杂任务）
+func (h *HolmesAnalyzer) AnalyzeStreamWithThinking(ctx context.Context, input *HolmesInput, thinkingBudget int, callback HolmesStreamCallback) (*model.HolmesResult, error) {
+	// 发送思考开始事件
+	callback(&HolmesStreamEvent{
+		Type:            "thinking_start",
+		ThinkingEnabled: true,
+		Content:         "🧠 深度思考中...",
+	})
+
+	// 调用原有的带思考模式的分析
+	return h.AnalyzeStream(ctx, input, func(event *HolmesStreamEvent) {
+		// 如果是思考内容，添加进度
+		if event.Type == "thinking" {
+			// 简单估算进度
+			contentLen := len(event.Content)
+			progress := min(contentLen/10, 95) // 最多 95%
+			event.Progress = progress
+		}
+		callback(event)
+	})
+}
+
+// AnalyzeStreamFast 快速分析（跳过思考模式）
+func (h *HolmesAnalyzer) AnalyzeStreamFast(ctx context.Context, input *HolmesInput, callback HolmesStreamCallback) (*model.HolmesResult, error) {
+	// Phase 1: 收集线索
+	callback(&HolmesStreamEvent{
+		Type:    "phase",
+		Phase:   "collecting",
+		Content: "📡 收集线索...",
+	})
+	time.Sleep(50 * time.Millisecond) // 减少延迟
+
+	clue := h.collectClues(input)
+	h.streamClues(clue, callback)
+
+	// Phase 2: 提取特征
+	callback(&HolmesStreamEvent{
+		Type:    "phase",
+		Phase:   "extracting",
+		Content: "🧠 提取特征...",
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	features := h.extractFeatures(clue)
+	h.streamFeatures(features, callback)
+
+	// Phase 3: 快速 LLM 调用（不启用思考模式）
+	callback(&HolmesStreamEvent{
+		Type:    "phase",
+		Phase:   "reasoning",
+		Content: "⚡ 快速分析...",
+	})
+
+	reasoning, err := h.callLLMFast(ctx, clue, features, input.CoreMemory, callback)
+	if err != nil {
+		log.Printf("[福尔摩斯] 快速 LLM 调用失败，降级到规则引擎: %v", err)
+		callback(&HolmesStreamEvent{
+			Type:    "thinking",
+			Content: "⚠️ 使用规则引擎分析...",
+		})
+		return h.analyzeWithRules(clue, features), nil
+	}
+
+	// Phase 4: 输出结论
+	callback(&HolmesStreamEvent{
+		Type:    "phase",
+		Phase:   "done",
+		Content: "✅ 结论",
+	})
+
+	h.streamConclusion(reasoning, callback)
+
+	// 构建最终结果
+	result := &model.HolmesResult{
+		RawData:  clue,
+		Features: features,
+		Reasoning: &model.HolmesReasoning{
+			Model:      holmesModel,
+			Thinking:   "", // 快速模式没有思考过程
+			Conclusion: reasoning.Summary,
+		},
+		GeneratedAt: time.Now(),
+	}
+	result.Result.Available = reasoning.Available
+	result.Result.Probability = reasoning.Probability
+	result.Result.Confidence = reasoning.Confidence
+	result.Result.Summary = reasoning.Summary
+
+	return result, nil
+}
+
+// callLLMFast 快速 LLM 调用（不启用思考模式）
+func (h *HolmesAnalyzer) callLLMFast(ctx context.Context, clue *model.HolmesClue, features *model.HolmesFeatures, memory *model.CoreMemory, callback HolmesStreamCallback) (*HolmesLLMResponse, error) {
+	if h.client == nil {
+		return nil, fmt.Errorf("LLM client not available")
+	}
+
+	prompt := h.buildPrompt(clue, features, memory)
+
+	// 构建请求（不启用思考模式）
+	requestBody := map[string]interface{}{
+		"model": holmesModel,
+		"messages": []ChatMessage{
+			{Role: "user", Content: prompt},
+		},
+		"enable_thinking": false, // 关闭思考模式
+		"temperature":     0.7,
+	}
+
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	apiURL := h.client.apiURL
+	if apiURL == "" {
+		apiURL = qwenAPIURL
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+h.client.apiKey)
+
+	resp, err := h.client.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API error: %d - %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// 读取响应
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	// 解析响应
+	var apiResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	if apiResp.Error != nil {
+		return nil, fmt.Errorf("API error: %s", apiResp.Error.Message)
+	}
+
+	if len(apiResp.Choices) == 0 {
+		return nil, fmt.Errorf("no choices in response")
+	}
+
+	// 解析 JSON 结果
+	return h.parseThinkingResponse(&ThinkingResponse{
+		Content:          apiResp.Choices[0].Message.Content,
+		ReasoningContent: "",
+	})
+}
 
 // AnalyzeStream 流式执行福尔摩斯推理分析
 func (h *HolmesAnalyzer) AnalyzeStream(ctx context.Context, input *HolmesInput, callback HolmesStreamCallback) (*model.HolmesResult, error) {
