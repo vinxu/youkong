@@ -122,12 +122,29 @@ func (d *IntentDispatcher) buildSystemPrompt(session *model.VoiceScheduleSession
 ### 其他 action
 - confirm: 用户表示同意（"好的"/"确认"/"是的"/"没问题"）
 - cancel: 用户表示取消（"取消"/"不要了"/"算了"）
-- query: 用户查询时刻表（"看看"/"调出"/"查看"）
-- chat: 闲聊（"你好"/"谢谢"/"你是谁"）
+- query: 用户要**查看完整时刻表**（"看看"/"调出"/"查看我的时刻表"/"今天有什么安排"）
+- chat: 闲聊或**询问特定时间的状态**（见下方详细说明）
 - modify: 修改已有时段（"把下午的会改到4点"）
 - replace: 完全替换时刻表（"重新安排"）
 - delete: 删除时段（"删掉下午的会"）
 - undo: 撤销操作（"撤销"/"撤回"/"后悔了"/"恢复"）
+
+### 【重要】区分 query 和 chat
+
+query 是**查看完整时刻表**，用户想看所有安排：
+- "看看我的时刻表" → query
+- "今天有什么安排" → query
+- "调出今天的行程" → query
+
+chat 包括**询问特定时间点的状态**，用户想要对话式回答：
+- "两点以后什么状态" → chat（用户问的是某个时间点，不是要看完整时刻表）
+- "下午有空吗" → chat（这是一个问句，需要对话回复）
+- "晚上忙不忙" → chat（询问特定时间的状态）
+- "明天下午三点能见面吗" → chat（询问可用性）
+
+【关键判断】：
+- 如果用户的语句是**疑问句**（有空吗？什么状态？忙不忙？能不能？）→ 通常是 chat
+- 如果用户的语句是**祈使句**（看看、调出、查看）→ 通常是 query
 
 `)
 
@@ -177,11 +194,23 @@ func (d *IntentDispatcher) buildDecideActionTool() *agent.Tool {
 调用前必须分析（填写 thinking 字段）：
 1. 用户的关键词是什么？
 2. 用户是否提到了具体时间范围？
-3. 用户的真实意图是什么？
+3. 用户的语句是疑问句还是祈使句？
+4. 用户的真实意图是什么？
 
-【最重要】区分 update_status 和 create：
-- update_status：只是想更新当前状态（首页展示），没有时间范围
-- create：要规划未来的时间安排，有明确的时间段`,
+【最重要的区分规则】：
+
+1. update_status vs create：
+   - update_status：只是想更新当前状态，没有时间范围
+   - create：要规划未来的时间安排，有明确的时间段
+
+2. query vs chat（同样重要）：
+   - query：查看完整时刻表（"看看"/"调出"/"查看"这类祈使句）
+   - chat：询问特定时间的状态（"什么状态"/"有空吗"/"忙不忙"这类疑问句）
+
+   例子：
+   - "两点以后什么状态" → chat（疑问句，询问特定时间）
+   - "下午有空吗" → chat（疑问句，询问可用性）
+   - "看看我的时刻表" → query（祈使句，要看完整时刻表）`,
 		Parameters: agent.ToolParameters{
 			Type: "object",
 			Properties: map[string]agent.ToolParam{
