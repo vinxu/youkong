@@ -1470,3 +1470,188 @@ func (h *AgentHandler) AgentVoiceChatStream(c *gin.Context) {
 		return
 	}
 }
+
+// ========== 模型测试接口 ==========
+
+// modelTestService 模型测试服务实例
+var modelTestService *service.ModelTestService
+
+// SetModelTestService 设置模型测试服务
+func (h *AgentHandler) SetModelTestService(svc *service.ModelTestService) {
+	modelTestService = svc
+}
+
+// TestModelSingle 单个测试用例
+// POST /api/agent/test/model/single
+func (h *AgentHandler) TestModelSingle(c *gin.Context) {
+	if modelTestService == nil {
+		response.InternalError(c, "模型测试服务未启用")
+		return
+	}
+
+	var req struct {
+		CaseID   int    `json:"case_id" binding:"required"`
+		Provider string `json:"provider" binding:"required"` // "qwen" 或 "kimi"
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "参数错误: case_id 和 provider 必填")
+		return
+	}
+
+	// 验证 provider
+	var provider agent.LLMProvider
+	switch req.Provider {
+	case "qwen":
+		provider = agent.ProviderQwen
+	case "kimi":
+		provider = agent.ProviderKimi
+	default:
+		response.ParamError(c, "无效的 provider，可选值: qwen, kimi")
+		return
+	}
+
+	// 查找测试用例
+	var testCase *service.TestCase
+	for _, tc := range modelTestService.GetTestCases() {
+		if tc.ID == req.CaseID {
+			testCase = &tc
+			break
+		}
+	}
+	if testCase == nil {
+		response.ParamError(c, "测试用例不存在")
+		return
+	}
+
+	fmt.Printf("[ModelTest] 运行单个测试 case=%d provider=%s input=%s\n",
+		req.CaseID, req.Provider, testCase.Input)
+
+	// 运行测试
+	result, err := modelTestService.RunSingleTest(c.Request.Context(), *testCase, provider)
+	if err != nil {
+		response.InternalError(c, fmt.Sprintf("测试失败: %v", err))
+		return
+	}
+
+	response.Success(c, result)
+}
+
+// TestModelComparison 运行完整模型对比测试
+// POST /api/agent/test/model/comparison
+func (h *AgentHandler) TestModelComparison(c *gin.Context) {
+	if modelTestService == nil {
+		response.InternalError(c, "模型测试服务未启用")
+		return
+	}
+
+	fmt.Printf("[ModelTest] 开始完整模型对比测试...\n")
+
+	// 这可能需要较长时间，设置较长的超时
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Minute)
+	defer cancel()
+
+	report, err := modelTestService.RunComparison(ctx)
+	if err != nil {
+		response.InternalError(c, fmt.Sprintf("测试失败: %v", err))
+		return
+	}
+
+	fmt.Printf("[ModelTest] 测试完成，Qwen: %.1f, Kimi: %.1f\n",
+		report.QwenSummary.OverallScore, report.KimiSummary.OverallScore)
+
+	response.Success(c, report)
+}
+
+// TestModelReport 获取 Markdown 格式报告
+// POST /api/agent/test/model/report
+func (h *AgentHandler) TestModelReport(c *gin.Context) {
+	if modelTestService == nil {
+		response.InternalError(c, "模型测试服务未启用")
+		return
+	}
+
+	var req struct {
+		Report *service.ModelComparisonReport `json:"report" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "参数错误: report 必填")
+		return
+	}
+
+	markdown := modelTestService.GenerateMarkdownReport(req.Report)
+
+	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	c.String(http.StatusOK, markdown)
+}
+
+// GetTestCases 获取所有测试用例
+// GET /api/agent/test/model/cases
+func (h *AgentHandler) GetTestCases(c *gin.Context) {
+	if modelTestService == nil {
+		response.InternalError(c, "模型测试服务未启用")
+		return
+	}
+
+	cases := modelTestService.GetTestCases()
+	response.Success(c, gin.H{
+		"total": len(cases),
+		"cases": cases,
+	})
+}
+
+// TestModelByCategory 按分类运行测试
+// POST /api/agent/test/model/category
+func (h *AgentHandler) TestModelByCategory(c *gin.Context) {
+	if modelTestService == nil {
+		response.InternalError(c, "模型测试服务未启用")
+		return
+	}
+
+	var req struct {
+		Category string `json:"category" binding:"required"`
+		Provider string `json:"provider" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "参数错误")
+		return
+	}
+
+	var provider agent.LLMProvider
+	switch req.Provider {
+	case "qwen":
+		provider = agent.ProviderQwen
+	case "kimi":
+		provider = agent.ProviderKimi
+	default:
+		response.ParamError(c, "无效的 provider")
+		return
+	}
+
+	cases := modelTestService.GetTestCasesByCategory(req.Category)
+	if len(cases) == 0 {
+		response.ParamError(c, "该分类没有测试用例")
+		return
+	}
+
+	fmt.Printf("[ModelTest] 按分类测试 category=%s provider=%s count=%d\n",
+		req.Category, req.Provider, len(cases))
+
+	var results []service.TestResult
+	for _, tc := range cases {
+		result, err := modelTestService.RunSingleTest(c.Request.Context(), tc, provider)
+		if err != nil {
+			response.InternalError(c, fmt.Sprintf("测试失败: %v", err))
+			return
+		}
+		results = append(results, *result)
+
+		// 添加延迟避免速率限制
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	response.Success(c, gin.H{
+		"category": req.Category,
+		"provider": req.Provider,
+		"results":  results,
+	})
+}

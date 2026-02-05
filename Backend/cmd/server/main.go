@@ -228,6 +228,15 @@ func main() {
 	friendshipHandler := handler.NewFriendshipHandler(friendshipService)
 	agentHandler := handler.NewAgentHandler(agentService, memoryService, voiceScheduleService, agentChatService, scheduleRepo)
 	agentHandler.SetVoiceScheduleServiceV4(voiceScheduleServiceV4) // 设置 V4 服务
+
+	// 初始化模型测试服务（用于 Qwen vs Kimi 对比测试）
+	if cfg.LLM.APIKey != "" || cfg.LLM.KimiAPIKey != "" {
+		modelTestService := service.NewModelTestService(cfg.LLM.APIKey, cfg.LLM.KimiAPIKey)
+		agentHandler.SetModelTestService(modelTestService)
+		logger.Info("模型测试服务初始化成功",
+			zap.Bool("qwen_enabled", cfg.LLM.APIKey != ""),
+			zap.Bool("kimi_enabled", cfg.LLM.KimiAPIKey != ""))
+	}
 	contactHandler := handler.NewContactHandler(contactService)
 	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
 	wsHandler := handler.NewWSHandler(wsManager, jwtManager)
@@ -393,6 +402,13 @@ func main() {
 				agent.GET("/prediction/:id", predictionHandler.GetPrediction)           // 获取推测任务状态
 				agent.POST("/prediction/:id/confirm", predictionHandler.ConfirmPrediction) // 确认推测结果
 				agent.POST("/prediction/:id/reject", predictionHandler.RejectPrediction)  // 放弃推测结果
+
+				// 模型对比测试接口（Qwen vs Kimi）
+				agent.GET("/test/model/cases", agentHandler.GetTestCases)                   // 获取测试用例
+				agent.POST("/test/model/single", agentHandler.TestModelSingle)              // 单个测试
+				agent.POST("/test/model/category", agentHandler.TestModelByCategory)        // 按分类测试
+				agent.POST("/test/model/comparison", agentHandler.TestModelComparison)      // 完整对比测试
+				agent.POST("/test/model/report", agentHandler.TestModelReport)              // 生成 Markdown 报告
 			}
 
 			// 通讯录模块

@@ -80,6 +80,7 @@ func (s *PredictionService) StartPrediction(ctx context.Context, userID string, 
 		EndTime:    endTime,
 		TargetDate: targetDate,
 		Progress:   0,
+		CreatedAt:  now,
 	}
 
 	if err := s.predictionRepo.Create(ctx, task); err != nil {

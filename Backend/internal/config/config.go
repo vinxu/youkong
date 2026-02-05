@@ -43,9 +43,10 @@ type TPNSConfig struct {
 }
 
 type LLMConfig struct {
-	Provider string // openrouter
-	APIKey   string
-	Model    string
+	Provider   string // openrouter, qwen, kimi
+	APIKey     string
+	Model      string
+	KimiAPIKey string // Kimi/Moonshot API Key（用于模型对比测试）
 }
 
 type DeployConfig struct {
@@ -195,9 +196,10 @@ func Load() (*Config, error) {
 			RateLimitPerDay:   viper.GetInt("INVITATION_RATE_LIMIT_PER_DAY"),
 		},
 		LLM: LLMConfig{
-			Provider: viper.GetString("LLM_PROVIDER"),
-			APIKey:   viper.GetString("LLM_API_KEY"),
-			Model:    viper.GetString("LLM_MODEL"),
+			Provider:   viper.GetString("LLM_PROVIDER"),
+			APIKey:     viper.GetString("LLM_API_KEY"),
+			Model:      viper.GetString("LLM_MODEL"),
+			KimiAPIKey: viper.GetString("KIMI_API_KEY"),
 		},
 		Deploy: DeployConfig{
 			Token:      viper.GetString("DEPLOY_TOKEN"),

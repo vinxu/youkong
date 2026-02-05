@@ -11,37 +11,73 @@ import (
 	"time"
 )
 
+// LLMProvider 模型提供商
+type LLMProvider string
+
+const (
+	ProviderQwen LLMProvider = "qwen"
+	ProviderKimi LLMProvider = "kimi"
+	ProviderAuto LLMProvider = "auto" // 自动检测
+)
+
 // LLMAdapter LLM 工具调用适配器
 type LLMAdapter struct {
 	apiKey     string
 	apiURL     string
 	model      string
+	provider   LLMProvider
 	httpClient *http.Client
 }
 
 // LLMAdapterConfig LLM 适配器配置
 type LLMAdapterConfig struct {
-	APIKey  string
-	APIURL  string
-	Model   string
-	Timeout time.Duration
+	APIKey   string
+	APIURL   string
+	Model    string
+	Provider LLMProvider // 新增：模型提供商
+	Timeout  time.Duration
 }
 
 // NewLLMAdapter 创建 LLM 适配器
 func NewLLMAdapter(config *LLMAdapterConfig) *LLMAdapter {
+	provider := config.Provider
 	apiURL := config.APIURL
-	if apiURL == "" {
-		// 根据 API Key 前缀判断使用哪个 API
+	model := config.Model
+
+	// 自动检测或根据 Provider 配置
+	if provider == "" || provider == ProviderAuto {
 		if strings.HasPrefix(config.APIKey, "sk-or-") {
+			provider = ProviderQwen // OpenRouter 默认用于 Qwen
 			apiURL = "https://openrouter.ai/api/v1/chat/completions"
+		} else if strings.HasPrefix(config.APIKey, "sk-Kua") || strings.Contains(config.APIKey, "moonshot") {
+			// Kimi API Key 前缀检测
+			provider = ProviderKimi
 		} else {
+			provider = ProviderQwen
+		}
+	}
+
+	// 根据 Provider 设置默认 API URL 和模型
+	if apiURL == "" {
+		switch provider {
+		case ProviderKimi:
+			apiURL = "https://api.moonshot.cn/v1/chat/completions"
+		case ProviderQwen:
+			fallthrough
+		default:
 			apiURL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 		}
 	}
 
-	model := config.Model
 	if model == "" {
-		model = "qwen3-max-2026-01-23"
+		switch provider {
+		case ProviderKimi:
+			model = "kimi-k2.5-preview"
+		case ProviderQwen:
+			fallthrough
+		default:
+			model = "qwen3-max-2026-01-23"
+		}
 	}
 
 	timeout := config.Timeout
@@ -50,12 +86,47 @@ func NewLLMAdapter(config *LLMAdapterConfig) *LLMAdapter {
 	}
 
 	return &LLMAdapter{
-		apiKey: config.APIKey,
-		apiURL: apiURL,
-		model:  model,
+		apiKey:   config.APIKey,
+		apiURL:   apiURL,
+		model:    model,
+		provider: provider,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
+	}
+}
+
+// GetProvider 获取当前提供商
+func (a *LLMAdapter) GetProvider() LLMProvider {
+	return a.provider
+}
+
+// GetModel 获取当前模型
+func (a *LLMAdapter) GetModel() string {
+	return a.model
+}
+
+// SetModel 动态设置模型
+func (a *LLMAdapter) SetModel(model string) {
+	a.model = model
+}
+
+// SetProvider 动态切换提供商（同时更新 API URL）
+func (a *LLMAdapter) SetProvider(provider LLMProvider, apiKey string) {
+	a.provider = provider
+	a.apiKey = apiKey
+
+	switch provider {
+	case ProviderKimi:
+		a.apiURL = "https://api.moonshot.cn/v1/chat/completions"
+		if a.model == "" || a.model == "qwen3-max-2026-01-23" || a.model == "qwen-max" {
+			a.model = "kimi-k2.5-preview"
+		}
+	case ProviderQwen:
+		a.apiURL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+		if a.model == "" || a.model == "kimi-k2.5-preview" {
+			a.model = "qwen-max"
+		}
 	}
 }
 
