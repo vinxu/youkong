@@ -128,6 +128,7 @@ func main() {
 	friendshipRepo := repository.NewFriendshipRepository(db)
 	friendRequestRepo := repository.NewFriendRequestRepository(db)
 	memoryRepo := repository.NewMemoryRepository(db)
+	memoryDocRepo := repository.NewUserMemoryDocumentRepository(db)
 	deviceTokenRepo := repository.NewDeviceTokenRepository(db)
 	userProfileRepo := repository.NewUserProfileRepository(db)
 	scheduleRepo := repository.NewScheduleRepository(db)
@@ -196,7 +197,7 @@ func main() {
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo, redisClient)
 	voiceScheduleService := service.NewVoiceScheduleService(scheduleRepo, memoryRepo, userProfileService, redisClient, asrClient, llmClient, cfg.LLM.APIKey)
-	voiceScheduleServiceV4 := service.NewVoiceScheduleServiceV4(scheduleRepo, memoryRepo, userProfileService, redisClient, cfg.LLM.APIKey)
+	voiceScheduleServiceV4 := service.NewVoiceScheduleServiceV4(scheduleRepo, memoryRepo, memoryDocRepo, userProfileService, redisClient, asrClient, cfg.LLM.APIKey)
 	predictionService := service.NewPredictionService(predictionRepo, scheduleRepo, memoryRepo, userProfileService, llmClient)
 
 	// 初始化 Agent Chat Service（Tool Agent 框架）
@@ -229,13 +230,14 @@ func main() {
 	agentHandler := handler.NewAgentHandler(agentService, memoryService, voiceScheduleService, agentChatService, scheduleRepo)
 	agentHandler.SetVoiceScheduleServiceV4(voiceScheduleServiceV4) // 设置 V4 服务
 
-	// 初始化模型测试服务（用于 Qwen vs Kimi 对比测试）
-	if cfg.LLM.APIKey != "" || cfg.LLM.KimiAPIKey != "" {
-		modelTestService := service.NewModelTestService(cfg.LLM.APIKey, cfg.LLM.KimiAPIKey)
+	// 初始化模型测试服务（用于 Qwen vs Kimi vs Claude 对比测试）
+	if cfg.LLM.APIKey != "" || cfg.LLM.KimiAPIKey != "" || cfg.LLM.ClaudeAPIKey != "" {
+		modelTestService := service.NewModelTestService(cfg.LLM.APIKey, cfg.LLM.KimiAPIKey, cfg.LLM.ClaudeAPIKey)
 		agentHandler.SetModelTestService(modelTestService)
 		logger.Info("模型测试服务初始化成功",
 			zap.Bool("qwen_enabled", cfg.LLM.APIKey != ""),
-			zap.Bool("kimi_enabled", cfg.LLM.KimiAPIKey != ""))
+			zap.Bool("kimi_enabled", cfg.LLM.KimiAPIKey != ""),
+			zap.Bool("claude_enabled", cfg.LLM.ClaudeAPIKey != ""))
 	}
 	contactHandler := handler.NewContactHandler(contactService)
 	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
@@ -394,6 +396,12 @@ func main() {
 				agent.POST("/chat", agentHandler.AgentChat)                                       // Tool Agent 聊天（非流式）
 				agent.POST("/voice/stream", agentHandler.AgentVoiceChatStream)                    // Tool Agent 语音聊天（SSE）
 				agent.GET("/my-schedule/history", agentHandler.GetMyScheduleHistory)              // 我的状态时刻表历史（分页）
+				agent.PUT("/my-schedule/:date/item", agentHandler.UpdateScheduleItem)             // 更新时刻表条目
+				agent.DELETE("/my-schedule/:date/item", agentHandler.DeleteScheduleItem)          // 删除时刻表条目
+
+				// 当下状态推理
+				agent.POST("/infer-status", agentHandler.InferStatus)         // AI 推断当下状态
+				agent.POST("/status-feedback", agentHandler.StatusFeedback)   // 状态反馈（用户修正）
 
 				// AI 状态推测
 				agent.POST("/prediction/start", predictionHandler.StartPrediction)      // 开始推测任务
