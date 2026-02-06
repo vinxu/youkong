@@ -192,12 +192,17 @@ func main() {
 	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
 	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo, friendRequestRepo)
 	userProfileService := service.NewUserProfileService(userProfileRepo)
-	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, memoryRepo, userProfileService, llmClient)
+	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, memoryRepo, scheduleRepo, userProfileService, llmClient)
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
-	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo, redisClient)
+	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo, scheduleRepo, redisClient)
 	voiceScheduleService := service.NewVoiceScheduleService(scheduleRepo, memoryRepo, userProfileService, redisClient, asrClient, llmClient, cfg.LLM.APIKey)
-	voiceScheduleServiceV4 := service.NewVoiceScheduleServiceV4(scheduleRepo, memoryRepo, memoryDocRepo, userProfileService, redisClient, asrClient, cfg.LLM.APIKey)
+	voiceScheduleServiceV4 := service.NewVoiceScheduleServiceV4(
+		scheduleRepo, memoryRepo, memoryDocRepo, userProfileService,
+		redisClient, asrClient, cfg.LLM.APIKey,
+		friendshipService, conversationService, agentService,
+		contactService,
+	)
 	predictionService := service.NewPredictionService(predictionRepo, scheduleRepo, memoryRepo, userProfileService, llmClient)
 
 	// 初始化 Agent Chat Service（Tool Agent 框架）
@@ -222,7 +227,7 @@ func main() {
 
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
-	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL, messageRepo, userSettingsRepo)
+	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL, messageRepo, userSettingsRepo, scheduleRepo)
 	circleHandler := handler.NewCircleHandler(circleService)
 	conversationHandler := handler.NewConversationHandler(conversationService)
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
@@ -396,6 +401,8 @@ func main() {
 				agent.POST("/chat", agentHandler.AgentChat)                                       // Tool Agent 聊天（非流式）
 				agent.POST("/voice/stream", agentHandler.AgentVoiceChatStream)                    // Tool Agent 语音聊天（SSE）
 				agent.GET("/my-schedule/history", agentHandler.GetMyScheduleHistory)              // 我的状态时刻表历史（分页）
+				agent.GET("/my-schedule/:date", agentHandler.GetMySchedule)                       // 获取指定日期时刻表
+				agent.PUT("/my-schedule/:date", agentHandler.SetMySchedule)                       // 设置指定日期时刻表（测试用）
 				agent.PUT("/my-schedule/:date/item", agentHandler.UpdateScheduleItem)             // 更新时刻表条目
 				agent.DELETE("/my-schedule/:date/item", agentHandler.DeleteScheduleItem)          // 删除时刻表条目
 
