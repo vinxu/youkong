@@ -1,10 +1,17 @@
 import SwiftUI
+import Factory
 
 struct SettingsView: View {
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @StateObject private var permissionManager = PermissionManager.shared
+    @EnvironmentObject private var authManager: AuthManager
     @State private var showResetAlert = false
     @State private var showPermissionStatus = false
+    @State private var showLogoutAlert = false
+    @State private var showEditProfile = false
+    @State private var showCity = true
+    @State private var isLoadingSettings = false
+    @Injected(\.agentRepository) private var agentRepository
 
     var body: some View {
         VStack(spacing: 0) {
@@ -63,6 +70,57 @@ struct SettingsView: View {
                             } label: {
                                 TerminalSettingsRow(title: "打开系统设置", icon: ASCII.arrowRight)
                             }
+                        }
+                        .background(CLIColors.backgroundSecondary)
+                        .overlay(
+                            Rectangle()
+                                .stroke(CLIColors.border, lineWidth: 1)
+                        )
+                    }
+
+                    // 隐私设置区域
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(ASCII.bullet + " 隐私设置")
+                            .font(.cliBody)
+                            .foregroundColor(CLIColors.textSecondary)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 8)
+
+                        VStack(spacing: 0) {
+                            HStack {
+                                Text("显示城市")
+                                    .font(.cliBody)
+                                    .foregroundColor(CLIColors.textPrimary)
+
+                                Spacer()
+
+                                Toggle("", isOn: $showCity)
+                                    .labelsHidden()
+                                    .tint(CLIColors.green)
+                                    .disabled(isLoadingSettings)
+                                    .onChange(of: showCity) { newValue in
+                                        Task {
+                                            await updateShowCity(newValue)
+                                        }
+                                    }
+                            }
+                            .padding(16)
+
+                            Rectangle()
+                                .fill(CLIColors.border)
+                                .frame(height: 1)
+                                .padding(.leading, 16)
+
+                            HStack {
+                                Text("")
+                                    .font(.cliCaption)
+                                    .foregroundColor(CLIColors.textSecondary)
+                                Text("开启后，你的城市信息将显示在首页好友卡片上")
+                                    .font(.cliCaption)
+                                    .foregroundColor(CLIColors.textSecondary)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
                         }
                         .background(CLIColors.backgroundSecondary)
                         .overlay(
@@ -131,6 +189,68 @@ struct SettingsView: View {
                                 .stroke(CLIColors.border, lineWidth: 1)
                         )
                     }
+
+                    // 账户管理
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(ASCII.bullet + " 账户")
+                            .font(.cliBody)
+                            .foregroundColor(CLIColors.textSecondary)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 8)
+
+                        VStack(spacing: 0) {
+                            Button {
+                                showEditProfile = true
+                            } label: {
+                                HStack {
+                                    Text("修改昵称")
+                                        .font(.cliBody)
+                                        .foregroundColor(CLIColors.textPrimary)
+
+                                    Spacer()
+
+                                    Text(authManager.currentUser?.nickname ?? "")
+                                        .font(.cliBody)
+                                        .foregroundColor(CLIColors.textSecondary)
+                                        .lineLimit(1)
+
+                                    Text(ASCII.arrowRight)
+                                        .font(.cliBody)
+                                        .foregroundColor(CLIColors.textSecondary)
+                                }
+                                .padding(16)
+                                .contentShape(Rectangle())
+                            }
+
+                            Rectangle()
+                                .fill(CLIColors.border)
+                                .frame(height: 1)
+                                .padding(.leading, 16)
+
+                            Button {
+                                showLogoutAlert = true
+                            } label: {
+                                HStack {
+                                    Text("退出登录")
+                                        .font(.cliBody)
+                                        .foregroundColor(CLIColors.red)
+
+                                    Spacer()
+
+                                    Text(ASCII.arrowRight)
+                                        .font(.cliBody)
+                                        .foregroundColor(CLIColors.red)
+                                }
+                                .padding(16)
+                                .contentShape(Rectangle())
+                            }
+                        }
+                        .background(CLIColors.backgroundSecondary)
+                        .overlay(
+                            Rectangle()
+                                .stroke(CLIColors.border, lineWidth: 1)
+                        )
+                    }
                 }
                 .padding(16)
             }
@@ -146,9 +266,56 @@ struct SettingsView: View {
         } message: {
             Text("将返回权限授权页面。已授权的权限需要在系统设置中撤销后才能重新请求。")
         }
+        .alert("退出登录", isPresented: $showLogoutAlert) {
+            Button("取消", role: .cancel) {}
+            Button("退出", role: .destructive) {
+                Task { @MainActor in
+                    print("🚪 执行退出登录...")
+                    AuthManager.shared.logout()
+                    print("🚪 退出登录完成")
+                }
+            }
+        } message: {
+            Text("确定要退出登录吗？")
+        }
         .sheet(isPresented: $showPermissionStatus) {
             TerminalPermissionStatusSheet()
         }
+        .sheet(isPresented: $showEditProfile) {
+            if let user = authManager.currentUser {
+                EditProfileView(user: user)
+                    .environmentObject(authManager)
+            }
+        }
+        .task {
+            await loadSettings()
+        }
+    }
+
+    private func loadSettings() async {
+        isLoadingSettings = true
+        do {
+            let settings = try await agentRepository.getUserSettings()
+            showCity = settings.showCity
+        } catch {
+            print("[Settings] Load settings failed: \(error)")
+        }
+        isLoadingSettings = false
+    }
+
+    private func updateShowCity(_ newValue: Bool) async {
+        isLoadingSettings = true
+        do {
+            let request = UserSettingsRequest(showCity: newValue)
+            let response = try await agentRepository.updateUserSettings(request: request)
+            showCity = response.showCity
+            print("[Settings] Show city updated: \(showCity)")
+        } catch {
+            print("[Settings] Update show city failed: \(error)")
+            // 恢复之前的值
+            showCity = !newValue
+        }
+        isLoadingSettings = false
     }
 
     private func resetOnboarding() {
@@ -325,5 +492,6 @@ struct TerminalPermissionStatusSheet: View {
 #Preview {
     NavigationStack {
         SettingsView()
+            .environmentObject(AuthManager.shared)
     }
 }

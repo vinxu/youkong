@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ type AgentService struct {
 	userRepo           *repository.UserRepository
 	friendshipRepo     *repository.FriendshipRepository
 	memoryRepo         *repository.MemoryRepository
+	scheduleRepo       *repository.ScheduleRepository
 	userProfileService *UserProfileService
 	llmClient          *llm.OpenRouterClient
 	holmesAnalyzer     *llm.HolmesAnalyzer
@@ -40,6 +42,7 @@ func NewAgentService(
 	userRepo *repository.UserRepository,
 	friendshipRepo *repository.FriendshipRepository,
 	memoryRepo *repository.MemoryRepository,
+	scheduleRepo *repository.ScheduleRepository,
 	userProfileService *UserProfileService,
 	llmClient *llm.OpenRouterClient,
 ) *AgentService {
@@ -52,6 +55,7 @@ func NewAgentService(
 		userRepo:           userRepo,
 		friendshipRepo:     friendshipRepo,
 		memoryRepo:         memoryRepo,
+		scheduleRepo:       scheduleRepo,
 		userProfileService: userProfileService,
 		llmClient:          llmClient,
 		holmesAnalyzer:     holmesAnalyzer,
@@ -1303,6 +1307,20 @@ func (s *AgentService) SaveStatusFeedback(ctx context.Context, userID string, re
 		availabilityStatus = "有空"
 	}
 
+	// 组合 emoji 和活动描述
+	// 如果有场所，把场所 emoji + 活动 emoji，场所 + 活动
+	finalEmoji := req.CorrectedEmoji
+	finalLabel := req.CorrectedActivity
+	if req.CorrectedPlace != "" {
+		// 获取场所对应的 emoji
+		placeEmoji := getPlaceEmoji(req.CorrectedPlace)
+		if placeEmoji != "" && !strings.Contains(finalEmoji, placeEmoji) {
+			finalEmoji = placeEmoji + finalEmoji
+		}
+		// 组合场所和活动描述
+		finalLabel = req.CorrectedPlace + req.CorrectedActivity
+	}
+
 	analysisResult := &model.AnalysisResult{
 		Availability: model.AvailabilityAnalysis{
 			Status:      availabilityStatus,
@@ -1311,8 +1329,8 @@ func (s *AgentService) SaveStatusFeedback(ctx context.Context, userID string, re
 			Confidence:  "high",
 		},
 		LifeStatus: model.LifeStatus{
-			Emoji:       req.CorrectedEmoji,
-			Label:       req.CorrectedActivity,
+			Emoji:       finalEmoji,
+			Label:       finalLabel,
 			Description: req.CorrectedPlace,
 		},
 		UpdatedAt: time.Now(),
@@ -1325,14 +1343,229 @@ func (s *AgentService) SaveStatusFeedback(ctx context.Context, userID string, re
 			// 不返回错误，反馈已保存成功
 		} else {
 			fmt.Printf("[SaveStatusFeedback] 首页状态已更新 user=%s emoji=%s status=%s is_available=%v\n",
-				userID, req.CorrectedEmoji, req.CorrectedActivity, isAvailable)
+				userID, finalEmoji, finalLabel, isAvailable)
 		}
+	}
+
+	// 同时更新状态表（status_schedules）的当前时间段
+	if s.scheduleRepo != nil {
+		s.updateCurrentScheduleItem(ctx, userID, finalEmoji, finalLabel)
 	}
 
 	return nil
 }
 
+// updateCurrentScheduleItem 更新状态表的当前时间段（只更新今天的）
+func (s *AgentService) updateCurrentScheduleItem(ctx context.Context, userID, emoji, status string) {
+	// 获取上海时区
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		loc = time.FixedZone("CST", 8*3600)
+	}
+	now := time.Now().In(loc)
+	todayDate := now.Format("2006-01-02")
+	currentTime := now.Format("15:04")
+
+	fmt.Printf("[SaveStatusFeedback] 准备更新状态表 user=%s date=%s time=%s\n", userID, todayDate, currentTime)
+
+	// 获取今天的活跃时刻表（只查询今天的日期，不会影响其他日期）
+	schedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, userID, now)
+
+	// 计算新 item 的时间段：当前时间开始，持续1小时
+	startTime := currentTime
+	endHour := now.Hour() + 1
+	endMin := now.Minute()
+	if endHour >= 24 {
+		endHour = 23
+		endMin = 59
+	}
+	endTime := fmt.Sprintf("%02d:%02d", endHour, endMin)
+
+	if err != nil || schedule == nil {
+		// 今天没有时刻表，创建一个新的
+		fmt.Printf("[SaveStatusFeedback] 今天(%s)没有状态表，创建新的 user=%s\n", todayDate, userID)
+
+		newItem := model.ScheduleItem{
+			StartTime: startTime,
+			EndTime:   endTime,
+			Emoji:     emoji,
+			Status:    status,
+			Executed:  false,
+			IsAIGuess: false,
+		}
+
+		scheduleDate, _ := time.ParseInLocation("2006-01-02", todayDate, loc)
+		newSchedule := &model.StatusSchedule{
+			UserID:       userID,
+			ScheduleDate: scheduleDate,
+			Items:        []model.ScheduleItem{newItem},
+			CurrentIndex: 0,
+			Status:       "active",
+			Visibility:   "all_friends",
+		}
+
+		if err := s.scheduleRepo.Create(ctx, newSchedule); err != nil {
+			fmt.Printf("[SaveStatusFeedback] 创建状态表失败 user=%s date=%s error=%v\n", userID, todayDate, err)
+		} else {
+			fmt.Printf("[SaveStatusFeedback] 状态表已创建 user=%s date=%s item=[%s %s] time=%s-%s\n",
+				userID, todayDate, emoji, status, startTime, endTime)
+		}
+		return
+	}
+
+	// 二次确认：检查 schedule 的日期是否是今天
+	if schedule.ScheduleDate.Format("2006-01-02") != todayDate {
+		fmt.Printf("[SaveStatusFeedback] 警告：状态表日期(%s)与今天(%s)不匹配，跳过更新 user=%s\n",
+			schedule.ScheduleDate.Format("2006-01-02"), todayDate, userID)
+		return
+	}
+
+	// 找到当前时间对应的 item 并更新
+	itemUpdated := false
+	for i := range schedule.Items {
+		if isTimeInRange(currentTime, schedule.Items[i].StartTime, schedule.Items[i].EndTime) {
+			oldEmoji := schedule.Items[i].Emoji
+			oldStatus := schedule.Items[i].Status
+			schedule.Items[i].Emoji = emoji
+			schedule.Items[i].Status = status
+			schedule.Items[i].IsAIGuess = false // 用户确认的状态
+			itemUpdated = true
+			fmt.Printf("[SaveStatusFeedback] 更新状态表item user=%s date=%s index=%d time=%s-%s old=[%s %s] new=[%s %s]\n",
+				userID, todayDate, i, schedule.Items[i].StartTime, schedule.Items[i].EndTime,
+				oldEmoji, oldStatus, emoji, status)
+			break
+		}
+	}
+
+	if !itemUpdated {
+		// 没有找到当前时间段，需要插入新的 item 并处理时间重叠
+		newItem := model.ScheduleItem{
+			StartTime: startTime,
+			EndTime:   endTime,
+			Emoji:     emoji,
+			Status:    status,
+			Executed:  false,
+			IsAIGuess: false,
+		}
+
+		// 处理时间重叠：分割或调整现有条目
+		schedule.Items = insertScheduleItem(schedule.Items, newItem)
+		fmt.Printf("[SaveStatusFeedback] 插入新状态表item user=%s date=%s time=%s-%s status=[%s %s] total_items=%d\n",
+			userID, todayDate, startTime, endTime, emoji, status, len(schedule.Items))
+	}
+
+	// 保存回数据库
+	if err := s.scheduleRepo.Update(ctx, schedule); err != nil {
+		fmt.Printf("[SaveStatusFeedback] 更新状态表失败 user=%s date=%s error=%v\n", userID, todayDate, err)
+	} else {
+		fmt.Printf("[SaveStatusFeedback] 状态表已更新 user=%s date=%s\n", userID, todayDate)
+	}
+}
+
+// isTimeInRange 检查时间是否在范围内
+func isTimeInRange(current, start, end string) bool {
+	// 处理跨午夜的情况（如 23:00-01:00）
+	// 以及 24:00 格式
+	if end == "24:00" {
+		end = "23:59"
+	}
+
+	// 简单比较字符串（HH:MM 格式）
+	if start <= end {
+		return current >= start && current < end
+	}
+	// 跨午夜：23:00-01:00 表示 23:00~23:59 或 00:00~01:00
+	return current >= start || current < end
+}
+
+// insertScheduleItem 插入新的时刻表条目，处理时间重叠
+// 如果新条目与现有条目重叠，会分割或调整现有条目
+func insertScheduleItem(items []model.ScheduleItem, newItem model.ScheduleItem) []model.ScheduleItem {
+	var result []model.ScheduleItem
+
+	for _, item := range items {
+		// 检查是否有时间重叠
+		// 情况1：新条目完全覆盖现有条目 → 删除现有条目
+		// 情况2：新条目在现有条目中间 → 分割成两部分
+		// 情况3：新条目覆盖现有条目的前半部分 → 调整开始时间
+		// 情况4：新条目覆盖现有条目的后半部分 → 调整结束时间
+		// 情况5：没有重叠 → 保持不变
+
+		if !hasTimeOverlap(item.StartTime, item.EndTime, newItem.StartTime, newItem.EndTime) {
+			// 没有重叠，保持不变
+			result = append(result, item)
+			continue
+		}
+
+		// 有重叠，处理各种情况
+		if newItem.StartTime <= item.StartTime && newItem.EndTime >= item.EndTime {
+			// 情况1：新条目完全覆盖现有条目 → 删除现有条目
+			fmt.Printf("[insertScheduleItem] 删除被完全覆盖的条目: %s-%s %s\n",
+				item.StartTime, item.EndTime, item.Status)
+			continue
+		}
+
+		if newItem.StartTime > item.StartTime && newItem.EndTime < item.EndTime {
+			// 情况2：新条目在现有条目中间 → 分割成两部分
+			// 前半部分
+			frontItem := item
+			frontItem.EndTime = newItem.StartTime
+			result = append(result, frontItem)
+			// 后半部分
+			backItem := item
+			backItem.StartTime = newItem.EndTime
+			result = append(result, backItem)
+			fmt.Printf("[insertScheduleItem] 分割条目: %s-%s → %s-%s + %s-%s\n",
+				item.StartTime, item.EndTime, frontItem.StartTime, frontItem.EndTime,
+				backItem.StartTime, backItem.EndTime)
+			continue
+		}
+
+		if newItem.StartTime <= item.StartTime && newItem.EndTime > item.StartTime && newItem.EndTime < item.EndTime {
+			// 情况3：新条目覆盖现有条目的前半部分 → 调整开始时间
+			adjustedItem := item
+			adjustedItem.StartTime = newItem.EndTime
+			result = append(result, adjustedItem)
+			fmt.Printf("[insertScheduleItem] 调整开始时间: %s-%s → %s-%s\n",
+				item.StartTime, item.EndTime, adjustedItem.StartTime, adjustedItem.EndTime)
+			continue
+		}
+
+		if newItem.StartTime > item.StartTime && newItem.StartTime < item.EndTime && newItem.EndTime >= item.EndTime {
+			// 情况4：新条目覆盖现有条目的后半部分 → 调整结束时间
+			adjustedItem := item
+			adjustedItem.EndTime = newItem.StartTime
+			result = append(result, adjustedItem)
+			fmt.Printf("[insertScheduleItem] 调整结束时间: %s-%s → %s-%s\n",
+				item.StartTime, item.EndTime, adjustedItem.StartTime, adjustedItem.EndTime)
+			continue
+		}
+
+		// 默认保留（不应该到这里）
+		result = append(result, item)
+	}
+
+	// 添加新条目
+	result = append(result, newItem)
+
+	// 按开始时间排序
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].StartTime < result[j].StartTime
+	})
+
+	return result
+}
+
+// hasTimeOverlap 检查两个时间段是否有重叠
+func hasTimeOverlap(start1, end1, start2, end2 string) bool {
+	// 简单的字符串比较（HH:MM 格式）
+	// 两个区间 [start1, end1) 和 [start2, end2) 重叠当且仅当：
+	// start1 < end2 且 start2 < end1
+	return start1 < end2 && start2 < end1
+}
+
 // getCachedSensorData 获取缓存的传感器数据
+// 会根据缓存时间调整 AtPlaceSinceMinutes 等时间相关字段
 func (s *AgentService) getCachedSensorData(ctx context.Context, userID string) *model.ExtendedStatusReportRequest {
 	key := fmt.Sprintf(keyUserStatus, userID)
 	data, err := s.redisClient.GetBytes(ctx, key)
@@ -1345,11 +1578,36 @@ func (s *AgentService) getCachedSensorData(ctx context.Context, userID string) *
 		return nil
 	}
 
-	// 转换为 ExtendedStatusReportRequest
-	return &model.ExtendedStatusReportRequest{
+	// 计算缓存时间差（分钟）
+	minutesSinceUpdate := int(time.Since(status.UpdatedAt).Minutes())
+
+	// 复制数据并调整时间相关字段
+	result := &model.ExtendedStatusReportRequest{
 		Screen:   &status.Screen,
 		Location: &status.Location,
 	}
+
+	// 调整 Location.AtPlaceSinceMinutes
+	// 如果缓存的数据显示用户在某位置待了30分钟，而缓存是2小时前的
+	// 则实际应该是 30 + 120 = 150 分钟
+	if result.Location != nil && minutesSinceUpdate > 0 {
+		originalMinutes := result.Location.AtPlaceSinceMinutes
+		result.Location.AtPlaceSinceMinutes = originalMinutes + minutesSinceUpdate
+		fmt.Printf("[getCachedSensorData] 调整 AtPlaceSinceMinutes: %d + %d = %d 分钟\n",
+			originalMinutes, minutesSinceUpdate, result.Location.AtPlaceSinceMinutes)
+	}
+
+	// 调整 Screen.LastActiveMinutesAgo
+	if result.Screen != nil && minutesSinceUpdate > 0 {
+		result.Screen.LastActiveMinutesAgo = result.Screen.LastActiveMinutesAgo + minutesSinceUpdate
+	}
+
+	// 调整 Screen.SessionDurationMinutes（如果还在活跃状态）
+	if result.Screen != nil && result.Screen.IsActive && minutesSinceUpdate > 0 {
+		result.Screen.SessionDurationMinutes = result.Screen.SessionDurationMinutes + minutesSinceUpdate
+	}
+
+	return result
 }
 
 // getStatusFeedbackMemory 获取状态反馈记忆
@@ -1372,4 +1630,60 @@ func (s *AgentService) getStatusFeedbackMemory(ctx context.Context, userID strin
 func getWeekdayNameCN(w time.Weekday) string {
 	names := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
 	return names[w]
+}
+
+// getPlaceEmoji 根据场所名称获取对应的 emoji
+func getPlaceEmoji(place string) string {
+	place = strings.ToLower(place)
+
+	// 家
+	if strings.Contains(place, "家") || strings.Contains(place, "home") {
+		return "🏠"
+	}
+	// 公司/办公室
+	if strings.Contains(place, "公司") || strings.Contains(place, "办公") || strings.Contains(place, "单位") || strings.Contains(place, "work") || strings.Contains(place, "office") {
+		return "💼"
+	}
+	// 学校
+	if strings.Contains(place, "学校") || strings.Contains(place, "教室") || strings.Contains(place, "图书馆") || strings.Contains(place, "school") {
+		return "🎓"
+	}
+	// 咖啡厅
+	if strings.Contains(place, "咖啡") || strings.Contains(place, "cafe") || strings.Contains(place, "coffee") {
+		return "☕"
+	}
+	// 餐厅
+	if strings.Contains(place, "餐厅") || strings.Contains(place, "饭店") || strings.Contains(place, "餐馆") || strings.Contains(place, "restaurant") {
+		return "🍽️"
+	}
+	// 健身房
+	if strings.Contains(place, "健身") || strings.Contains(place, "gym") {
+		return "💪"
+	}
+	// 医院
+	if strings.Contains(place, "医院") || strings.Contains(place, "诊所") || strings.Contains(place, "hospital") {
+		return "🏥"
+	}
+	// 商场/购物
+	if strings.Contains(place, "商场") || strings.Contains(place, "超市") || strings.Contains(place, "购物") || strings.Contains(place, "mall") || strings.Contains(place, "shop") {
+		return "🛒"
+	}
+	// 交通
+	if strings.Contains(place, "地铁") || strings.Contains(place, "公交") || strings.Contains(place, "路上") || strings.Contains(place, "车") || strings.Contains(place, "transit") {
+		return "🚇"
+	}
+	// 户外
+	if strings.Contains(place, "公园") || strings.Contains(place, "户外") || strings.Contains(place, "outdoor") || strings.Contains(place, "park") {
+		return "🌳"
+	}
+	// 酒吧
+	if strings.Contains(place, "酒吧") || strings.Contains(place, "bar") || strings.Contains(place, "ktv") {
+		return "🍺"
+	}
+	// 电影院
+	if strings.Contains(place, "电影") || strings.Contains(place, "影院") || strings.Contains(place, "cinema") || strings.Contains(place, "movie") {
+		return "🎬"
+	}
+
+	return ""
 }
