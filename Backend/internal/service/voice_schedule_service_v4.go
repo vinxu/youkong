@@ -56,6 +56,7 @@ func NewVoiceScheduleServiceV4(
 	redisClient *tencent.RedisClient,
 	asrClient *asr.AliyunASRClient,
 	llmAPIKey string,
+	llmModel string,
 	friendshipService *FriendshipService,
 	conversationService *ConversationService,
 	agentService *AgentService,
@@ -68,7 +69,7 @@ func NewVoiceScheduleServiceV4(
 		userProfileService:  userProfileService,
 		redisClient:         redisClient,
 		asrClient:           asrClient,
-		tools:               agent.V4AllTools(), // 使用合并后的工具集（时刻表+好友+扩展）
+		tools:               agent.V4AllTools(), // 所有工具（时刻表+好友+扩展）
 		friendshipService:   friendshipService,
 		conversationService: conversationService,
 		agentService:        agentService,
@@ -79,7 +80,7 @@ func NewVoiceScheduleServiceV4(
 	if llmAPIKey != "" {
 		svc.llmAdapter = agent.NewLLMAdapter(&agent.LLMAdapterConfig{
 			APIKey: llmAPIKey,
-			Model:  "qwen-plus", // 使用 qwen-plus，平衡速度和质量
+			Model:  llmModel, // 使用外部传入的模型配置
 		})
 
 		// 创建记忆学习服务
@@ -194,11 +195,13 @@ func (s *VoiceScheduleServiceV4) processLoopWithTools(
 		// 1. 构建消息列表
 		messages := s.buildMessages(session)
 
-		// 2. 调用 LLM
+		// 2. 调用 LLM（启用 thinking mode，精确决策低温度）
 		response, err := s.llmAdapter.ChatWithTools(ctx, &agent.LLMRequest{
-			Messages:    messages,
-			Tools:       s.tools,
-			Temperature: 0.7,
+			Messages:       messages,
+			Tools:          s.tools,
+			Temperature:    0.3,
+			EnableThinking: true,
+			ThinkingBudget: 2048,
 		})
 		if err != nil {
 			return fmt.Errorf("LLM 调用失败: %w", err)

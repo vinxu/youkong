@@ -20,8 +20,8 @@ const (
 	keyUserPattern = "agent:pattern:%s" // 用户历史规律
 
 	// 状态过期时间
-	statusTTL  = 5 * time.Minute  // 状态5分钟过期
-	patternTTL = 24 * time.Hour   // 规律24小时过期
+	statusTTL  = 24 * time.Hour // 状态24小时过期（配合时间调整，可用于推理）
+	patternTTL = 24 * time.Hour // 规律24小时过期
 )
 
 // AgentService Agent 服务
@@ -1570,6 +1570,7 @@ func (s *AgentService) getCachedSensorData(ctx context.Context, userID string) *
 	key := fmt.Sprintf(keyUserStatus, userID)
 	data, err := s.redisClient.GetBytes(ctx, key)
 	if err != nil || len(data) == 0 {
+		fmt.Printf("[getCachedSensorData] 无缓存数据 user=%s err=%v len=%d\n", userID, err, len(data))
 		return nil
 	}
 
