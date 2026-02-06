@@ -235,6 +235,16 @@ func main() {
 	agentHandler := handler.NewAgentHandler(agentService, memoryService, voiceScheduleService, agentChatService, scheduleRepo)
 	agentHandler.SetVoiceScheduleServiceV4(voiceScheduleServiceV4) // 设置 V4 服务
 
+	// 初始化 V2 推断 Agent
+	if cfg.LLM.APIKey != "" {
+		inferenceAgent := service.NewStatusInferenceAgent(
+			redisClient, memoryRepo, scheduleRepo, userProfileService,
+			cfg.LLM.APIKey, cfg.LLM.Model,
+		)
+		agentHandler.SetInferenceAgent(inferenceAgent)
+		logger.Info("V2 推断 Agent 初始化成功")
+	}
+
 	// 初始化模型测试服务（用于 Qwen vs Kimi vs Claude 对比测试）
 	if cfg.LLM.APIKey != "" || cfg.LLM.KimiAPIKey != "" || cfg.LLM.ClaudeAPIKey != "" {
 		modelTestService := service.NewModelTestService(cfg.LLM.APIKey, cfg.LLM.KimiAPIKey, cfg.LLM.ClaudeAPIKey)
@@ -409,6 +419,11 @@ func main() {
 				// 当下状态推理
 				agent.POST("/infer-status", agentHandler.InferStatus)         // AI 推断当下状态
 				agent.POST("/status-feedback", agentHandler.StatusFeedback)   // 状态反馈（用户修正）
+
+				// V2 Agent-based 状态推断
+				agent.POST("/infer-status-v2", agentHandler.InferStatusV2)              // 同步版
+				agent.POST("/infer-status-v2/stream", agentHandler.InferStatusV2Stream) // SSE 流式版
+				agent.POST("/infer-status-v2/respond", agentHandler.InferStatusRespond) // 用户确认回答
 
 				// AI 状态推测
 				agent.POST("/prediction/start", predictionHandler.StartPrediction)      // 开始推测任务

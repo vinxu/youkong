@@ -180,8 +180,12 @@ func v4ConfirmSendTool() *Tool {
 		Description: `确认发送待发送的消息或邀请。
 
 【何时调用】
-- 用户对消息预览说"好的"、"发送"、"确认"、"发吧"
-- 用户对邀请预览说"可以"、"没问题"、"就这样"
+- 系统提示中存在"⚠️待确认消息"或"⚠️待确认邀请"，且用户表示同意：
+  "好的"、"发送"、"确认"、"发吧"、"可以"、"没问题"、"就这样"
+
+【何时不调用】
+- 没有待确认的消息或邀请 → 不要调用
+- 待确认的是时刻表（应该用 save_schedule）→ 不要调用
 
 【前置条件】
 - 必须先调用 send_message 或 create_schedule_invite 生成预览
@@ -197,10 +201,17 @@ func v4ConfirmSendTool() *Tool {
 	}
 }
 
+// V4CoreTools 返回 V4 核心工具（9个：时刻表5 + 好友4）
+// V4 语音日程助手只需要核心工具，扩展工具（设备数据、记忆、通讯录）属于 AgentExecutor 通用能力
+func V4CoreTools() []*Tool {
+	tools := V4ScheduleTools()               // 5个时刻表工具
+	tools = append(tools, V4FriendTools()...) // 4个好友工具
+	return tools
+}
+
 // V4AllTools 返回 V4 版本所有工具（时刻表 + 好友 + 扩展）
 func V4AllTools() []*Tool {
-	tools := V4ScheduleTools()                // 5个时刻表工具
-	tools = append(tools, V4FriendTools()...) // 4个好友工具
-	tools = append(tools, V4ExtendedTools()...) // 6个扩展工具
+	tools := V4CoreTools()                       // 9个核心工具
+	tools = append(tools, V4ExtendedTools()...)   // 6个扩展工具
 	return tools
 }

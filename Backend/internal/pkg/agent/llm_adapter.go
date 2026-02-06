@@ -201,7 +201,7 @@ func (a *LLMAdapter) chatWithToolsOpenAI(ctx context.Context, req *LLMRequest) (
 	} else if req.Temperature > 0 {
 		requestBody["temperature"] = req.Temperature
 	} else {
-		requestBody["temperature"] = 0.7
+		requestBody["temperature"] = 0.3
 	}
 
 	// 添加最大 Token
@@ -324,7 +324,7 @@ func (a *LLMAdapter) chatWithToolsClaude(ctx context.Context, req *LLMRequest) (
 	if req.Temperature > 0 {
 		requestBody["temperature"] = req.Temperature
 	} else {
-		requestBody["temperature"] = 0.7
+		requestBody["temperature"] = 0.3
 	}
 
 	// 添加最大 Token
@@ -616,7 +616,7 @@ func (a *LLMAdapter) StreamChatWithTools(ctx context.Context, req *LLMRequest, c
 	} else if req.Temperature > 0 {
 		requestBody["temperature"] = req.Temperature
 	} else {
-		requestBody["temperature"] = 0.7
+		requestBody["temperature"] = 0.3
 	}
 
 	body, err := json.Marshal(requestBody)

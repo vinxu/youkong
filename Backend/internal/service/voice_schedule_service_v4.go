@@ -386,6 +386,14 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 - 时间模糊时先确认，不要猜测
 - 用户只是闲聊时，不需要调用任何工具，直接回复即可
 
+【重要区分】
+- 用户描述当前状态（"我在加班"、"好累"、"到公司了"）→ update_current_status（即时生效，不需确认）
+- 用户规划时间安排（"下午3点开会"、"明天去健身"）→ update_schedule（生成预览等确认）
+- 用户给出精确时间+活动，即使多条也应一次性调用 update_schedule（如"10点瑜伽课，2点兼职，7点聚餐"→一次 update_schedule 包含3个items）
+- 修改时刻表时只传变更的条目，operation="modify"，系统会自动保留其他时段
+- 用户说"给他/她发消息"时，使用上一次 query_friends 查到的好友
+- save_schedule 和 confirm_send 是互斥的：save_schedule 保存日程，confirm_send 发送消息/邀请。根据待确认内容类型选择正确的工具
+
 `)
 
 	// ========== 当前时间 ==========
@@ -430,14 +438,6 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 			session.PendingInvite.StartTime, session.PendingInvite.EndTime,
 			session.PendingInvite.Activity))
 	}
-
-	// ========== 关键区分提示 ==========
-	sb.WriteString(`【重要区分】
-- 用户描述当前状态（"我在加班"、"好累"）→ update_current_status（即时生效，不需确认）
-- 用户规划时间安排（"下午3点开会"）→ update_schedule（生成预览等确认）
-- 修改时刻表时只传变更的条目，operation="modify"，系统会自动保留其他时段
-- 用户说"给他/她发消息"时，使用上一次 query_friends 查到的好友
-`)
 
 	return sb.String()
 }

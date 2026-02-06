@@ -25,6 +25,7 @@ type AgentHandler struct {
 	voiceScheduleServiceV4 *service.VoiceScheduleServiceV4 // V4 版本
 	agentChatService       *service.AgentChatService
 	scheduleRepo           ScheduleRepositoryInterface
+	inferenceAgent         *service.StatusInferenceAgent // V2 推断 Agent
 }
 
 // ScheduleRepositoryInterface 时刻表 Repository 接口
@@ -51,6 +52,11 @@ func NewAgentHandler(agentService *service.AgentService, memoryService *service.
 // SetVoiceScheduleServiceV4 设置 V4 版本语音时刻表服务
 func (h *AgentHandler) SetVoiceScheduleServiceV4(svc *service.VoiceScheduleServiceV4) {
 	h.voiceScheduleServiceV4 = svc
+}
+
+// SetInferenceAgent 设置 V2 推断 Agent
+func (h *AgentHandler) SetInferenceAgent(agent *service.StatusInferenceAgent) {
+	h.inferenceAgent = agent
 }
 
 // ReportStatus 上报状态（简化版，仅用于手动触发分析）
@@ -2013,5 +2019,153 @@ func (h *AgentHandler) StatusFeedback(c *gin.Context) {
 	response.Success(c, gin.H{
 		"success": true,
 		"message": "反馈已记录",
+	})
+}
+
+// ========== V2 Agent-based 状态推断接口 ==========
+
+// InferStatusV2 Agent-based AI 推断当下状态（同步版）
+// POST /api/v1/agent/infer-status-v2
+func (h *AgentHandler) InferStatusV2(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.inferenceAgent == nil {
+		response.InternalError(c, "推断服务未启用")
+		return
+	}
+
+	var req model.ExtendedStatusReportRequest
+	c.ShouldBindJSON(&req)
+
+	result, err := h.inferenceAgent.InferWithAgent(c.Request.Context(), userID, &req)
+	if err != nil {
+		fmt.Printf("[InferStatusV2] 推断失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "推断失败")
+		return
+	}
+
+	fmt.Printf("[InferStatusV2] 推断成功 user=%s emoji=%s activity=%s confidence=%s\n",
+		userID, result.Emoji, result.Activity, result.Confidence)
+
+	// 推断成功后更新首页状态
+	if h.agentService != nil {
+		feedbackReq := &model.StatusFeedbackRequest{
+			CorrectedEmoji:       result.Emoji,
+			CorrectedActivity:    result.Activity,
+			CorrectedPlace:       result.Place,
+			CorrectedIsAvailable: &result.IsAvailable,
+		}
+		if err := h.agentService.SaveStatusFeedback(c.Request.Context(), userID, feedbackReq); err != nil {
+			fmt.Printf("[InferStatusV2] 更新首页状态失败 user=%s error=%v\n", userID, err)
+		}
+	}
+
+	response.Success(c, result)
+}
+
+// InferStatusV2Stream Agent-based AI 推断当下状态（SSE 流式版）
+// POST /api/v1/agent/infer-status-v2/stream
+func (h *AgentHandler) InferStatusV2Stream(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权"})
+		return
+	}
+
+	if h.inferenceAgent == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "推断服务未启用"})
+		return
+	}
+
+	var req model.ExtendedStatusReportRequest
+	c.ShouldBindJSON(&req)
+
+	// 设置 SSE 响应头
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	w := c.Writer
+
+	// 流式推断
+	result, err := h.inferenceAgent.InferWithAgentStream(c.Request.Context(), userID, &req, func(event *service.InferenceStreamEvent) {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+	})
+
+	if err != nil {
+		errEvent := service.InferenceStreamEvent{
+			Type:    "error",
+			Message: err.Error(),
+		}
+		data, _ := json.Marshal(errEvent)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		w.Flush()
+		return
+	}
+
+	// 推断成功后更新首页状态
+	if result != nil && h.agentService != nil {
+		go func() {
+			ctx := context.Background()
+			feedbackReq := &model.StatusFeedbackRequest{
+				CorrectedEmoji:       result.Emoji,
+				CorrectedActivity:    result.Activity,
+				CorrectedPlace:       result.Place,
+				CorrectedIsAvailable: &result.IsAvailable,
+			}
+			h.agentService.SaveStatusFeedback(ctx, userID, feedbackReq)
+		}()
+	}
+
+	// 发送完成信号
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	w.Flush()
+}
+
+// InferStatusRespond 接收用户确认回答
+// POST /api/v1/agent/infer-status-v2/respond
+func (h *AgentHandler) InferStatusRespond(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.inferenceAgent == nil {
+		response.InternalError(c, "推断服务未启用")
+		return
+	}
+
+	var req struct {
+		SessionID string `json:"session_id" binding:"required"`
+		Answer    string `json:"answer" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, "参数错误: session_id 和 answer 必填")
+		return
+	}
+
+	fmt.Printf("[InferStatusRespond] user=%s session=%s answer=%s\n", userID, req.SessionID, req.Answer)
+
+	err := h.inferenceAgent.HandleUserResponse(c.Request.Context(), req.SessionID, req.Answer)
+	if err != nil {
+		fmt.Printf("[InferStatusRespond] 处理失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, err.Error())
+		return
+	}
+
+	response.Success(c, gin.H{
+		"success": true,
+		"message": "回答已接收",
 	})
 }

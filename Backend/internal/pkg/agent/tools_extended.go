@@ -100,14 +100,17 @@ mode=batch 时:
 func v4QueryDeviceDataTool() *Tool {
 	return &Tool{
 		Name: "query_device_data",
-		Description: `查询用户的设备实时数据。
+		Description: `查询用户的设备实时数据（位置、屏幕、电量等传感器数据）。
 
 【何时调用】
 - 用户问"我现在在哪里"、"我在什么地方"
-- 用户问"我今天有什么日程"、"我现在有会吗"
 - 用户问"我手机还有多少电"
 - 用户问"我在做什么"、"我现在状态怎么样"
-- Agent 需要获取上下文做分析时
+- Agent 需要获取设备传感器数据做分析时
+
+【何时不调用】
+- 用户查询日程安排时（应该用 get_schedule）
+- 用户问"我今天有什么安排"时（应该用 get_schedule）
 
 【参数说明】
 - data_type: 要查询的数据类型

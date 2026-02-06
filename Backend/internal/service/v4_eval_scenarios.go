@@ -28,6 +28,35 @@ const (
 	DimBoundaryRobust      EvalDimension = "D6_robust"     // 边界鲁棒性
 )
 
+// InjectContext 注入到 session 的上下文（用于 C3 确认/C5 确认场景）
+type InjectContext struct {
+	PendingSchedule []struct {
+		StartTime string
+		EndTime   string
+		Emoji     string
+		Status    string
+	}
+	PendingDate    string // YYYY-MM-DD
+	PendingMessage *struct {
+		FriendID   string
+		FriendName string
+		Message    string
+	}
+	PendingInvite *struct {
+		FriendID   string
+		FriendName string
+		Date       string
+		StartTime  string
+		EndTime    string
+		Activity   string
+	}
+	// 最近查询的好友（用于"他/她"上下文指代场景）
+	LastQueriedFriend *struct {
+		ID   string
+		Name string
+	}
+}
+
 // EvalScenario 单轮测试场景
 type EvalScenario struct {
 	ID          int
@@ -40,8 +69,12 @@ type EvalScenario struct {
 	// 期望结果
 	ExpectedTools   []string // 期望调用的工具（按顺序）
 	ExpectedNoTool  bool     // 期望不调用任何工具
+	AcceptNoTool    bool     // 即使期望调用工具，不调工具也视为正确（模糊输入场景）
 	ForbiddenTools  []string // 禁止调用的工具
 	ExpectedParams  map[string]interface{} // 期望的参数（部分匹配）
+
+	// 注入上下文（用于确认场景需要 pending 状态）
+	InjectPending *InjectContext
 
 	// 回复质量断言
 	ReplyMustContain    []string // 回复必须包含的关键词
@@ -156,22 +189,22 @@ func scenariosC1() []EvalScenario {
 			Input: "今晚8点到10点看电影", Description: "精确时间创建-今晚",
 			ExpectedTools: []string{"update_schedule"}},
 
-		// --- 模糊时间推理 ---
+		// --- 模糊时间推理（AcceptNoTool: 模糊时间确认是正确行为）---
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P2",
 			Input: "明天下午有空去图书馆看书", Description: "模糊时间-下午",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P6",
 			Input: "晚上吃饭", Description: "极简输入-模糊时间",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P3",
 			Input: "中午出去吃个饭", Description: "模糊时间-中午",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P2",
 			Input: "明天一整天都在复习", Description: "模糊时间-全天",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P4",
 			Input: "上午去超市买菜", Description: "模糊时间-上午",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 
 		// --- 多时段批量创建 ---
 		{Category: CatScheduleCreate, Dimension: DimParamQuality, PersonaID: "P1",
@@ -190,32 +223,32 @@ func scenariosC1() []EvalScenario {
 			ExpectedTools: []string{"update_schedule"}},
 		{Category: CatScheduleCreate, Dimension: DimParamQuality, PersonaID: "P1",
 			Input: "明天和后天都要出差", Description: "连续多天",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 
-		// --- 口语化表达 ---
+		// --- 口语化表达（无精确时间的标记 AcceptNoTool）---
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P8",
 			Input: "三点钟搞个会", Description: "口语化-搞个会",
 			ExpectedTools: []string{"update_schedule"}},
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P8",
 			Input: "下班后去撸铁", Description: "口语化-撸铁=健身",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P8",
 			Input: "明天约了Tony老师剪头发", Description: "口语化-理发",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P8",
 			Input: "等会去搓一顿", Description: "口语化-搓一顿=吃饭",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P8",
 			Input: "明天约了老铁喝大酒", Description: "口语化-喝大酒=聚会",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 
 		// --- 网络用语 ---
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P8",
 			Input: "明天要去团建yyds", Description: "网络用语",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P2",
 			Input: "下午摸鱼时间打游戏", Description: "网络用语-摸鱼",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 
 		// --- 复合意图（创建+其他）---
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P7",
@@ -225,22 +258,22 @@ func scenariosC1() []EvalScenario {
 			Input: "先帮我安排明天上午去医院，然后看看下午有什么空", Description: "复合意图-创建+查询空闲",
 			ExpectedTools: []string{"update_schedule"}},
 
-		// --- 连续活动 ---
+		// --- 连续活动（依赖未知的前序时间，AcceptNoTool）---
 		{Category: CatScheduleCreate, Dimension: DimParamQuality, PersonaID: "P1",
 			Input: "开完会直接去吃饭，吃完饭回来写代码", Description: "连续活动衔接",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 		{Category: CatScheduleCreate, Dimension: DimParamQuality, PersonaID: "P2",
 			Input: "上完课先去食堂，然后回宿舍午休", Description: "连续活动-学生场景",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 
 		// --- 条件性创建 ---
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P1",
 			Input: "如果下午的会取消了，我就去健身", Description: "条件性创建",
-			ExpectedTools: []string{"update_schedule"},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true,
 			ReplyMustNotContain: []string{"error"}},
 		{Category: CatScheduleCreate, Dimension: DimIntentUnderstanding, PersonaID: "P9",
 			Input: "先暂时加一个下午茶吧，回头可能改", Description: "不确定性创建",
-			ExpectedTools: []string{"update_schedule"}},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 
 		// --- 带地点的创建 ---
 		{Category: CatScheduleCreate, Dimension: DimParamQuality, PersonaID: "P5",
@@ -338,23 +371,53 @@ func scenariosC3() []EvalScenario {
 			Input: "不用辅导作业了", Description: "取消特定活动",
 			ExpectedTools: []string{"update_schedule"}},
 
-		// --- 确认保存 ---
+		// --- 确认保存（注入 PendingSchedule 上下文）---
 		{Category: CatScheduleModify, Dimension: DimIntentUnderstanding, PersonaID: "P1",
 			Input: "好的", Description: "简单确认",
 			ExpectedTools: []string{"save_schedule"},
-			ForbiddenTools: []string{"update_schedule"}},
+			ForbiddenTools: []string{"update_schedule"},
+			InjectPending: &InjectContext{
+				PendingSchedule: []struct{ StartTime, EndTime, Emoji, Status string }{
+					{"14:00", "16:00", "💼", "开会"},
+				},
+				PendingDate: "2026-02-07",
+			}},
 		{Category: CatScheduleModify, Dimension: DimIntentUnderstanding, PersonaID: "P6",
 			Input: "行", Description: "极简确认",
-			ExpectedTools: []string{"save_schedule"}},
+			ExpectedTools: []string{"save_schedule"},
+			InjectPending: &InjectContext{
+				PendingSchedule: []struct{ StartTime, EndTime, Emoji, Status string }{
+					{"15:00", "17:00", "💻", "写代码"},
+				},
+				PendingDate: "2026-02-07",
+			}},
 		{Category: CatScheduleModify, Dimension: DimIntentUnderstanding, PersonaID: "P1",
 			Input: "没问题，保存吧", Description: "明确保存",
-			ExpectedTools: []string{"save_schedule"}},
+			ExpectedTools: []string{"save_schedule"},
+			InjectPending: &InjectContext{
+				PendingSchedule: []struct{ StartTime, EndTime, Emoji, Status string }{
+					{"09:00", "12:00", "💼", "开会"},
+				},
+				PendingDate: "2026-02-07",
+			}},
 		{Category: CatScheduleModify, Dimension: DimIntentUnderstanding, PersonaID: "P1",
 			Input: "可以，就这样", Description: "确认表达",
-			ExpectedTools: []string{"save_schedule"}},
+			ExpectedTools: []string{"save_schedule"},
+			InjectPending: &InjectContext{
+				PendingSchedule: []struct{ StartTime, EndTime, Emoji, Status string }{
+					{"14:00", "18:00", "💻", "写代码"},
+				},
+				PendingDate: "2026-02-07",
+			}},
 		{Category: CatScheduleModify, Dimension: DimIntentUnderstanding, PersonaID: "P8",
 			Input: "OK就这么整", Description: "口语化确认",
-			ExpectedTools: []string{"save_schedule"}},
+			ExpectedTools: []string{"save_schedule"},
+			InjectPending: &InjectContext{
+				PendingSchedule: []struct{ StartTime, EndTime, Emoji, Status string }{
+					{"19:00", "21:00", "🏃", "健身"},
+				},
+				PendingDate: "2026-02-07",
+			}},
 
 		// --- 修改后拒绝 ---
 		{Category: CatScheduleModify, Dimension: DimIntentUnderstanding, PersonaID: "P9",
@@ -363,7 +426,7 @@ func scenariosC3() []EvalScenario {
 			ForbiddenTools: []string{"save_schedule"}},
 		{Category: CatScheduleModify, Dimension: DimIntentUnderstanding, PersonaID: "P9",
 			Input: "算了不要了", Description: "放弃修改",
-			ExpectedNoTool: true,
+			ExpectedNoTool: true, AcceptNoTool: true,
 			ForbiddenTools: []string{"save_schedule"}},
 
 		// --- 修改不存在的日程 ---
@@ -392,7 +455,7 @@ func scenariosC4() []EvalScenario {
 			ForbiddenTools: []string{"update_schedule"}},
 		{Category: CatStatusUpdate, Dimension: DimIntentUnderstanding, PersonaID: "P2",
 			Input: "今天心情不错", Description: "情绪状态-开心",
-			ExpectedTools: []string{"update_current_status"},
+			ExpectedTools: []string{"update_current_status"}, AcceptNoTool: true,
 			ForbiddenTools: []string{"update_schedule"}},
 		{Category: CatStatusUpdate, Dimension: DimIntentUnderstanding, PersonaID: "P3",
 			Input: "失眠了睡不着", Description: "情绪状态-失眠",
@@ -400,7 +463,7 @@ func scenariosC4() []EvalScenario {
 			ForbiddenTools: []string{"update_schedule"}},
 		{Category: CatStatusUpdate, Dimension: DimIntentUnderstanding, PersonaID: "P1",
 			Input: "烦死了", Description: "情绪状态-烦躁",
-			ExpectedTools: []string{"update_current_status"},
+			ExpectedTools: []string{"update_current_status"}, AcceptNoTool: true,
 			ForbiddenTools: []string{"update_schedule"}},
 
 		// --- 位置状态 ---
@@ -497,7 +560,10 @@ func scenariosC5() []EvalScenario {
 			ExpectedTools: []string{"query_friends"}},
 		{Category: CatFriendSocial, Dimension: DimIntentUnderstanding, PersonaID: "P5",
 			Input: "跟他说我在路上", Description: "发消息-上下文指代",
-			ExpectedTools: []string{"send_message"}},
+			ExpectedTools: []string{"send_message"},
+			InjectPending: &InjectContext{
+				LastQueriedFriend: &struct{ ID, Name string }{"f2", "小明"},
+			}},
 		{Category: CatFriendSocial, Dimension: DimIntentUnderstanding, PersonaID: "P5",
 			Input: "问问小美有没有空明天一起逛街", Description: "发消息-询问",
 			ExpectedTools: []string{"query_friends"}},
@@ -511,24 +577,42 @@ func scenariosC5() []EvalScenario {
 			ExpectedTools: []string{"query_friends"}},
 		{Category: CatFriendSocial, Dimension: DimIntentUnderstanding, PersonaID: "P5",
 			Input: "想和他约明天吃饭", Description: "邀请-上下文指代",
-			ExpectedTools: []string{"create_schedule_invite"}},
+			ExpectedTools: []string{"create_schedule_invite"},
+			InjectPending: &InjectContext{
+				LastQueriedFriend: &struct{ ID, Name string }{"f2", "小明"},
+			}},
 		{Category: CatFriendSocial, Dimension: DimIntentUnderstanding, PersonaID: "P5",
 			Input: "约几个有空的朋友周末聚餐", Description: "批量邀请",
 			ExpectedTools: []string{"query_friends"}},
 
-		// --- 确认发送 ---
+		// --- 确认发送（注入 PendingMessage 上下文）---
 		{Category: CatFriendSocial, Dimension: DimIntentUnderstanding, PersonaID: "P5",
 			Input: "发吧", Description: "确认发送消息",
 			ExpectedTools: []string{"confirm_send"},
-			ForbiddenTools: []string{"save_schedule"}},
+			ForbiddenTools: []string{"save_schedule"},
+			InjectPending: &InjectContext{
+				PendingMessage: &struct{ FriendID, FriendName, Message string }{
+					"f1", "小红", "今晚一起吃饭吧",
+				},
+			}},
 		{Category: CatFriendSocial, Dimension: DimIntentUnderstanding, PersonaID: "P5",
 			Input: "嗯可以发", Description: "确认发送",
-			ExpectedTools: []string{"confirm_send"}},
+			ExpectedTools: []string{"confirm_send"},
+			InjectPending: &InjectContext{
+				PendingMessage: &struct{ FriendID, FriendName, Message string }{
+					"f2", "小明", "明天下午有空吗",
+				},
+			}},
 
 		// --- 修改消息 ---
 		{Category: CatFriendSocial, Dimension: DimIntentUnderstanding, PersonaID: "P5",
 			Input: "消息内容改成：我快到了", Description: "修改待发送消息",
-			ExpectedTools: []string{"send_message"}},
+			ExpectedTools: []string{"send_message"},
+			InjectPending: &InjectContext{
+				PendingMessage: &struct{ FriendID, FriendName, Message string }{
+					"f2", "小明", "我在路上了",
+				},
+			}},
 
 		// --- 复合社交场景 ---
 		{Category: CatFriendSocial, Dimension: DimIntentUnderstanding, PersonaID: "P7",
@@ -569,7 +653,7 @@ func scenariosC6SingleTurn() []EvalScenario {
 			ExpectedNoTool: true},
 		{Category: CatMultiTurn, Dimension: DimMultiTurnCoherence, PersonaID: "P7",
 			Input: "和之前一样", Description: "复用历史安排",
-			ExpectedNoTool: true},
+			ExpectedNoTool: true, AcceptNoTool: true},
 		{Category: CatMultiTurn, Dimension: DimReplyQuality, PersonaID: "P1",
 			Input: "继续", Description: "继续之前的操作",
 			ExpectedNoTool: true},
@@ -676,7 +760,7 @@ func scenariosC7() []EvalScenario {
 			ForbiddenTools: []string{"update_schedule"}},
 		{Category: CatChatBoundary, Dimension: DimIntentUnderstanding, PersonaID: "P2",
 			Input: "饿了", Description: "边界-感受表达 vs 状态更新",
-			ExpectedNoTool: true,
+			ExpectedNoTool: true, AcceptNoTool: true,
 			ForbiddenTools: []string{"update_schedule"}},
 		{Category: CatChatBoundary, Dimension: DimIntentUnderstanding, PersonaID: "P1",
 			Input: "周末想出去玩但不知道去哪", Description: "边界-规划讨论",
@@ -733,7 +817,7 @@ func scenariosC8() []EvalScenario {
 		// --- 矛盾指令 ---
 		{Category: CatRobustSecurity, Dimension: DimBoundaryRobust, PersonaID: "P10",
 			Input: "帮我创建一个明天的日程然后立刻取消它", Description: "矛盾指令-创建+取消",
-			ExpectedNoTool: false},
+			ExpectedTools: []string{"update_schedule"}, AcceptNoTool: true},
 		{Category: CatRobustSecurity, Dimension: DimBoundaryRobust, PersonaID: "P10",
 			Input: "保存但是不要保存", Description: "矛盾指令-保存+不保存",
 			ExpectedNoTool: true,

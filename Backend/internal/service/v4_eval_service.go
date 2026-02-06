@@ -41,7 +41,7 @@ func NewV4EvalService(apiKey, model string) *V4EvalService {
 	return &V4EvalService{
 		llmAdapter:  llmAdapter,
 		judge:       NewEvalJudge(llmAdapter),
-		tools:       agent.V4AllTools(),
+		tools:       agent.V4CoreTools(),
 		concurrency: 3,
 		modelName:   model,
 	}
@@ -106,15 +106,67 @@ func (s *V4EvalService) RunSingleScenario(ctx context.Context, scenario EvalScen
 	persona := GetPersona(scenario.PersonaID)
 	session := s.buildMockSession(persona)
 
+	// 注入 InjectPending 上下文（用于确认场景需要 pending 状态）
+	if scenario.InjectPending != nil {
+		ic := scenario.InjectPending
+		// 注入 PendingSchedule
+		if len(ic.PendingSchedule) > 0 {
+			for _, ps := range ic.PendingSchedule {
+				session.PendingSchedule = append(session.PendingSchedule, model.ScheduleItem{
+					StartTime: ps.StartTime,
+					EndTime:   ps.EndTime,
+					Emoji:     ps.Emoji,
+					Status:    ps.Status,
+				})
+			}
+			if ic.PendingDate != "" {
+				t, err := time.Parse("2006-01-02", ic.PendingDate)
+				if err == nil {
+					session.PendingDate = t
+				}
+			} else {
+				session.PendingDate = time.Now()
+			}
+		}
+		// 注入 PendingMessage
+		if ic.PendingMessage != nil {
+			session.PendingMessage = &model.V4PendingMessage{
+				FriendID:   ic.PendingMessage.FriendID,
+				FriendName: ic.PendingMessage.FriendName,
+				Message:    ic.PendingMessage.Message,
+			}
+		}
+		// 注入 PendingInvite
+		if ic.PendingInvite != nil {
+			session.PendingInvite = &model.V4PendingInvite{
+				FriendID:   ic.PendingInvite.FriendID,
+				FriendName: ic.PendingInvite.FriendName,
+				Date:       ic.PendingInvite.Date,
+				StartTime:  ic.PendingInvite.StartTime,
+				EndTime:    ic.PendingInvite.EndTime,
+				Activity:   ic.PendingInvite.Activity,
+			}
+		}
+		// 注入 LastQueriedFriend
+		if ic.LastQueriedFriend != nil {
+			session.LastQueriedFriend = &model.V4FriendInfo{
+				ID:   ic.LastQueriedFriend.ID,
+				Name: ic.LastQueriedFriend.Name,
+			}
+		}
+	}
+
 	// 构建消息
 	messages := s.buildEvalMessages(session, scenario.Input)
 
-	// 调用 LLM
+	// 调用 LLM（与生产代码一致：低温度 + thinking mode）
 	startTime := time.Now()
 	response, err := s.llmAdapter.ChatWithTools(ctx, &agent.LLMRequest{
-		Messages:    messages,
-		Tools:       s.tools,
-		Temperature: 0.7,
+		Messages:       messages,
+		Tools:          s.tools,
+		Temperature:    0.3,
+		EnableThinking: true,
+		ThinkingBudget: 2048,
 	})
 	result.ResponseMs = time.Since(startTime).Milliseconds()
 
@@ -208,12 +260,14 @@ func (s *V4EvalService) RunMultiTurnScenario(ctx context.Context, scenario Multi
 		// 构建消息
 		messages := s.buildMessagesFromSession(session)
 
-		// 调用 LLM
+		// 调用 LLM（与生产代码一致：低温度 + thinking mode）
 		turnStart := time.Now()
 		response, err := s.llmAdapter.ChatWithTools(ctx, &agent.LLMRequest{
-			Messages:    messages,
-			Tools:       s.tools,
-			Temperature: 0.7,
+			Messages:       messages,
+			Tools:          s.tools,
+			Temperature:    0.3,
+			EnableThinking: true,
+			ThinkingBudget: 2048,
 		})
 		turnResult.ResponseMs = time.Since(turnStart).Milliseconds()
 
@@ -259,9 +313,11 @@ func (s *V4EvalService) RunMultiTurnScenario(ctx context.Context, scenario Multi
 			// 在工具结果注入后，再调 LLM 让它生成最终回复
 			messages2 := s.buildMessagesFromSession(session)
 			response2, err2 := s.llmAdapter.ChatWithTools(ctx, &agent.LLMRequest{
-				Messages:    messages2,
-				Tools:       s.tools,
-				Temperature: 0.7,
+				Messages:       messages2,
+				Tools:          s.tools,
+				Temperature:    0.3,
+				EnableThinking: true,
+				ThinkingBudget: 2048,
 			})
 			if err2 == nil && response2.Content != "" {
 				turnResult.Response = response2.Content
@@ -561,10 +617,7 @@ func (s *V4EvalService) aggregateReport(report *V4EvalReport) {
 		report.AvgJudgeScore = totalJudge / float64(judgeCount)
 	}
 
-	// 六维评分
-	report.DimensionScores = s.calcDimensionScores(dimCounts, report)
-
-	// 多轮摘要
+	// 多轮摘要（必须在 calcDimensionScores 之前计算，否则 D3 读到 nil）
 	if len(report.MultiTurnResults) > 0 {
 		mt := &MultiTurnSummary{Total: len(report.MultiTurnResults)}
 		var sumAcc float64
@@ -578,6 +631,9 @@ func (s *V4EvalService) aggregateReport(report *V4EvalReport) {
 		mt.AvgTotalMs = sumMs / int64(mt.Total)
 		report.MultiTurnSummary = mt
 	}
+
+	// 六维评分
+	report.DimensionScores = s.calcDimensionScores(dimCounts, report)
 }
 
 // calcDimensionScores 计算六维评分
@@ -961,6 +1017,14 @@ func (s *V4EvalService) buildEvalSystemPrompt(session *model.V4Session) string {
 - 时间模糊时先确认，不要猜测
 - 用户只是闲聊时，不需要调用任何工具，直接回复即可
 
+【重要区分】
+- 用户描述当前状态（"我在加班"、"好累"、"到公司了"）→ update_current_status（即时生效，不需确认）
+- 用户规划时间安排（"下午3点开会"、"明天去健身"）→ update_schedule（生成预览等确认）
+- 用户给出精确时间+活动，即使多条也应一次性调用 update_schedule（如"10点瑜伽课，2点兼职，7点聚餐"→一次 update_schedule 包含3个items）
+- 修改时刻表时只传变更的条目，operation="modify"，系统会自动保留其他时段
+- 用户说"给他/她发消息"时，使用上一次 query_friends 查到的好友
+- save_schedule 和 confirm_send 是互斥的：save_schedule 保存日程，confirm_send 发送消息/邀请。根据待确认内容类型选择正确的工具
+
 `)
 
 	today := now.Format("2006-01-02")
@@ -1002,12 +1066,10 @@ func (s *V4EvalService) buildEvalSystemPrompt(session *model.V4Session) string {
 			session.PendingInvite.Activity))
 	}
 
-	sb.WriteString(`【重要区分】
-- 用户描述当前状态（"我在加班"、"好累"）→ update_current_status（即时生效，不需确认）
-- 用户规划时间安排（"下午3点开会"）→ update_schedule（生成预览等确认）
-- 修改时刻表时只传变更的条目，operation="modify"，系统会自动保留其他时段
-- 用户说"给他/她发消息"时，使用上一次 query_friends 查到的好友
-`)
+	if session.LastQueriedFriend != nil {
+		sb.WriteString(fmt.Sprintf("【最近查询的好友】%s (ID: %s)\n用户说\"他/她\"时指的是这个好友\n\n",
+			session.LastQueriedFriend.Name, session.LastQueriedFriend.ID))
+	}
 
 	return sb.String()
 }
