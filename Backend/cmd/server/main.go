@@ -199,7 +199,7 @@ func main() {
 	voiceScheduleService := service.NewVoiceScheduleService(scheduleRepo, memoryRepo, userProfileService, redisClient, asrClient, llmClient, cfg.LLM.APIKey)
 	voiceScheduleServiceV4 := service.NewVoiceScheduleServiceV4(
 		scheduleRepo, memoryRepo, memoryDocRepo, userProfileService,
-		redisClient, asrClient, cfg.LLM.APIKey,
+		redisClient, asrClient, cfg.LLM.APIKey, cfg.LLM.Model,
 		friendshipService, conversationService, agentService,
 		contactService,
 	)
