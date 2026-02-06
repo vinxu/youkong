@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"youkong/internal/middleware"
+	"youkong/internal/model"
 	"youkong/internal/pkg/poster"
 	"youkong/internal/pkg/response"
 	"youkong/internal/repository"
@@ -18,15 +19,17 @@ type UserHandler struct {
 	inviteBaseURL        string
 	messageRepo          *repository.MessageRepository
 	userSettingsRepo     *repository.UserSettingsRepository
+	scheduleRepo         *repository.ScheduleRepository
 }
 
-func NewUserHandler(userService *service.UserService, posterGenerator *poster.Generator, inviteBaseURL string, messageRepo *repository.MessageRepository, userSettingsRepo *repository.UserSettingsRepository) *UserHandler {
+func NewUserHandler(userService *service.UserService, posterGenerator *poster.Generator, inviteBaseURL string, messageRepo *repository.MessageRepository, userSettingsRepo *repository.UserSettingsRepository, scheduleRepo *repository.ScheduleRepository) *UserHandler {
 	return &UserHandler{
 		userService:          userService,
 		posterGenerator:      posterGenerator,
 		inviteBaseURL:        inviteBaseURL,
 		messageRepo:          messageRepo,
 		userSettingsRepo:     userSettingsRepo,
+		scheduleRepo:         scheduleRepo,
 	}
 }
 
@@ -214,8 +217,18 @@ func (h *UserHandler) GetSettings(c *gin.Context) {
 		return
 	}
 
+	// 获取时刻表偏好（包含 show_city）
+	showCity := true // 默认显示城市
+	if h.scheduleRepo != nil {
+		pref, err := h.scheduleRepo.GetUserPreference(c.Request.Context(), userID)
+		if err == nil && pref != nil {
+			showCity = pref.ShowCity
+		}
+	}
+
 	response.Success(c, gin.H{
 		"auto_predict_enabled": settings.AutoPredictEnabled,
+		"show_city":            showCity,
 	})
 }
 
@@ -230,6 +243,7 @@ func (h *UserHandler) UpdateSettings(c *gin.Context) {
 
 	var req struct {
 		AutoPredictEnabled *bool `json:"auto_predict_enabled"`
+		ShowCity           *bool `json:"show_city"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.ParamError(c, "参数错误")
@@ -255,7 +269,35 @@ func (h *UserHandler) UpdateSettings(c *gin.Context) {
 		return
 	}
 
+	// 处理 show_city 设置（在 user_schedule_preferences 表中）
+	showCity := true // 默认值
+	if h.scheduleRepo != nil {
+		// 获取当前偏好
+		pref, _ := h.scheduleRepo.GetUserPreference(c.Request.Context(), userID)
+		if pref == nil {
+			pref = &model.UserSchedulePreference{
+				UserID:            userID,
+				HidePastEvents:    false,
+				DefaultVisibility: "all_friends",
+				ShowCity:          true,
+			}
+		}
+
+		// 更新 show_city
+		if req.ShowCity != nil {
+			pref.ShowCity = *req.ShowCity
+		}
+		showCity = pref.ShowCity
+
+		// 保存偏好
+		if err := h.scheduleRepo.UpsertUserPreference(c.Request.Context(), pref); err != nil {
+			response.InternalError(c, "保存城市显示设置失败: "+err.Error())
+			return
+		}
+	}
+
 	response.Success(c, gin.H{
 		"auto_predict_enabled": settings.AutoPredictEnabled,
+		"show_city":            showCity,
 	})
 }

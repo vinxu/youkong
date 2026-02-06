@@ -217,6 +217,16 @@ type UserAnalysisCache struct {
 
 // SaveAnalysisCache 保存分析缓存
 func (r *MemoryRepository) SaveAnalysisCache(ctx context.Context, userID string, result *model.AnalysisResult) error {
+	// 如果是 AI 猜测的结果，需要检查现有缓存
+	// 用户手动设置的状态（is_ai_guess=false）不应被 AI 猜测覆盖
+	if result.IsAIGuess {
+		existing, err := r.GetAnalysisCache(ctx, userID)
+		if err == nil && existing != nil && !existing.IsAIGuess {
+			// 现有缓存是用户手动设置的，不要用 AI 猜测覆盖
+			return nil
+		}
+	}
+
 	query := `INSERT INTO user_analysis_cache (
 		user_id, availability_status, availability_probability, availability_reason, availability_confidence,
 		life_status_emoji, life_status_label, life_status_description, mood, activity, context, is_ai_guess

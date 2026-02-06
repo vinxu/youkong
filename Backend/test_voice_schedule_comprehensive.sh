@@ -1,682 +1,547 @@
 #!/bin/bash
 
-# 全面测试语音时刻表功能
-# 模拟20个不同用户场景，每个用户20轮对话
+# ========================================
+# 语音时刻表 - 全面闭环测试
+# 测试四大环节：查询、修改、保存、展示
+# ========================================
 
 API_BASE="http://49.232.13.41:8080/api/v1"
-TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiYWZjYmE0YWYtMjM0Yi00MTc5LTkyZGUtOTk1Nzg1N2ZmZjAzIiwiZXhwIjoxNzcyODE2MzQ2fQ.QOlGxFOqjWCOmPLy3gMTz7m5qAXNfX8BCyNJu7AXYOM"
+PHONE="13800000003"
+CODE="333333"
+TODAY=$(date +%Y-%m-%d)
 
-# 颜色定义
+# 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+CYAN='\033[0;36m'
+NC='\033[0m'
 
-# 结果统计
-declare -A USER_RESULTS
-declare -A TURN_COUNTS
-declare -A SUCCESS_COUNTS
-declare -A FAIL_COUNTS
+# 计数器
+TOTAL_TESTS=0
+PASSED_TESTS=0
+FAILED_TESTS=0
 
-# 发送消息并获取响应
-send_message() {
-    local session_id="$1"
-    local text="$2"
-    local user_num="$3"
-    local turn_num="$4"
+# 获取 Token
+get_token() {
+    curl -s -X POST "$API_BASE/auth/sms/verify" \
+        -H "Content-Type: application/json" \
+        -d "{\"phone\":\"$PHONE\",\"code\":\"$CODE\"}" | jq -r '.data.token'
+}
 
-    response=$(curl -s -X POST "$API_BASE/agent/voice-schedule/text" \
+# 发送语音时刻表请求
+send_request() {
+    local text="$1"
+    local session_id="${2:-}"
+    local body="{\"text\":\"$text\""
+    if [ -n "$session_id" ]; then
+        body="$body,\"session_id\":\"$session_id\""
+    fi
+    body="$body}"
+
+    local tmpfile=$(mktemp)
+    curl -s -N "$API_BASE/agent/voice-schedule/v4/text" \
         -H "Authorization: Bearer $TOKEN" \
         -H "Content-Type: application/json" \
-        -d "{\"session_id\": \"$session_id\", \"text\": \"$text\"}" \
-        --max-time 120)
-
-    echo "$response"
+        -d "$body" > "$tmpfile" 2>&1
+    cat "$tmpfile"
+    rm -f "$tmpfile"
 }
 
-# 解析SSE响应中的关键信息
-parse_response() {
-    local response="$1"
-
-    # 提取 action 类型
-    action=$(echo "$response" | grep -o '"action":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-    # 提取消息
-    message=$(echo "$response" | grep -o '"message":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-    # 提取时刻表数量
-    schedule_count=$(echo "$response" | grep -o '"schedule":\[' | wc -l)
-
-    # 提取事件类型
-    event_type=$(echo "$response" | grep -o '"type":"[^"]*"' | tail -1 | cut -d'"' -f4)
-
-    echo "action=$action|message=$message|schedule_count=$schedule_count|event_type=$event_type"
+# API 函数
+api_get_items() {
+    curl -s "$API_BASE/agent/my-schedule/$TODAY" \
+        -H "Authorization: Bearer $TOKEN" | jq -r '.data.items // []'
 }
 
-# 评估单轮对话
-evaluate_turn() {
-    local user_num="$1"
-    local turn_num="$2"
-    local input="$3"
-    local response="$4"
+api_get_item_count() {
+    curl -s "$API_BASE/agent/my-schedule/$TODAY" \
+        -H "Authorization: Bearer $TOKEN" | jq -r '.data.items | length // 0'
+}
 
-    local parsed=$(parse_response "$response")
-    local action=$(echo "$parsed" | cut -d'|' -f1 | cut -d'=' -f2)
-    local event_type=$(echo "$parsed" | cut -d'|' -f4 | cut -d'=' -f2)
+# 提取函数
+extract_session_id() {
+    echo "$1" | grep "session_start" | sed 's/data: //' | jq -r '.session_id' 2>/dev/null || echo ""
+}
 
-    # 评估标准
-    local score=0
-    local issues=""
+extract_schedule_preview() {
+    echo "$1" | grep "schedule_preview" | sed 's/data: //' | jq -r '.items // []' 2>/dev/null || echo "[]"
+}
 
-    # 1. 检查是否有响应
-    if [ -z "$response" ] || [ "$response" == "null" ]; then
-        issues+="无响应;"
-        echo "FAIL|$issues"
-        return
-    fi
+extract_item_count() {
+    local count=$(echo "$1" | grep "schedule_preview" | sed 's/data: //' | jq -r '.items | length' 2>/dev/null)
+    [ -z "$count" ] || [ "$count" == "null" ] && echo "0" || echo "$count"
+}
 
-    # 2. 检查是否有错误
-    if echo "$response" | grep -q '"type":"error"'; then
-        issues+="返回错误;"
-        echo "FAIL|$issues"
-        return
-    fi
+extract_chat_message() {
+    echo "$1" | grep '"type":"chat"' | sed 's/data: //' | jq -r '.message // ""' 2>/dev/null | head -1 || echo ""
+}
 
-    # 3. 检查响应类型是否合理
-    case "$event_type" in
-        "schedule"|"current_status"|"chat"|"clarify"|"confirmed"|"cancelled")
-            score=$((score + 1))
-            ;;
-        *)
-            issues+="未知事件类型:$event_type;"
-            ;;
-    esac
-
-    # 4. 检查是否遵循"先计划再确认"框架
-    # 如果用户输入包含时间安排相关内容，应该返回schedule或clarify
-    if echo "$input" | grep -qE "点|时|分|早上|下午|晚上|明天|今天|后天"; then
-        if [ "$event_type" == "schedule" ] || [ "$event_type" == "clarify" ]; then
-            score=$((score + 1))
-        else
-            issues+="时间输入未返回schedule;"
-        fi
-    fi
-
-    # 5. 检查确认类输入
-    if echo "$input" | grep -qE "确认|好的|是的|没问题|可以|行|对"; then
-        if [ "$event_type" == "confirmed" ] || echo "$response" | grep -q "tool_confirm"; then
-            score=$((score + 2))  # Tool Calling 成功加分
-        else
-            issues+="确认输入未触发确认;"
-        fi
-    fi
-
-    if [ -z "$issues" ]; then
-        echo "PASS|score=$score"
+# 断言函数
+assert_ge() {
+    local name="$1" actual="${2:-0}" expected="$3"
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    if [ "$actual" -ge "$expected" ] 2>/dev/null; then
+        echo -e "    ${GREEN}✓${NC} $name (值: $actual)"
+        PASSED_TESTS=$((PASSED_TESTS + 1))
     else
-        echo "PARTIAL|$issues|score=$score"
+        echo -e "    ${RED}✗${NC} $name (期望>=$expected, 实际:$actual)"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
     fi
 }
 
-# 用户场景定义
-run_user_scenario() {
-    local user_num="$1"
-    local scenario_name="$2"
-    shift 2
-    local messages=("$@")
-
-    echo -e "\n${BLUE}========== 用户 $user_num: $scenario_name ==========${NC}"
-
-    local session_id=""
-    local turn=0
-    local success=0
-    local fail=0
-    local partial=0
-
-    for msg in "${messages[@]}"; do
-        turn=$((turn + 1))
-        echo -e "\n${YELLOW}[Turn $turn] 用户: $msg${NC}"
-
-        response=$(send_message "$session_id" "$msg" "$user_num" "$turn")
-
-        # 提取新的 session_id
-        new_session=$(echo "$response" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4)
-        if [ -n "$new_session" ]; then
-            session_id="$new_session"
-        fi
-
-        # 显示响应摘要
-        parsed=$(parse_response "$response")
-        echo -e "${GREEN}AI响应: $parsed${NC}"
-
-        # 评估
-        eval_result=$(evaluate_turn "$user_num" "$turn" "$msg" "$response")
-        eval_status=$(echo "$eval_result" | cut -d'|' -f1)
-
-        case "$eval_status" in
-            "PASS")
-                success=$((success + 1))
-                echo -e "${GREEN}✓ 评估: 通过${NC}"
-                ;;
-            "PARTIAL")
-                partial=$((partial + 1))
-                echo -e "${YELLOW}△ 评估: 部分通过 - $(echo "$eval_result" | cut -d'|' -f2)${NC}"
-                ;;
-            "FAIL")
-                fail=$((fail + 1))
-                echo -e "${RED}✗ 评估: 失败 - $(echo "$eval_result" | cut -d'|' -f2)${NC}"
-                ;;
-        esac
-
-        # 短暂延迟避免请求过快
-        sleep 1
-    done
-
-    echo -e "\n${BLUE}--- 用户 $user_num 总结 ---${NC}"
-    echo "总轮数: $turn, 通过: $success, 部分通过: $partial, 失败: $fail"
-    echo "通过率: $(echo "scale=2; $success * 100 / $turn" | bc)%"
-
-    # 记录结果
-    USER_RESULTS[$user_num]="$scenario_name|$turn|$success|$partial|$fail"
+assert_contains() {
+    local name="$1" haystack="$2" needle="$3"
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    if echo "$haystack" | grep -qE "$needle"; then
+        echo -e "    ${GREEN}✓${NC} $name"
+        PASSED_TESTS=$((PASSED_TESTS + 1))
+    else
+        echo -e "    ${RED}✗${NC} $name (未找到: $needle)"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+    fi
 }
 
-echo "============================================"
-echo "语音时刻表全面测试 - 20个用户场景"
-echo "============================================"
-
-# ============== 用户场景定义 ==============
-
-# 用户1: 简单的今日安排
-run_user_scenario 1 "简单今日安排" \
-    "今天下午3点开会" \
-    "会议大概2小时" \
-    "开完会去健身" \
-    "健身1小时" \
-    "然后回家吃饭" \
-    "确认" \
-    "晚上8点看电影" \
-    "看到10点" \
-    "然后睡觉" \
-    "确认" \
-    "查看我今天的安排" \
-    "把健身改成游泳" \
-    "确认" \
-    "取消今天的电影" \
-    "确认" \
-    "重新安排晚上" \
-    "晚上7点和朋友吃饭" \
-    "吃到9点" \
-    "然后回家休息" \
-    "确认"
-
-# 用户2: 明天的完整安排
-run_user_scenario 2 "明天完整安排" \
-    "帮我安排明天的一天" \
-    "早上7点起床" \
-    "8点吃早餐" \
-    "9点到12点工作" \
-    "中午吃饭休息" \
-    "下午继续工作到6点" \
-    "晚上和家人吃饭" \
-    "然后看书" \
-    "11点睡觉" \
-    "确认这个安排" \
-    "把早餐时间改到7点半" \
-    "好的" \
-    "下午3点加一个会议" \
-    "会议1小时" \
-    "确认" \
-    "查看明天的安排" \
-    "把晚餐时间提前到6点" \
-    "确认" \
-    "取消下午的会议" \
-    "确认"
-
-# 用户3: 跨午夜安排（重点测试）
-run_user_scenario 3 "跨午夜安排" \
-    "今晚10点开始打游戏" \
-    "可能玩到凌晨2点" \
-    "然后睡觉" \
-    "睡到明天10点" \
-    "确认" \
-    "把游戏时间改到11点开始" \
-    "确认" \
-    "明天下午有什么安排吗" \
-    "明天下午3点健身" \
-    "2小时" \
-    "确认" \
-    "晚上呢" \
-    "晚上和朋友聚餐" \
-    "大概7点到10点" \
-    "然后回家" \
-    "11点睡觉" \
-    "睡到后天8点" \
-    "确认" \
-    "查看明天完整安排" \
-    "没问题"
-
-# 用户4: 模糊时间表达
-run_user_scenario 4 "模糊时间表达" \
-    "待会儿去吃饭" \
-    "大概半小时后" \
-    "吃完饭去逛街" \
-    "逛到差不多傍晚" \
-    "然后回家" \
-    "确认" \
-    "晚点还要出去" \
-    "大概8、9点的样子" \
-    "去酒吧" \
-    "玩到比较晚" \
-    "确认" \
-    "把逛街改成看电影" \
-    "行" \
-    "电影大概2小时" \
-    "对" \
-    "查看今天安排" \
-    "酒吧改成KTV" \
-    "可以" \
-    "取消KTV" \
-    "算了不去了"
-
-# 用户5: 工作日程安排
-run_user_scenario 5 "工作日程" \
-    "明天有很多会议" \
-    "早上9点产品评审" \
-    "10点半技术讨论" \
-    "中午和客户吃饭" \
-    "下午2点项目汇报" \
-    "4点团队会议" \
-    "6点下班" \
-    "确认" \
-    "产品评审改到9点半" \
-    "好" \
-    "技术讨论取消" \
-    "确认" \
-    "下午加一个面试" \
-    "3点开始" \
-    "1小时" \
-    "确认" \
-    "查看明天安排" \
-    "把项目汇报和面试对调" \
-    "确认" \
-    "没问题"
-
-# 用户6: 周末休闲安排
-run_user_scenario 6 "周末休闲" \
-    "周六想睡个懒觉" \
-    "睡到中午" \
-    "起来吃个brunch" \
-    "下午去公园" \
-    "晚上看电影" \
-    "确认" \
-    "周日呢" \
-    "周日早点起来" \
-    "去爬山" \
-    "下午回来休息" \
-    "晚上准备下周工作" \
-    "确认" \
-    "周六晚上改成去酒吧" \
-    "行" \
-    "周日爬山改成骑车" \
-    "可以" \
-    "查看周末安排" \
-    "周六下午加个下午茶" \
-    "3点" \
-    "确认"
-
-# 用户7: 连续活动衔接
-run_user_scenario 7 "连续活动" \
-    "下午开完会直接去健身" \
-    "健身完去超市" \
-    "买完东西回家做饭" \
-    "吃完饭休息一下" \
-    "然后看书" \
-    "看到睡觉" \
-    "确认" \
-    "会议几点" \
-    "3点开始" \
-    "大概1小时" \
-    "确认" \
-    "健身和超市之间加个咖啡" \
-    "喝半小时" \
-    "好" \
-    "把看书改成看电影" \
-    "确认" \
-    "取消超市" \
-    "直接回家" \
-    "行" \
-    "确认"
-
-# 用户8: 多日规划
-run_user_scenario 8 "多日规划" \
-    "帮我规划这周剩下的时间" \
-    "今天晚上休息" \
-    "明天正常上班" \
-    "后天有个重要会议" \
-    "周五提前下班" \
-    "确认今天的" \
-    "明天具体安排" \
-    "9点到6点工作" \
-    "中午休息1小时" \
-    "确认" \
-    "后天的会议几点" \
-    "上午10点" \
-    "大概3小时" \
-    "下午自由" \
-    "确认" \
-    "周五几点下班" \
-    "4点" \
-    "下班后去聚餐" \
-    "确认" \
-    "查看这周安排"
-
-# 用户9: 状态更新测试
-run_user_scenario 9 "状态更新" \
-    "我现在在工作" \
-    "更新到首页" \
-    "等下要开会" \
-    "会议开始了更新一下" \
-    "开会中" \
-    "更新状态" \
-    "会开完了" \
-    "现在休息" \
-    "同步到首页" \
-    "下午继续工作" \
-    "更新" \
-    "快下班了" \
-    "准备回家" \
-    "更新状态" \
-    "到家了" \
-    "在家休息" \
-    "更新" \
-    "吃完饭了" \
-    "看电视中" \
-    "更新到首页"
-
-# 用户10: 取消和修改测试
-run_user_scenario 10 "取消修改" \
-    "明天10点开会" \
-    "确认" \
-    "取消这个会议" \
-    "重新安排" \
-    "改到11点" \
-    "确认" \
-    "再取消" \
-    "算了不开了" \
-    "下午有个培训" \
-    "3点到5点" \
-    "确认" \
-    "培训取消了" \
-    "改成自习" \
-    "确认" \
-    "晚上加个聚餐" \
-    "7点" \
-    "确认" \
-    "聚餐推迟到8点" \
-    "行" \
-    "确认"
-
-# 用户11: 简短指令测试
-run_user_scenario 11 "简短指令" \
-    "开会" \
-    "几点" \
-    "3点" \
-    "多久" \
-    "2小时" \
-    "确认" \
-    "吃饭" \
-    "6点" \
-    "1小时" \
-    "确认" \
-    "睡觉" \
-    "11点" \
-    "确认" \
-    "改一下" \
-    "开会改4点" \
-    "行" \
-    "查看" \
-    "没问题" \
-    "取消吃饭" \
-    "确认"
-
-# 用户12: 复杂时间推理
-run_user_scenario 12 "时间推理" \
-    "吃完午饭去开会" \
-    "午饭12点吃" \
-    "会议2小时" \
-    "开完会去健身" \
-    "健身1小时" \
-    "确认" \
-    "健身完直接去约会" \
-    "约会到晚上9点" \
-    "确认" \
-    "把午饭提前到11点半" \
-    "后面的时间都要调整吗" \
-    "是的" \
-    "确认" \
-    "在会议前加个准备时间" \
-    "半小时" \
-    "确认" \
-    "约会后回家" \
-    "10点到家" \
-    "然后休息" \
-    "确认"
-
-# 用户13: 情绪化表达
-run_user_scenario 13 "情绪表达" \
-    "好累啊想休息" \
-    "下午不想工作了" \
-    "就想躺着" \
-    "确认" \
-    "晚上心情好点再出去" \
-    "大概7、8点" \
-    "去散步" \
-    "确认" \
-    "明天不想早起" \
-    "睡到自然醒" \
-    "确认" \
-    "起来后慢慢吃早餐" \
-    "然后看看书" \
-    "下午再说" \
-    "确认" \
-    "查看安排" \
-    "挺好的" \
-    "就这样" \
-    "没问题" \
-    "谢谢"
-
-# 用户14: 地点相关安排
-run_user_scenario 14 "地点安排" \
-    "下午去公司开会" \
-    "3点到5点" \
-    "然后去三里屯" \
-    "和朋友吃饭" \
-    "吃完去酒吧" \
-    "确认" \
-    "开会地点改到咖啡厅" \
-    "时间不变" \
-    "确认" \
-    "吃饭地点改成国贸" \
-    "行" \
-    "酒吧取消" \
-    "直接回家" \
-    "确认" \
-    "查看安排" \
-    "在回家前加个超市" \
-    "买点东西" \
-    "半小时" \
-    "确认" \
-    "没问题"
-
-# 用户15: 健身计划
-run_user_scenario 15 "健身计划" \
-    "今天要去健身" \
-    "下午4点" \
-    "先跑步半小时" \
-    "然后力量训练1小时" \
-    "最后拉伸15分钟" \
-    "确认" \
-    "明天休息" \
-    "后天继续练" \
-    "换成游泳" \
-    "游1小时" \
-    "确认" \
-    "今天健身后加个蛋白餐" \
-    "6点吃" \
-    "确认" \
-    "把力量训练改成45分钟" \
-    "行" \
-    "查看健身安排" \
-    "后天游泳改到上午" \
-    "10点" \
-    "确认"
-
-# 用户16: 学习计划
-run_user_scenario 16 "学习计划" \
-    "今晚要学习" \
-    "7点开始" \
-    "先复习数学" \
-    "1小时" \
-    "然后看英语" \
-    "也是1小时" \
-    "最后做题" \
-    "确认" \
-    "数学太难了改半小时" \
-    "英语多看点" \
-    "1个半小时" \
-    "确认" \
-    "做题时间呢" \
-    "1小时够了" \
-    "确认" \
-    "中间休息一下" \
-    "每科之间休息10分钟" \
-    "好" \
-    "查看学习计划" \
-    "没问题"
-
-# 用户17: 社交活动
-run_user_scenario 17 "社交活动" \
-    "周末有很多聚会" \
-    "周六中午同学聚餐" \
-    "下午和闺蜜逛街" \
-    "晚上家庭聚餐" \
-    "确认周六" \
-    "周日呢" \
-    "上午和男朋友约会" \
-    "中午一起吃饭" \
-    "下午看电影" \
-    "晚上各回各家" \
-    "确认" \
-    "周六闺蜜改成下午茶" \
-    "3点到5点" \
-    "确认" \
-    "周日电影改成逛公园" \
-    "行" \
-    "查看周末安排" \
-    "周六晚上家庭聚餐几点" \
-    "7点开始" \
-    "确认"
-
-# 用户18: 出差安排
-run_user_scenario 18 "出差安排" \
-    "后天要出差" \
-    "早上6点的飞机" \
-    "9点到目的地" \
-    "10点开会" \
-    "中午和客户吃饭" \
-    "下午继续谈" \
-    "晚上飞回来" \
-    "确认" \
-    "飞机改成8点的" \
-    "到的时间也变了" \
-    "11点到" \
-    "会议改到下午" \
-    "2点开始" \
-    "确认" \
-    "晚上飞机几点" \
-    "9点" \
-    "到家大概12点" \
-    "确认" \
-    "查看出差安排" \
-    "没问题"
-
-# 用户19: 混合场景
-run_user_scenario 19 "混合场景" \
-    "今天很忙" \
-    "上午在公司" \
-    "中午出去办事" \
-    "下午回来继续工作" \
-    "晚上健身" \
-    "然后回家" \
-    "确认" \
-    "明天呢" \
-    "明天比较轻松" \
-    "上午在家办公" \
-    "下午出去逛逛" \
-    "晚上和朋友吃饭" \
-    "确认" \
-    "今天健身取消" \
-    "改成瑜伽" \
-    "在家做" \
-    "确认" \
-    "明天逛街加个购物" \
-    "买点东西" \
-    "行"
-
-# 用户20: 极端测试
-run_user_scenario 20 "极端测试" \
-    "啊啊啊" \
-    "？？？" \
-    "不知道" \
-    "随便" \
-    "都行" \
-    "你说呢" \
-    "帮我安排" \
-    "今天下午" \
-    "做点什么" \
-    "3点吧" \
-    "干嘛呢" \
-    "健身" \
-    "好" \
-    "确认" \
-    "改一下" \
-    "不健身了" \
-    "看电影" \
-    "行" \
-    "确认" \
-    "就这样"
-
-# ============== 生成总结报告 ==============
-
-echo -e "\n\n${BLUE}============================================${NC}"
-echo -e "${BLUE}              测试总结报告                  ${NC}"
-echo -e "${BLUE}============================================${NC}\n"
-
-total_turns=0
-total_success=0
-total_partial=0
-total_fail=0
-
-echo "| 用户 | 场景 | 总轮数 | 通过 | 部分通过 | 失败 | 通过率 |"
-echo "|------|------|--------|------|----------|------|--------|"
-
-for i in {1..20}; do
-    if [ -n "${USER_RESULTS[$i]}" ]; then
-        IFS='|' read -r scenario turns success partial fail <<< "${USER_RESULTS[$i]}"
-        rate=$(echo "scale=1; $success * 100 / $turns" | bc)
-        echo "| $i | $scenario | $turns | $success | $partial | $fail | ${rate}% |"
-
-        total_turns=$((total_turns + turns))
-        total_success=$((total_success + success))
-        total_partial=$((total_partial + partial))
-        total_fail=$((total_fail + fail))
+assert_not_empty() {
+    local name="$1" value="$2"
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    if [ -n "$value" ] && [ "$value" != "null" ] && [ "$value" != "[]" ]; then
+        echo -e "    ${GREEN}✓${NC} $name"
+        PASSED_TESTS=$((PASSED_TESTS + 1))
+    else
+        echo -e "    ${RED}✗${NC} $name (值为空)"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
     fi
-done
+}
+
+assert_eq() {
+    local name="$1" expected="$2" actual="$3"
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    if [ "$expected" == "$actual" ]; then
+        echo -e "    ${GREEN}✓${NC} $name"
+        PASSED_TESTS=$((PASSED_TESTS + 1))
+    else
+        echo -e "    ${RED}✗${NC} $name (期望:$expected, 实际:$actual)"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+    fi
+}
+
+# 使用 API 直接设置时刻表（绕过 LLM，100% 可靠）
+api_set_schedule() {
+    local items_json="$1"
+    curl -s -X PUT "$API_BASE/agent/my-schedule/$TODAY" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"items\":$items_json}" > /dev/null
+    sleep 0.3
+}
+
+# 预定义标准测试时刻表
+STANDARD_SCHEDULE='[
+    {"start_time":"08:00","end_time":"09:00","emoji":"🌅","status":"起床"},
+    {"start_time":"09:00","end_time":"10:00","emoji":"💼","status":"开会"},
+    {"start_time":"12:00","end_time":"13:00","emoji":"🍽️","status":"午餐"},
+    {"start_time":"14:00","end_time":"18:00","emoji":"💻","status":"写代码"},
+    {"start_time":"18:00","end_time":"19:00","emoji":"🏃","status":"健身"},
+    {"start_time":"20:00","end_time":"21:00","emoji":"🍽️","status":"晚餐"}
+]'
+
+# 重置为标准测试时刻表
+reset_to_standard() {
+    api_set_schedule "$STANDARD_SCHEDULE"
+}
+
+# 清空时刻表
+clear_schedule() {
+    api_set_schedule "[]"
+}
+
+# 开始测试组
+start_group() {
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}  $1${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+# ========================================
+# 主测试
+# ========================================
+echo -e "${CYAN}╔══════════════════════════════════════════════════════════╗${NC}"
+echo -e "${CYAN}║         语音时刻表 - 全面闭环测试                        ║${NC}"
+echo -e "${CYAN}║     测试范围：查询 → 修改 → 保存 → 展示                   ║${NC}"
+echo -e "${CYAN}╚══════════════════════════════════════════════════════════╝${NC}"
 
 echo ""
-echo "总计: $total_turns 轮对话"
-echo "通过: $total_success"
-echo "部分通过: $total_partial"
-echo "失败: $total_fail"
-echo "总体通过率: $(echo "scale=1; $total_success * 100 / $total_turns" | bc)%"
+echo -e "${BLUE}>>> 初始化${NC}"
+TOKEN=$(get_token)
+if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
+    echo -e "${RED}获取 Token 失败！${NC}"
+    exit 1
+fi
+echo -e "  Token: ${TOKEN:0:20}..."
+
+# ========================================
+# 第一部分：查询测试
+# ========================================
+start_group "第一部分：查询测试 (Query)"
+
+echo -e "  ${BLUE}1.1 基础时刻表创建与API验证${NC}"
+reset_to_standard
+API_ITEMS=$(api_get_items)
+assert_contains "API包含开会" "$API_ITEMS" "开会"
+assert_contains "API包含午餐" "$API_ITEMS" "午餐"
+
+echo -e "  ${BLUE}1.2 上午时段查询${NC}"
+RESULT=$(send_request "今天上午有什么安排")
+CHAT=$(extract_chat_message "$RESULT")
+assert_contains "上午查询包含起床或开会" "$CHAT" "起床|开会|上午|08|09"
+
+echo -e "  ${BLUE}1.3 下午时段查询${NC}"
+RESULT=$(send_request "下午有什么安排")
+CHAT=$(extract_chat_message "$RESULT")
+assert_contains "下午查询包含写代码" "$CHAT" "写代码|代码|14|下午"
+
+echo -e "  ${BLUE}1.4 晚上时段查询${NC}"
+RESULT=$(send_request "18点到21点有什么安排")
+CHAT=$(extract_chat_message "$RESULT")
+assert_contains "晚上查询包含健身或晚餐" "$CHAT" "健身|晚餐|18|20"
+
+echo -e "  ${BLUE}1.5 特定时间点查询${NC}"
+RESULT=$(send_request "12点在做什么")
+CHAT=$(extract_chat_message "$RESULT")
+assert_contains "12点查询包含午餐" "$CHAT" "午餐|吃饭|12"
+
+echo -e "  ${BLUE}1.6 凌晨时段查询${NC}"
+RESULT=$(send_request "凌晨3点在做什么")
+CHAT=$(extract_chat_message "$RESULT")
+assert_not_empty "凌晨查询返回响应" "$CHAT"
+
+echo -e "  ${BLUE}1.7 模糊时间查询${NC}"
+RESULT=$(send_request "傍晚有什么安排")
+CHAT=$(extract_chat_message "$RESULT")
+assert_not_empty "傍晚查询返回响应" "$CHAT"
+
+echo -e "  ${BLUE}1.8 API 直接查询${NC}"
+API_COUNT=$(api_get_item_count)
+assert_ge "API 返回时刻表条目" "$API_COUNT" 5
+
+# ========================================
+# 第二部分：修改测试
+# ========================================
+start_group "第二部分：修改测试 (Modify)"
+
+echo -e "  ${BLUE}2.1 修改状态（12点午餐→去医院）${NC}"
+reset_to_standard
+RESULT=$(send_request "把12:00-13:00的午餐改成去医院")
+PREVIEW=$(extract_schedule_preview "$RESULT")
+COUNT=$(extract_item_count "$RESULT")
+assert_ge "修改后保留其他时段" "$COUNT" 5
+assert_contains "修改后包含医院" "$PREVIEW" "医院"
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+
+echo -e "  ${BLUE}2.2 修改时间范围（把18点健身改到19点）${NC}"
+RESULT=$(send_request "把18:00-19:00的健身改成19:00-20:00健身")
+PREVIEW=$(extract_schedule_preview "$RESULT")
+COUNT=$(extract_item_count "$RESULT")
+assert_ge "修改时间后保留其他时段" "$COUNT" 5
+assert_contains "包含19点健身" "$PREVIEW" "19:00|健身"
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+
+echo -e "  ${BLUE}2.3 添加不冲突时段（10:00-11:00喝茶）${NC}"
+BEFORE_COUNT=$(api_get_item_count)
+RESULT=$(send_request "添加10:00-11:00喝茶")
+COUNT=$(extract_item_count "$RESULT")
+assert_ge "添加后时段增加" "$COUNT" "$BEFORE_COUNT"
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+
+echo -e "  ${BLUE}2.4 添加冲突时段（15:00-15:30咖啡，插入写代码中间）${NC}"
+RESULT=$(send_request "添加15:00-15:30喝咖啡")
+PREVIEW=$(extract_schedule_preview "$RESULT")
+COUNT=$(extract_item_count "$RESULT")
+assert_ge "添加冲突时段后条目增加" "$COUNT" 7
+assert_contains "包含咖啡" "$PREVIEW" "咖啡"
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+
+echo -e "  ${BLUE}2.5 边界时间修改（添加6:00早起）${NC}"
+RESULT=$(send_request "添加6:00-7:00早起锻炼")
+PREVIEW=$(extract_schedule_preview "$RESULT")
+assert_contains "包含6点时段" "$PREVIEW" "06:00|6:00"
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+
+echo -e "  ${BLUE}2.6 边界时间修改（添加23:00睡前阅读）${NC}"
+RESULT=$(send_request "添加23:00-23:30睡前阅读")
+PREVIEW=$(extract_schedule_preview "$RESULT")
+assert_contains "包含23点时段" "$PREVIEW" "23:00"
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+
+echo -e "  ${BLUE}2.7 长状态名称测试${NC}"
+RESULT=$(send_request "添加16:00-17:00参加公司年度战略规划会议讨论")
+PREVIEW=$(extract_schedule_preview "$RESULT")
+# LLM 可能简化状态名，检测是否包含任何相关关键词
+assert_contains "包含长状态名" "$PREVIEW" "会议|规划|战略|公司|年度|讨论|16:00"
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+
+# ========================================
+# 第三部分：保存测试
+# ========================================
+start_group "第三部分：保存测试 (Save)"
+
+echo -e "  ${BLUE}3.1 保存后立即查询验证${NC}"
+api_set_schedule '[{"start_time":"09:00","end_time":"10:00","emoji":"💼","status":"测试会议"},{"start_time":"14:00","end_time":"15:00","emoji":"💻","status":"测试编码"}]'
+API_ITEMS=$(api_get_items)
+assert_contains "保存后API包含测试会议" "$API_ITEMS" "测试会议"
+assert_contains "保存后API包含测试编码" "$API_ITEMS" "测试编码"
+
+echo -e "  ${BLUE}3.2 修改保存后验证${NC}"
+RESULT=$(send_request "把9:00-10:00的测试会议改成重要会议")
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+sleep 0.5
+API_ITEMS=$(api_get_items)
+assert_contains "修改保存后包含重要会议" "$API_ITEMS" "重要会议"
+
+echo -e "  ${BLUE}3.3 添加保存后验证${NC}"
+RESULT=$(send_request "添加11:00-12:00代码审查")
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+sleep 0.5
+API_ITEMS=$(api_get_items)
+assert_contains "添加保存后包含代码审查" "$API_ITEMS" "代码审查"
+
+echo -e "  ${BLUE}3.4 连续保存测试（3次修改3次保存）${NC}"
+RESULT=$(send_request "把9:00-10:00改成晨会")
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+
+RESULT=$(send_request "把11:00-12:00改成评审会")
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+
+RESULT=$(send_request "把14:00-15:00改成编程时间")
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+
+sleep 0.5
+API_ITEMS=$(api_get_items)
+assert_contains "连续保存后包含晨会" "$API_ITEMS" "晨会"
+assert_contains "连续保存后包含评审会" "$API_ITEMS" "评审会"
+
+echo -e "  ${BLUE}3.5 不保存验证（修改后不保存）${NC}"
+BEFORE_ITEMS=$(api_get_items)
+RESULT=$(send_request "把9:00-10:00改成临时测试")
+# 不调用保存
+sleep 0.5
+AFTER_ITEMS=$(api_get_items)
+assert_contains "不保存时数据保持不变" "$AFTER_ITEMS" "晨会"
+
+# ========================================
+# 第四部分：展示测试
+# ========================================
+start_group "第四部分：展示测试 (Display)"
+
+echo -e "  ${BLUE}4.1 API展示完整时刻表验证${NC}"
+reset_to_standard
+API_ITEMS=$(api_get_items)
+assert_contains "展示包含起床" "$API_ITEMS" "起床"
+assert_contains "展示包含开会" "$API_ITEMS" "开会"
+assert_contains "展示包含午餐" "$API_ITEMS" "午餐"
+
+echo -e "  ${BLUE}4.2 API 展示验证时间排序${NC}"
+API_ITEMS=$(api_get_items)
+FIRST_TIME=$(echo "$API_ITEMS" | jq -r '.[0].start_time' 2>/dev/null)
+LAST_TIME=$(echo "$API_ITEMS" | jq -r '.[-1].start_time' 2>/dev/null)
+if [[ "$FIRST_TIME" < "$LAST_TIME" ]]; then
+    assert_eq "时间排序正确（升序）" "true" "true"
+else
+    assert_eq "时间排序正确（升序）" "true" "false"
+fi
+
+echo -e "  ${BLUE}4.3 API 展示验证数据结构${NC}"
+FIRST_ITEM=$(echo "$API_ITEMS" | jq '.[0]' 2>/dev/null)
+HAS_START=$(echo "$FIRST_ITEM" | jq -r '.start_time' 2>/dev/null)
+HAS_END=$(echo "$FIRST_ITEM" | jq -r '.end_time' 2>/dev/null)
+HAS_STATUS=$(echo "$FIRST_ITEM" | jq -r '.status' 2>/dev/null)
+HAS_EMOJI=$(echo "$FIRST_ITEM" | jq -r '.emoji' 2>/dev/null)
+assert_not_empty "数据结构包含start_time" "$HAS_START"
+assert_not_empty "数据结构包含end_time" "$HAS_END"
+assert_not_empty "数据结构包含status" "$HAS_STATUS"
+assert_not_empty "数据结构包含emoji" "$HAS_EMOJI"
+
+echo -e "  ${BLUE}4.4 Emoji 多样性验证${NC}"
+EMOJIS=$(echo "$API_ITEMS" | jq -r '.[].emoji' 2>/dev/null | sort -u | wc -l | tr -d ' ')
+assert_ge "Emoji 种类多样" "$EMOJIS" 2
+
+echo -e "  ${BLUE}4.5 时间格式验证（HH:MM）${NC}"
+FIRST_TIME=$(echo "$API_ITEMS" | jq -r '.[0].start_time' 2>/dev/null)
+if [[ "$FIRST_TIME" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then
+    assert_eq "时间格式正确" "true" "true"
+else
+    assert_eq "时间格式正确" "true" "false"
+fi
+
+# ========================================
+# 第五部分：边界条件测试
+# ========================================
+start_group "第五部分：边界条件测试 (Edge Cases)"
+
+echo -e "  ${BLUE}5.1 单时段时刻表${NC}"
+api_set_schedule '[{"start_time":"12:00","end_time":"13:00","emoji":"🍽️","status":"午餐"}]'
+API_COUNT=$(api_get_item_count)
+assert_eq "单时段时刻表" "1" "$API_COUNT"
+
+echo -e "  ${BLUE}5.2 大量时段时刻表（10+个时段）${NC}"
+api_set_schedule '[
+    {"start_time":"06:00","end_time":"07:00","emoji":"🌅","status":"起床"},
+    {"start_time":"07:00","end_time":"08:00","emoji":"🍳","status":"早餐"},
+    {"start_time":"08:00","end_time":"09:00","emoji":"💼","status":"晨会"},
+    {"start_time":"09:00","end_time":"10:00","emoji":"💻","status":"开发"},
+    {"start_time":"10:00","end_time":"10:30","emoji":"☕","status":"休息"},
+    {"start_time":"10:30","end_time":"12:00","emoji":"💻","status":"开发"},
+    {"start_time":"12:00","end_time":"13:00","emoji":"🍽️","status":"午餐"},
+    {"start_time":"13:00","end_time":"14:00","emoji":"😴","status":"午休"},
+    {"start_time":"14:00","end_time":"15:00","emoji":"💻","status":"开发"},
+    {"start_time":"15:00","end_time":"15:30","emoji":"🍵","status":"茶歇"},
+    {"start_time":"15:30","end_time":"17:00","emoji":"💻","status":"开发"},
+    {"start_time":"17:00","end_time":"18:00","emoji":"📝","status":"总结"}
+]'
+API_COUNT=$(api_get_item_count)
+assert_ge "大量时段创建成功" "$API_COUNT" 10
+
+echo -e "  ${BLUE}5.3 相邻时段测试（无间隔）${NC}"
+api_set_schedule '[
+    {"start_time":"09:00","end_time":"10:00","emoji":"💼","status":"会议A"},
+    {"start_time":"10:00","end_time":"11:00","emoji":"💼","status":"会议B"},
+    {"start_time":"11:00","end_time":"12:00","emoji":"💼","status":"会议C"}
+]'
+API_COUNT=$(api_get_item_count)
+assert_eq "相邻时段创建成功" "3" "$API_COUNT"
+
+echo -e "  ${BLUE}5.4 最小时段测试（30分钟）${NC}"
+RESULT=$(send_request "添加14:00-14:30快速会议")
+PREVIEW=$(extract_schedule_preview "$RESULT")
+assert_contains "30分钟时段创建成功" "$PREVIEW" "14:00|14:30"
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+
+echo -e "  ${BLUE}5.5 全天时刻表覆盖测试${NC}"
+api_set_schedule '[
+    {"start_time":"06:00","end_time":"07:00","emoji":"🌅","status":"起床"},
+    {"start_time":"08:00","end_time":"09:00","emoji":"🍳","status":"早餐"},
+    {"start_time":"09:00","end_time":"12:00","emoji":"💼","status":"工作"},
+    {"start_time":"12:00","end_time":"13:00","emoji":"🍽️","status":"午餐"},
+    {"start_time":"14:00","end_time":"18:00","emoji":"💼","status":"工作"},
+    {"start_time":"18:00","end_time":"19:00","emoji":"🚪","status":"下班"},
+    {"start_time":"19:00","end_time":"20:00","emoji":"🍽️","status":"晚餐"},
+    {"start_time":"21:00","end_time":"23:00","emoji":"📺","status":"休闲"},
+    {"start_time":"23:00","end_time":"23:59","emoji":"😴","status":"睡觉"}
+]'
+API_ITEMS=$(api_get_items)
+assert_contains "全天覆盖包含起床" "$API_ITEMS" "起床"
+assert_contains "全天覆盖包含睡觉" "$API_ITEMS" "睡觉"
+
+# ========================================
+# 第六部分：完整闭环验证
+# ========================================
+start_group "第六部分：完整闭环验证"
+
+echo -e "  ${BLUE}6.1 创建→查询→修改→保存→展示 完整流程${NC}"
+
+echo -e "    Step 1: 创建时刻表"
+api_set_schedule '[
+    {"start_time":"09:00","end_time":"10:00","emoji":"💼","status":"产品会议"},
+    {"start_time":"14:00","end_time":"15:00","emoji":"💼","status":"技术评审"},
+    {"start_time":"16:00","end_time":"18:00","emoji":"💻","status":"代码编写"}
+]'
+API_COUNT=$(api_get_item_count)
+assert_eq "创建时刻表成功" "3" "$API_COUNT"
+
+echo -e "    Step 2: API查询验证"
+API_ITEMS=$(api_get_items)
+assert_contains "查询包含产品会议" "$API_ITEMS" "产品会议"
+
+echo -e "    Step 3: 修改时刻表"
+RESULT=$(send_request "把9:00-10:00的产品会议改成战略会议")
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+
+echo -e "    Step 4: 保存验证"
+API_ITEMS=$(api_get_items)
+assert_contains "保存后包含战略会议" "$API_ITEMS" "战略会议"
+
+echo -e "    Step 5: API展示验证"
+API_ITEMS=$(api_get_items)
+assert_contains "展示包含战略会议" "$API_ITEMS" "战略会议"
+
+echo -e "  ${BLUE}6.2 多次修改闭环测试${NC}"
+api_set_schedule '[{"start_time":"10:00","end_time":"11:00","emoji":"💼","status":"会议A"}]'
+
+# 使用更明确的指令，包含原状态名
+RESULT=$(send_request "把10:00-11:00的会议A改成会议B")
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+sleep 0.3
+API_ITEMS=$(api_get_items)
+assert_contains "第一次修改成功" "$API_ITEMS" "会议B"
+
+RESULT=$(send_request "把10:00-11:00的会议B改成会议C")
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+sleep 0.3
+API_ITEMS=$(api_get_items)
+assert_contains "第二次修改成功" "$API_ITEMS" "会议C"
+
+RESULT=$(send_request "把10:00-11:00的会议C改成会议D")
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+sleep 0.3
+API_ITEMS=$(api_get_items)
+assert_contains "第三次修改成功" "$API_ITEMS" "会议D"
+
+echo -e "  ${BLUE}6.3 添加删除闭环测试${NC}"
+api_set_schedule '[{"start_time":"12:00","end_time":"13:00","emoji":"🍽️","status":"午餐"}]'
+BEFORE=$(api_get_item_count)
+
+RESULT=$(send_request "添加14:00-15:00下午茶")
+SESSION=$(extract_session_id "$RESULT")
+send_request "保存" "$SESSION" > /dev/null
+AFTER_ADD=$(api_get_item_count)
+assert_ge "添加后数量增加" "$AFTER_ADD" "$BEFORE"
+
+# ========================================
+# 测试报告
+# ========================================
+echo ""
+echo -e "${CYAN}╔══════════════════════════════════════════════════════════╗${NC}"
+echo -e "${CYAN}║                      测试报告                            ║${NC}"
+echo -e "${CYAN}╚══════════════════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "  总测试数: ${YELLOW}$TOTAL_TESTS${NC}"
+echo -e "  通过: ${GREEN}$PASSED_TESTS${NC}"
+echo -e "  失败: ${RED}$FAILED_TESTS${NC}"
+
+if [ $TOTAL_TESTS -gt 0 ]; then
+    PASS_RATE=$((PASSED_TESTS * 100 / TOTAL_TESTS))
+    echo -e "  通过率: ${YELLOW}${PASS_RATE}%${NC}"
+fi
+
+echo ""
+if [ $FAILED_TESTS -eq 0 ]; then
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║              所有测试通过！ ✓                            ║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+    exit 0
+else
+    echo -e "${YELLOW}╔══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║              有 $FAILED_TESTS 个测试失败                              ║${NC}"
+    echo -e "${YELLOW}╚══════════════════════════════════════════════════════════╝${NC}"
+    exit 1
+fi

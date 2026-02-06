@@ -63,6 +63,7 @@ const (
 	MessageTypeAvailabilityCard MessageType = "AVAILABILITY_CARD"
 	MessageTypeConfirmRequest  MessageType = "CONFIRM_REQUEST"
 	MessageTypeConfirmResponse MessageType = "CONFIRM_RESPONSE"
+	MessageTypeScheduleInvite  MessageType = "SCHEDULE_INVITE" // 日程邀请卡片
 )
 
 type Conversation struct {

@@ -110,6 +110,7 @@ type UserSchedulePreference struct {
 	HidePastEvents    bool               `db:"hide_past_events" json:"hide_past_events"`
 	DefaultVisibility ScheduleVisibility `db:"default_visibility" json:"default_visibility"`
 	DefaultCircleIDs  StringArray        `db:"default_circle_ids" json:"default_circle_ids,omitempty"`
+	ShowCity          bool               `db:"show_city" json:"show_city"` // 是否显示城市，默认 true
 	CreatedAt         time.Time          `db:"created_at" json:"created_at"`
 	UpdatedAt         time.Time          `db:"updated_at" json:"updated_at"`
 }
@@ -634,6 +635,9 @@ type V4Session struct {
 	// 消息历史（核心：包含完整的对话上下文）
 	Messages []V4Message `json:"messages"`
 
+	// 历史对话摘要（上下文压缩后保留的语义信息）
+	Summary string `json:"summary,omitempty"`
+
 	// 待确认的时刻表（调用 update_schedule 后保存，等待用户确认）
 	PendingSchedule []ScheduleItem `json:"pending_schedule,omitempty"`
 	PendingDate     time.Time      `json:"pending_date,omitempty"`
@@ -647,6 +651,109 @@ type V4Session struct {
 	// 可见性设置
 	Visibility ScheduleVisibility `json:"visibility,omitempty"`
 	CircleIDs  []string           `json:"circle_ids,omitempty"`
+
+	// ========== 好友交互相关字段 ==========
+	// 待发送的消息（调用 send_message 后保存，等待用户确认）
+	PendingMessage *V4PendingMessage `json:"pending_message,omitempty"`
+	// 待发送的日程邀请（调用 create_schedule_invite 后保存，等待用户确认）
+	PendingInvite *V4PendingInvite `json:"pending_invite,omitempty"`
+	// 最近查询到的好友（用于上下文关联，如"给他发消息"）
+	LastQueriedFriend *V4FriendInfo `json:"last_queried_friend,omitempty"`
+
+	// ========== 扩展功能相关字段 ==========
+	// 通讯录上下文
+	ContactHashes   []string               `json:"contact_hashes,omitempty"`   // 上传的手机号哈希
+	MatchedContacts []ContactMatchResult   `json:"matched_contacts,omitempty"` // 匹配结果缓存
+
+	// 设备数据缓存（减少重复查询）
+	CachedDeviceData *V4DeviceDataCache `json:"cached_device_data,omitempty"`
+
+	// 行为建议上下文
+	LastSuggestionContext string `json:"last_suggestion_context,omitempty"`
+}
+
+// V4DeviceDataCache 设备数据缓存
+type V4DeviceDataCache struct {
+	Location  *V4LocationData  `json:"location,omitempty"`
+	Calendar  *V4CalendarData  `json:"calendar,omitempty"`
+	Screen    *V4ScreenData    `json:"screen,omitempty"`
+	Device    *V4DeviceState   `json:"device,omitempty"`
+	Status    *V4StatusData    `json:"status,omitempty"`
+	CachedAt  time.Time        `json:"cached_at"`
+}
+
+// V4LocationData 位置数据
+type V4LocationData struct {
+	PlaceType      string `json:"place_type"`       // home/work/cafe/transit/...
+	PlaceName      string `json:"place_name"`       // 地点名称
+	City           string `json:"city"`             // 城市
+	AtPlaceSince   int    `json:"at_place_since"`   // 在此位置多久（分钟）
+}
+
+// V4CalendarData 日历数据
+type V4CalendarData struct {
+	HasCurrentEvent   bool   `json:"has_current_event"`
+	CurrentEvent      string `json:"current_event,omitempty"`       // 当前日程标题
+	EventEndMinutes   int    `json:"event_end_minutes,omitempty"`   // 当前事件还有多久结束
+	NextEventIn       int    `json:"next_event_in,omitempty"`       // 下个日程多久后
+	NextEvent         string `json:"next_event,omitempty"`          // 下个日程标题
+	TodayRemaining    int    `json:"today_remaining,omitempty"`     // 今天剩余日程数
+}
+
+// V4ScreenData 屏幕使用数据
+type V4ScreenData struct {
+	IsActive        bool   `json:"is_active"`
+	ActivityType    string `json:"activity_type"`     // entertainment/productivity/communication/idle
+	SessionDuration int    `json:"session_duration"`  // 本次使用时长（分钟）
+}
+
+// V4DeviceState 设备状态
+type V4DeviceState struct {
+	BatteryLevel int    `json:"battery_level"`  // 0-100
+	IsCharging   bool   `json:"is_charging"`
+	NetworkType  string `json:"network_type"`   // wifi/cellular
+	FocusModeOn  bool   `json:"focus_mode_on"`
+	Headphones   bool   `json:"headphones"`
+}
+
+// V4StatusData 状态分析数据
+type V4StatusData struct {
+	Availability string `json:"availability"`   // 有空/忙碌/可能有空
+	Probability  int    `json:"probability"`    // 0-100
+	Emoji        string `json:"emoji"`
+	LifeStatus   string `json:"life_status"`    // 生活状态描述
+}
+
+// V4PendingMessage 待发送的消息
+type V4PendingMessage struct {
+	FriendID   string `json:"friend_id"`
+	FriendName string `json:"friend_name"`
+	Message    string `json:"message"`
+}
+
+// V4PendingInvite 待发送的日程邀请
+type V4PendingInvite struct {
+	FriendID   string `json:"friend_id"`
+	FriendName string `json:"friend_name"`
+	Date       string `json:"date"`        // YYYY-MM-DD
+	StartTime  string `json:"start_time"`  // HH:MM
+	EndTime    string `json:"end_time"`    // HH:MM
+	Activity   string `json:"activity"`
+	Location   string `json:"location,omitempty"`
+	Message    string `json:"message,omitempty"`
+}
+
+// V4FriendInfo 好友信息（用于工具返回和上下文）
+type V4FriendInfo struct {
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Avatar             string `json:"avatar,omitempty"`
+	Probability        int    `json:"probability"`                   // 有空概率 0-100, -1无数据
+	Status             string `json:"status,omitempty"`              // 当前状态描述（life_status_label）
+	Emoji              string `json:"emoji,omitempty"`               // 状态emoji（life_status_emoji）
+	City               string `json:"city,omitempty"`                // 所在城市
+	Confidence         string `json:"confidence"`                    // high/medium/low
+	AvailabilityStatus string `json:"availability_status,omitempty"` // 有空状态：有空/忙碌/可能有空
 }
 
 // NewV4Session 创建新的 V4 会话
@@ -706,6 +813,38 @@ func (s *V4Session) ClearPendingSchedule() {
 	s.PendingDate = time.Time{}
 }
 
+// HasPendingMessage 是否有待发送的消息
+func (s *V4Session) HasPendingMessage() bool {
+	return s.PendingMessage != nil
+}
+
+// HasPendingInvite 是否有待发送的日程邀请
+func (s *V4Session) HasPendingInvite() bool {
+	return s.PendingInvite != nil
+}
+
+// HasAnyPending 是否有任何待确认的内容
+func (s *V4Session) HasAnyPending() bool {
+	return s.HasPendingSchedule() || s.HasPendingMessage() || s.HasPendingInvite()
+}
+
+// ClearPendingMessage 清除待发送的消息
+func (s *V4Session) ClearPendingMessage() {
+	s.PendingMessage = nil
+}
+
+// ClearPendingInvite 清除待发送的日程邀请
+func (s *V4Session) ClearPendingInvite() {
+	s.PendingInvite = nil
+}
+
+// ClearAllPending 清除所有待确认的内容
+func (s *V4Session) ClearAllPending() {
+	s.ClearPendingSchedule()
+	s.ClearPendingMessage()
+	s.ClearPendingInvite()
+}
+
 // V4EventType V4 版本的 SSE 事件类型
 type V4EventType string
 
@@ -726,6 +865,13 @@ const (
 	V4EventTypePhase     V4EventType = "phase"      // 处理阶段（理解请求、调用工具、生成回复）
 	V4EventTypeToolStart V4EventType = "tool_start" // 工具开始执行
 	V4EventTypeToolEnd   V4EventType = "tool_end"   // 工具执行完成
+
+	// 好友相关事件
+	V4EventTypeFriendsResult   V4EventType = "friends_result"   // 好友查询结果
+	V4EventTypeMessagePreview  V4EventType = "message_preview"  // 消息预览（待确认）
+	V4EventTypeMessageSent     V4EventType = "message_sent"     // 消息已发送
+	V4EventTypeInvitePreview   V4EventType = "invite_preview"   // 日程邀请预览（待确认）
+	V4EventTypeInviteSent      V4EventType = "invite_sent"      // 日程邀请已发送
 )
 
 // V4Event V4 版本的 SSE 事件
@@ -745,4 +891,14 @@ type V4Event struct {
 	Phase    string `json:"phase,omitempty"`     // 阶段名称：understanding, tool_calling, generating
 	ToolName string `json:"tool_name,omitempty"` // 工具名称（tool_start/tool_end 时使用）
 	Loop     int    `json:"loop,omitempty"`      // 当前循环次数
+
+	// 好友相关字段
+	Friends         []V4FriendInfo    `json:"friends,omitempty"`          // 好友列表
+	Total           int               `json:"total,omitempty"`            // 总数
+	FilterApplied   string            `json:"filter_applied,omitempty"`   // 应用的筛选条件
+	PendingMessage  *V4PendingMessage `json:"pending_message,omitempty"`  // 待发送消息预览
+	PendingInvite   *V4PendingInvite  `json:"pending_invite,omitempty"`   // 待发送邀请预览
+	MessageID       string            `json:"message_id,omitempty"`       // 已发送消息ID
+	SentTo          string            `json:"sent_to,omitempty"`          // 发送给谁
+	AwaitingConfirm bool              `json:"awaiting_confirm,omitempty"` // 是否等待确认
 }

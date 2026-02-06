@@ -279,28 +279,7 @@ func TestPhaseStateMachine_ValidTransitions(t *testing.T) {
 	}
 }
 
-// ========== 测试场景4：意图分发器 undo 测试 ==========
-
-// TestIntentDispatcher_UndoIntent 测试撤销意图识别
-func TestIntentDispatcher_UndoIntent(t *testing.T) {
-	// 测试撤销关键词在 Prompt 中的存在
-	dispatcher := &IntentDispatcher{}
-	session := &model.VoiceScheduleSession{
-		Phase: model.PhaseConfirmedUndoable,
-		State: "confirmed",
-	}
-
-	prompt := dispatcher.buildSystemPrompt(session)
-
-	// 检查 Prompt 是否包含 undo 相关内容
-	if !strings.Contains(prompt, "undo") {
-		t.Error("系统 Prompt 应该包含 undo 意图说明")
-	}
-
-	t.Logf("✓ IntentDispatcher Prompt 包含 undo 意图")
-}
-
-// ========== 测试场景5：简单意图识别测试（含撤销）==========
+// ========== 测试场景4：简单意图识别测试（含撤销）==========
 
 // TestIsSimpleIntent_WithUndo 测试简单意图识别（含撤销关键词）
 func TestIsSimpleIntent_WithUndo(t *testing.T) {

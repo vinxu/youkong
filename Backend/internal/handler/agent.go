@@ -102,8 +102,8 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 
 	fmt.Printf("[上报] 分析完成 user=%s status=%s\n", userID, result.Availability.Status)
 
-	// 同步 AI 推测状态到时刻表（异步执行，不阻塞响应）
-	go h.syncAIGuessToSchedule(context.Background(), userID, result)
+	// 注意：不再自动同步到时刻表，只有通过 AI 推理界面确认发布的状态才会写入时刻表
+	// 之前的 syncAIGuessToSchedule 会导致旧的 LLM 分析结果覆盖正确的推理结果
 
 	// 返回分析结果
 	response.Success(c, gin.H{
@@ -1309,6 +1309,123 @@ func (h *AgentHandler) AgentChat(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// GetMySchedule 获取指定日期的时刻表
+// GET /api/agent/my-schedule/:date
+func (h *AgentHandler) GetMySchedule(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.scheduleRepo == nil {
+		response.InternalError(c, "时刻表服务未启用")
+		return
+	}
+
+	// 解析日期参数
+	dateStr := c.Param("date")
+	date, err := time.Parse("2006-01-02", dateStr)
+	if err != nil {
+		response.Error(c, 400, "日期格式无效，应为 YYYY-MM-DD")
+		return
+	}
+
+	// 获取时刻表
+	schedule, err := h.scheduleRepo.GetActiveByUserAndDate(c.Request.Context(), userID, date)
+	if err != nil {
+		fmt.Printf("[GetMySchedule] 获取失败 user=%s date=%s error=%v\n", userID, dateStr, err)
+		response.InternalError(c, "获取失败")
+		return
+	}
+
+	if schedule == nil {
+		response.Success(c, gin.H{
+			"date":  dateStr,
+			"items": []interface{}{},
+		})
+		return
+	}
+
+	response.Success(c, gin.H{
+		"date":  dateStr,
+		"items": schedule.Items,
+	})
+}
+
+// SetMySchedule 设置指定日期的时刻表（直接替换，用于测试）
+// PUT /api/agent/my-schedule/:date
+func (h *AgentHandler) SetMySchedule(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.scheduleRepo == nil {
+		response.InternalError(c, "时刻表服务未启用")
+		return
+	}
+
+	// 解析日期参数
+	dateStr := c.Param("date")
+	date, err := time.Parse("2006-01-02", dateStr)
+	if err != nil {
+		response.Error(c, 400, "日期格式无效，应为 YYYY-MM-DD")
+		return
+	}
+
+	// 解析请求体
+	var req struct {
+		Items []model.ScheduleItem `json:"items"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, 400, "请求体格式无效")
+		return
+	}
+
+	// 获取现有时刻表或创建新的
+	schedule, err := h.scheduleRepo.GetActiveByUserAndDate(c.Request.Context(), userID, date)
+	if err != nil {
+		fmt.Printf("[SetMySchedule] 获取现有时刻表失败 user=%s date=%s error=%v\n", userID, dateStr, err)
+		response.InternalError(c, "获取失败")
+		return
+	}
+
+	if schedule == nil {
+		// 创建新时刻表
+		schedule = &model.StatusSchedule{
+			UserID:       userID,
+			ScheduleDate: date,
+			Items:        req.Items,
+			Status:       model.ScheduleStatusActive,
+			Visibility:   model.VisibilityPrivate,
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+		}
+		if err := h.scheduleRepo.Create(c.Request.Context(), schedule); err != nil {
+			fmt.Printf("[SetMySchedule] 创建时刻表失败 user=%s date=%s error=%v\n", userID, dateStr, err)
+			response.InternalError(c, "创建失败")
+			return
+		}
+	} else {
+		// 更新现有时刻表
+		schedule.Items = req.Items
+		schedule.UpdatedAt = time.Now()
+		if err := h.scheduleRepo.Update(c.Request.Context(), schedule); err != nil {
+			fmt.Printf("[SetMySchedule] 更新时刻表失败 user=%s date=%s error=%v\n", userID, dateStr, err)
+			response.InternalError(c, "更新失败")
+			return
+		}
+	}
+
+	fmt.Printf("[SetMySchedule] 成功设置时刻表 user=%s date=%s items=%d\n", userID, dateStr, len(req.Items))
+	response.Success(c, gin.H{
+		"date":  dateStr,
+		"items": schedule.Items,
+	})
+}
+
 // GetMyScheduleHistory 获取我的状态时刻表历史（分页）
 // GET /api/agent/my-schedule/history
 func (h *AgentHandler) GetMyScheduleHistory(c *gin.Context) {
@@ -1676,7 +1793,7 @@ func (h *AgentHandler) TestModelSingle(c *gin.Context) {
 	}
 
 	// 查找测试用例
-	var testCase *service.TestCase
+	var testCase *service.ModelTestCase
 	for _, tc := range modelTestService.GetTestCases() {
 		if tc.ID == req.CaseID {
 			testCase = &tc
@@ -1801,7 +1918,7 @@ func (h *AgentHandler) TestModelByCategory(c *gin.Context) {
 	fmt.Printf("[ModelTest] 按分类测试 category=%s provider=%s count=%d\n",
 		req.Category, req.Provider, len(cases))
 
-	var results []service.TestResult
+	var results []service.ModelTestResult
 	for _, tc := range cases {
 		result, err := modelTestService.RunSingleTest(c.Request.Context(), tc, provider)
 		if err != nil {
@@ -1846,6 +1963,23 @@ func (h *AgentHandler) InferStatus(c *gin.Context) {
 
 	fmt.Printf("[InferStatus] 推理成功 user=%s emoji=%s activity=%s is_available=%v\n",
 		userID, result.Emoji, result.Activity, result.IsAvailable)
+
+	// 推理成功后，直接更新首页缓存和时刻表
+	// 这样用户不需要额外点击"确认发布"就能看到结果
+	if h.agentService != nil {
+		feedbackReq := &model.StatusFeedbackRequest{
+			CorrectedEmoji:       result.Emoji,
+			CorrectedActivity:    result.Activity,
+			CorrectedPlace:       result.Place,
+			CorrectedIsAvailable: &result.IsAvailable,
+		}
+		if err := h.agentService.SaveStatusFeedback(c.Request.Context(), userID, feedbackReq); err != nil {
+			fmt.Printf("[InferStatus] 更新首页状态失败 user=%s error=%v\n", userID, err)
+			// 不返回错误，推理结果已经成功
+		} else {
+			fmt.Printf("[InferStatus] 首页状态已更新 user=%s\n", userID)
+		}
+	}
 
 	response.Success(c, result)
 }

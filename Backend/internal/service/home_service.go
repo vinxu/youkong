@@ -16,15 +16,17 @@ type HomeService struct {
 	friendshipRepo *repository.FriendshipRepository
 	userRepo       *repository.UserRepository
 	memoryRepo     *repository.MemoryRepository
+	scheduleRepo   *repository.ScheduleRepository
 	redisClient    *tencent.RedisClient
 }
 
 // NewHomeService 创建首页服务
-func NewHomeService(friendshipRepo *repository.FriendshipRepository, userRepo *repository.UserRepository, memoryRepo *repository.MemoryRepository, redisClient *tencent.RedisClient) *HomeService {
+func NewHomeService(friendshipRepo *repository.FriendshipRepository, userRepo *repository.UserRepository, memoryRepo *repository.MemoryRepository, scheduleRepo *repository.ScheduleRepository, redisClient *tencent.RedisClient) *HomeService {
 	return &HomeService{
 		friendshipRepo: friendshipRepo,
 		userRepo:       userRepo,
 		memoryRepo:     memoryRepo,
+		scheduleRepo:   scheduleRepo,
 		redisClient:    redisClient,
 	}
 }
@@ -82,7 +84,10 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 	// 5. 批量获取城市信息（从 Redis 中的实时状态）
 	cityMap := s.getUserCities(ctx, friendIDs)
 
-	// 6. 构建宫格数据
+	// 6. 批量获取用户的城市显示设置
+	showCityMap := s.getUserShowCitySettings(ctx, friendIDs)
+
+	// 7. 构建宫格数据
 	friends := make([]FriendGridItem, 0, len(friendIDs))
 	for _, fid := range friendIDs {
 		user := userMap[fid]
@@ -115,6 +120,12 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 			}
 		}
 
+		// 只有用户开启了城市显示才返回城市信息
+		city := ""
+		if showCityMap[fid] {
+			city = cityMap[fid]
+		}
+
 		friends = append(friends, FriendGridItem{
 			UserID:       user.ID,
 			Nickname:     user.Nickname,
@@ -123,7 +134,7 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 			Status:       status,
 			UpdatedAt:    updatedAt.Format(time.RFC3339),
 			RelativeTime: formatRelativeTime(updatedAt),
-			City:         cityMap[fid],
+			City:         city,
 			IsAvailable:  isAvailable,
 		})
 
@@ -184,6 +195,32 @@ func (s *HomeService) getUserCities(ctx context.Context, userIDs []string) map[s
 	}
 
 	return cityMap
+}
+
+// getUserShowCitySettings 批量获取用户的城市显示设置
+func (s *HomeService) getUserShowCitySettings(ctx context.Context, userIDs []string) map[string]bool {
+	showCityMap := make(map[string]bool)
+
+	// 默认所有用户都显示城市
+	for _, userID := range userIDs {
+		showCityMap[userID] = true
+	}
+
+	if s.scheduleRepo == nil {
+		return showCityMap
+	}
+
+	// 获取每个用户的偏好设置
+	for _, userID := range userIDs {
+		pref, err := s.scheduleRepo.GetUserPreference(ctx, userID)
+		if err != nil {
+			// 获取失败时默认显示城市
+			continue
+		}
+		showCityMap[userID] = pref.ShowCity
+	}
+
+	return showCityMap
 }
 
 // formatRelativeTime 格式化相对时间

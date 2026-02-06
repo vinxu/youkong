@@ -273,6 +273,7 @@ func (r *ScheduleRepository) GetUserPreference(ctx context.Context, userID strin
 	query := `
 		SELECT user_id, IFNULL(hide_past_events, FALSE) as hide_past_events,
 		       IFNULL(default_visibility, 'all_friends') as default_visibility,
+		       IFNULL(show_city, TRUE) as show_city,
 		       created_at, updated_at
 		FROM user_schedule_preferences
 		WHERE user_id = ?
@@ -287,17 +288,19 @@ func (r *ScheduleRepository) GetUserPreference(ctx context.Context, userID strin
 // UpsertUserPreference 创建或更新用户时刻表偏好设置
 func (r *ScheduleRepository) UpsertUserPreference(ctx context.Context, pref *model.UserSchedulePreference) error {
 	query := `
-		INSERT INTO user_schedule_preferences (user_id, hide_past_events, default_visibility, created_at, updated_at)
-		VALUES (?, ?, ?, NOW(), NOW())
+		INSERT INTO user_schedule_preferences (user_id, hide_past_events, default_visibility, show_city, created_at, updated_at)
+		VALUES (?, ?, ?, ?, NOW(), NOW())
 		ON DUPLICATE KEY UPDATE
 			hide_past_events = VALUES(hide_past_events),
 			default_visibility = VALUES(default_visibility),
+			show_city = VALUES(show_city),
 			updated_at = NOW()
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		pref.UserID,
 		pref.HidePastEvents,
 		pref.DefaultVisibility,
+		pref.ShowCity,
 	)
 	return err
 }

@@ -258,61 +258,9 @@ func RegisterBuiltinTools(registry *ToolRegistry, deps *BuiltinToolDeps) {
 		Handler: createGetCurrentScheduleHandler(deps),
 	})
 
-	// 12. 意图决策工具（v2 架构改进：Tool Calling + CoT 混合机制）
-	// 用于解决 update_status vs create 等意图混淆问题
-	registry.MustRegister(&Tool{
-		Name: "decide_action",
-		Description: `根据用户输入决定执行什么操作。这是一个决策工具，必须在分析后调用。
-
-调用前必须分析（填写 thinking 字段）：
-1. 用户的关键词是什么？
-2. 用户是否提到了具体时间范围？
-3. 当前处于什么阶段？
-4. 用户的真实意图是什么？
-
-关键判断规则：
-- 无时间范围 + 状态描述（"修改为XX"/"我现在XX"/"XX了"）→ update_status
-- 有时间范围（"下午3点"/"今晚"/"明天"）+ 活动 → create 或 modify
-- 肯定词（"好的"/"确认"/"是的"/"没问题"）→ confirm
-- 否定词（"取消"/"不要了"/"算了"）→ cancel
-- 查询词（"看看"/"调出"/"查看"）→ query
-- 闲聊（"你好"/"谢谢"/"你是谁"）→ chat
-
-【最重要的区分】update_status vs create：
-- update_status：只是想更新当前显示的状态（首页展示），不涉及时刻表规划
-  - 例如："修改为睡不着"、"我失眠了"、"在工作"、"帮我更新状态"
-- create：要规划未来的时间安排（有明确的时间段）
-  - 例如："下午3点到5点开会"、"明天上午健身"`,
-		Parameters: ToolParameters{
-			Type: "object",
-			Properties: map[string]ToolParam{
-				"thinking": {
-					Type:        "array",
-					Description: "分析过程，必须先填写，至少3条。例如：['用户说了\"修改为睡不着\"', '没有提到具体时间范围', '这是描述当前状态', '应该是 update_status']",
-					Items:       &ToolParam{Type: "string"},
-				},
-				"action": {
-					Type:        "string",
-					Description: "决定的操作类型",
-					Enum:        []string{"create", "modify", "confirm", "cancel", "update_status", "query", "chat", "replace", "delete"},
-				},
-				"confidence": {
-					Type:        "number",
-					Description: "置信度 0.0-1.0，表示对这个判断的确信程度",
-				},
-				"entities": {
-					Type:        "object",
-					Description: "从用户输入中提取的实体，如时间、状态、活动等。例如：{\"status\": \"睡不着\", \"emoji\": \"😵\"}",
-				},
-				"target_date": {
-					Type:        "string",
-					Description: "目标日期，YYYY-MM-DD 格式。如果用户说的是今天/明天/后天，需要转换为具体日期",
-				},
-			},
-			Required: []string{"thinking", "action", "confidence"},
-		},
-		Handler: createDecideActionHandler(deps),
-	})
+	// [已删除] decide_action 工具
+	// 架构改进：不再需要中间决策工具。LLM 直接根据工具定义做决策，
+	// 不需要先经过分类器再调用实际工具。这消除了双重推理负担。
 }
 
 // ========== 工具处理函数 ==========
@@ -714,86 +662,8 @@ func estimateTokens(data interface{}) int {
 	return len(bytes) / 4
 }
 
-// createDecideActionHandler 创建意图决策工具处理函数
-// v2 架构改进：Tool Calling + CoT 混合机制
-func createDecideActionHandler(deps *BuiltinToolDeps) ToolHandler {
-	return func(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
-		// 1. 解析 thinking（必需字段）
-		thinkingRaw, ok := args["thinking"].([]interface{})
-		if !ok || len(thinkingRaw) < 3 {
-			return &ToolResult{
-				Success: false,
-				Error:   "thinking 参数必须是数组，且至少包含3条分析",
-			}, nil
-		}
-		thinking := make([]string, 0, len(thinkingRaw))
-		for _, t := range thinkingRaw {
-			if s, ok := t.(string); ok {
-				thinking = append(thinking, s)
-			}
-		}
-
-		// 2. 解析 action（必需字段）
-		action, ok := args["action"].(string)
-		if !ok || action == "" {
-			return &ToolResult{
-				Success: false,
-				Error:   "action 参数不能为空",
-			}, nil
-		}
-
-		// 验证 action 是否有效
-		validActions := map[string]bool{
-			"create":        true,
-			"modify":        true,
-			"confirm":       true,
-			"cancel":        true,
-			"update_status": true,
-			"query":         true,
-			"chat":          true,
-			"replace":       true,
-			"delete":        true,
-		}
-		if !validActions[action] {
-			return &ToolResult{
-				Success: false,
-				Error:   "action 必须是以下之一: create, modify, confirm, cancel, update_status, query, chat, replace, delete",
-			}, nil
-		}
-
-		// 3. 解析 confidence（必需字段）
-		confidence := 0.5 // 默认值
-		if c, ok := args["confidence"].(float64); ok {
-			confidence = c
-		}
-
-		// 4. 解析 entities（可选字段）
-		entities := make(map[string]interface{})
-		if e, ok := args["entities"].(map[string]interface{}); ok {
-			entities = e
-		}
-
-		// 5. 解析 target_date（可选字段）
-		targetDate := ""
-		if d, ok := args["target_date"].(string); ok {
-			targetDate = d
-		}
-
-		// 构建返回结果
-		result := map[string]interface{}{
-			"action":      action,
-			"thinking":    thinking,
-			"confidence":  confidence,
-			"entities":    entities,
-			"target_date": targetDate,
-		}
-
-		return &ToolResult{
-			Success: true,
-			Data:    result,
-		}, nil
-	}
-}
+// [已删除] createDecideActionHandler
+// 架构改进：decide_action 工具已移除，LLM 直接调用实际工具
 
 // ========== v3 架构改进：ApprovalHandler LLM 化 ==========
 

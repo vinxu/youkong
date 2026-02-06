@@ -17,11 +17,11 @@ type ModelTestService struct {
 	claudeAPIKey string
 
 	// 测试用例
-	testCases []TestCase
+	testCases []ModelTestCase
 }
 
-// TestCase 测试用例
-type TestCase struct {
+// ModelTestCase 模型对比测试用例
+type ModelTestCase struct {
 	ID          int      `json:"id"`
 	Category    string   `json:"category"`    // 分类
 	Input       string   `json:"input"`       // 用户输入
@@ -30,9 +30,9 @@ type TestCase struct {
 	Description string   `json:"description"` // 用例描述
 }
 
-// TestResult 测试结果
-type TestResult struct {
-	TestCase      TestCase       `json:"test_case"`
+// ModelTestResult 模型测试结果
+type ModelTestResult struct {
+	TestCase      ModelTestCase  `json:"test_case"`
 	Provider      string         `json:"provider"`     // "qwen" 或 "kimi"
 	Model         string         `json:"model"`
 	Response      string         `json:"response"`     // LLM 回复
@@ -58,9 +58,9 @@ type ToolCallInfo struct {
 type ModelComparisonReport struct {
 	TestTime        time.Time    `json:"test_time"`
 	TotalCases      int          `json:"total_cases"`
-	QwenResults     []TestResult `json:"qwen_results"`
-	KimiResults     []TestResult `json:"kimi_results"`
-	ClaudeResults   []TestResult `json:"claude_results"`
+	QwenResults     []ModelTestResult `json:"qwen_results"`
+	KimiResults     []ModelTestResult `json:"kimi_results"`
+	ClaudeResults   []ModelTestResult `json:"claude_results"`
 	QwenSummary     ModelSummary `json:"qwen_summary"`
 	KimiSummary     ModelSummary `json:"kimi_summary"`
 	ClaudeSummary   ModelSummary `json:"claude_summary"`
@@ -94,7 +94,7 @@ func NewModelTestService(qwenAPIKey, kimiAPIKey, claudeAPIKey string) *ModelTest
 
 // initTestCases 初始化测试用例
 func (s *ModelTestService) initTestCases() {
-	s.testCases = []TestCase{
+	s.testCases = []ModelTestCase{
 		// A. 时刻表创建 - create_status_schedule（10 个）
 		{ID: 1, Category: "create_schedule", Input: "明天下午3点到5点开会", ExpectedTools: []string{"update_schedule"}, Description: "基础时刻表创建"},
 		{ID: 2, Category: "create_schedule", Input: "后天上午去健身房", ExpectedTools: []string{"update_schedule"}, Description: "模糊时间推断"},
@@ -177,13 +177,13 @@ func (s *ModelTestService) initTestCases() {
 }
 
 // GetTestCases 获取所有测试用例
-func (s *ModelTestService) GetTestCases() []TestCase {
+func (s *ModelTestService) GetTestCases() []ModelTestCase {
 	return s.testCases
 }
 
 // GetTestCasesByCategory 按分类获取测试用例
-func (s *ModelTestService) GetTestCasesByCategory(category string) []TestCase {
-	var result []TestCase
+func (s *ModelTestService) GetTestCasesByCategory(category string) []ModelTestCase {
+	var result []ModelTestCase
 	for _, tc := range s.testCases {
 		if tc.Category == category {
 			result = append(result, tc)
@@ -193,8 +193,8 @@ func (s *ModelTestService) GetTestCasesByCategory(category string) []TestCase {
 }
 
 // RunSingleTest 运行单个测试
-func (s *ModelTestService) RunSingleTest(ctx context.Context, testCase TestCase, provider agent.LLMProvider) (*TestResult, error) {
-	result := &TestResult{
+func (s *ModelTestService) RunSingleTest(ctx context.Context, testCase ModelTestCase, provider agent.LLMProvider) (*ModelTestResult, error) {
+	result := &ModelTestResult{
 		TestCase: testCase,
 		Provider: string(provider),
 	}
@@ -269,8 +269,8 @@ func (s *ModelTestService) RunSingleTest(ctx context.Context, testCase TestCase,
 }
 
 // RunAllTests 运行所有测试
-func (s *ModelTestService) RunAllTests(ctx context.Context, provider agent.LLMProvider) ([]TestResult, error) {
-	var results []TestResult
+func (s *ModelTestService) RunAllTests(ctx context.Context, provider agent.LLMProvider) ([]ModelTestResult, error) {
+	var results []ModelTestResult
 
 	for _, tc := range s.testCases {
 		result, err := s.RunSingleTest(ctx, tc, provider)
@@ -361,7 +361,7 @@ func (s *ModelTestService) buildSystemPrompt() string {
 }
 
 // evaluateResult 评估测试结果
-func (s *ModelTestService) evaluateResult(result *TestResult) {
+func (s *ModelTestService) evaluateResult(result *ModelTestResult) {
 	tc := result.TestCase
 
 	// 评估工具调用正确性
@@ -451,7 +451,7 @@ func (s *ModelTestService) evaluateNaturalness(response string) float64 {
 }
 
 // summarizeResults 汇总测试结果
-func (s *ModelTestService) summarizeResults(results []TestResult, provider string) ModelSummary {
+func (s *ModelTestService) summarizeResults(results []ModelTestResult, provider string) ModelSummary {
 	summary := ModelSummary{
 		Provider:   provider,
 		TotalTests: len(results),
@@ -743,7 +743,7 @@ func (s *ModelTestService) GenerateMarkdownReport(report *ModelComparisonReport)
 		claudeResult := s.findResultByID(report.ClaudeResults, caseID)
 
 		// 找到第一个有效结果获取测试用例信息
-		var testCase *TestCase
+		var testCase *ModelTestCase
 		if qwenResult != nil {
 			testCase = &qwenResult.TestCase
 		} else if kimiResult != nil {
@@ -850,7 +850,7 @@ func (s *ModelTestService) GenerateMarkdownReport(report *ModelComparisonReport)
 }
 
 // countInTimeRange 统计在指定时间范围内的结果数量
-func (s *ModelTestService) countInTimeRange(results []TestResult, minMs, maxMs int64) int {
+func (s *ModelTestService) countInTimeRange(results []ModelTestResult, minMs, maxMs int64) int {
 	count := 0
 	for _, r := range results {
 		if r.TotalMs >= minMs && r.TotalMs < maxMs {
@@ -861,8 +861,8 @@ func (s *ModelTestService) countInTimeRange(results []TestResult, minMs, maxMs i
 }
 
 // 辅助函数
-func (s *ModelTestService) filterResultsByCategory(results []TestResult, category string) []TestResult {
-	var filtered []TestResult
+func (s *ModelTestService) filterResultsByCategory(results []ModelTestResult, category string) []ModelTestResult {
+	var filtered []ModelTestResult
 	for _, r := range results {
 		if r.TestCase.Category == category {
 			filtered = append(filtered, r)
@@ -871,7 +871,7 @@ func (s *ModelTestService) filterResultsByCategory(results []TestResult, categor
 	return filtered
 }
 
-func (s *ModelTestService) calculateCategoryAccuracy(results []TestResult) float64 {
+func (s *ModelTestService) calculateCategoryAccuracy(results []ModelTestResult) float64 {
 	if len(results) == 0 {
 		return 0
 	}
@@ -884,7 +884,7 @@ func (s *ModelTestService) calculateCategoryAccuracy(results []TestResult) float
 	return float64(correct) / float64(len(results)) * 100
 }
 
-func (s *ModelTestService) countCorrect(results []TestResult) int {
+func (s *ModelTestService) countCorrect(results []ModelTestResult) int {
 	count := 0
 	for _, r := range results {
 		if r.ToolCallCorrect {
@@ -894,7 +894,7 @@ func (s *ModelTestService) countCorrect(results []TestResult) int {
 	return count
 }
 
-func (s *ModelTestService) findResultByID(results []TestResult, id int) *TestResult {
+func (s *ModelTestService) findResultByID(results []ModelTestResult, id int) *ModelTestResult {
 	for _, r := range results {
 		if r.TestCase.ID == id {
 			return &r
