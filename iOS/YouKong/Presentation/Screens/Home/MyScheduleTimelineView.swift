@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - My Schedule Timeline View
+// MARK: - My Schedule Timeline View (Full Screen with Header)
 
 struct MyScheduleTimelineView: View {
     @StateObject private var viewModel = MyScheduleTimelineViewModel()
@@ -39,69 +39,29 @@ struct MyScheduleTimelineView: View {
                 .fill(CLIColors.border)
                 .frame(height: 1)
 
-            // AI Auto Predict Toggle
-            autoPredictToggle
-
-            Rectangle()
-                .fill(CLIColors.border)
-                .frame(height: 1)
-
-            // Content
-            if viewModel.isLoading && viewModel.scheduleGroups.isEmpty {
-                loadingView
-            } else if viewModel.isEmpty {
-                emptyView
-            } else {
-                scheduleListView
-            }
+            // Content (no AI predict toggle)
+            MyScheduleTimelineContent(viewModel: viewModel)
         }
         .background(CLIColors.background)
         .task {
             await viewModel.loadInitialData()
         }
     }
+}
 
-    // MARK: - Auto Predict Toggle
+// MARK: - My Schedule Timeline Content (Embeddable, no header)
 
-    private var autoPredictToggle: some View {
-        HStack(spacing: 12) {
-            Text("🤖")
-                .font(.system(size: 18))
+struct MyScheduleTimelineContent: View {
+    @ObservedObject var viewModel: MyScheduleTimelineViewModel
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text("AI 自动推测")
-                    .font(.cliBodySmall)
-                    .foregroundColor(CLIColors.textPrimary)
-
-                Text("每天凌晨 00:00 自动更新")
-                    .font(.cliCaptionSmall)
-                    .foregroundColor(CLIColors.textWeak)
-            }
-
-            Spacer()
-
-            // Toggle
-            Button {
-                Task {
-                    await viewModel.toggleAutoPredict()
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Text("[")
-                        .foregroundColor(CLIColors.border)
-                    Text(viewModel.isAutoPredictEnabled ? "ON" : "OFF")
-                        .foregroundColor(viewModel.isAutoPredictEnabled ? CLIColors.green : CLIColors.textWeak)
-                    Text("]")
-                        .foregroundColor(CLIColors.border)
-                }
-                .font(.cliBodySmall)
-            }
-            .disabled(viewModel.isUpdatingSettings)
-            .opacity(viewModel.isUpdatingSettings ? 0.5 : 1.0)
+    var body: some View {
+        if viewModel.isLoading && viewModel.scheduleGroups.isEmpty {
+            loadingView
+        } else if viewModel.isEmpty {
+            emptyView
+        } else {
+            scheduleListView
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(CLIColors.backgroundSecondary)
     }
 
     // MARK: - Loading View
@@ -146,7 +106,11 @@ struct MyScheduleTimelineView: View {
                 .font(.cliBody)
                 .foregroundColor(CLIColors.textSecondary)
 
-            Text("  用语音创建你的状态表吧")
+            Text("  按住下方【按住说话生成】按钮")
+                .font(.cliBodySmall)
+                .foregroundColor(CLIColors.textWeak)
+
+            Text("  AI 直接帮你生成状态时刻表")
                 .font(.cliBodySmall)
                 .foregroundColor(CLIColors.textWeak)
 
@@ -176,7 +140,16 @@ struct MyScheduleTimelineView: View {
                         ScheduleGroupView(
                             group: group,
                             isItemExecuted: { viewModel.isItemExecuted($0, in: group) },
-                            isItemActive: { viewModel.isItemActive($0, in: group) }
+                            isItemActive: { viewModel.isItemActive($0, in: group) },
+                            onEditItem: { item in
+                                viewModel.startEditing(item: item, group: group)
+                            },
+                            onToggleHighlight: { item in
+                                Task { await viewModel.toggleHighlight(item: item, group: group) }
+                            },
+                            onDeleteItem: { item in
+                                viewModel.confirmDelete(item: item, group: group)
+                            }
                         )
                         .id(group.id)
                     }
@@ -195,6 +168,20 @@ struct MyScheduleTimelineView: View {
                             proxy.scrollTo(lastGroup.id, anchor: .bottom)
                         }
                     }
+                }
+            }
+            .sheet(isPresented: $viewModel.showEditSheet) {
+                ScheduleEditSheet(viewModel: viewModel)
+                    .presentationDetents([.medium])
+            }
+            .alert("删除状态", isPresented: $viewModel.showDeleteConfirm) {
+                Button("删除", role: .destructive) {
+                    Task { await viewModel.deleteItem() }
+                }
+                Button("取消", role: .cancel) { }
+            } message: {
+                if let item = viewModel.deletingItem {
+                    Text("确定删除「\(item.emoji) \(item.status)」？")
                 }
             }
         }
@@ -235,6 +222,9 @@ struct ScheduleGroupView: View {
     let group: ScheduleGroup
     let isItemExecuted: (ScheduleItem) -> Bool
     let isItemActive: (ScheduleItem) -> Bool
+    var onEditItem: ((ScheduleItem) -> Void)?
+    var onToggleHighlight: ((ScheduleItem) -> Void)?
+    var onDeleteItem: ((ScheduleItem) -> Void)?
 
     var body: some View {
         VStack(spacing: 8) {
@@ -243,15 +233,25 @@ struct ScheduleGroupView: View {
 
             // Schedule items
             ForEach(Array(group.items.enumerated()), id: \.element.id) { index, item in
+                let executed = isItemExecuted(item)
                 ScheduleItemView(
                     item: item,
-                    isExecuted: isItemExecuted(item),
-                    isActive: isItemActive(item)
+                    isExecuted: executed,
+                    isActive: isItemActive(item),
+                    onToggleHighlight: onToggleHighlight != nil ? { onToggleHighlight?(item) } : nil
                 )
+                .onTapGesture {
+                    if !executed || isItemActive(item) {
+                        onEditItem?(item)
+                    }
+                }
+                .onLongPressGesture {
+                    onDeleteItem?(item)
+                }
 
                 // Connector line between items
                 if index < group.items.count - 1 {
-                    connectorLine(isExecuted: isItemExecuted(item))
+                    connectorLine(isExecuted: executed)
                 }
             }
         }
@@ -299,6 +299,7 @@ struct ScheduleItemView: View {
     let item: ScheduleItem
     let isExecuted: Bool
     let isActive: Bool
+    var onToggleHighlight: (() -> Void)?
 
     private var borderColor: Color {
         if isActive {
@@ -330,8 +331,14 @@ struct ScheduleItemView: View {
 
             // Status card
             HStack(spacing: 8) {
-                Text(item.emoji)
-                    .font(.system(size: 20))
+                if let gifUrlStr = item.gifUrl, let gifUrl = URL(string: gifUrlStr) {
+                    GifImageView(url: gifUrl)
+                        .frame(width: 28, height: 28)
+                        .cornerRadius(4)
+                } else {
+                    Text(item.emoji)
+                        .font(.system(size: 20))
+                }
 
                 Text(item.isAIGuess == true ? "\(item.status) (AI 推测)" : item.status)
                     .font(.cliBodySmall)
@@ -339,6 +346,16 @@ struct ScheduleItemView: View {
                     .lineLimit(1)
 
                 Spacer()
+
+                // Highlight toggle (有空/没空)
+                if let onToggle = onToggleHighlight {
+                    Text(item.highlight == true ? "[有空]" : "[没空]")
+                        .font(.cliCaptionSmall)
+                        .foregroundColor(item.highlight == true ? CLIColors.green : CLIColors.textWeak)
+                        .onTapGesture {
+                            onToggle()
+                        }
+                }
 
                 // Status indicator
                 if isActive {
@@ -361,6 +378,302 @@ struct ScheduleItemView: View {
                             .fill(CLIColors.backgroundSecondary)
                     )
             )
+        }
+    }
+}
+
+// MARK: - Schedule Edit Sheet
+
+struct ScheduleEditSheet: View {
+    @ObservedObject var viewModel: MyScheduleTimelineViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Button {
+                    viewModel.showEditSheet = false
+                } label: {
+                    Text("[取消]")
+                        .font(.cliBodySmall)
+                        .foregroundColor(CLIColors.textSecondary)
+                }
+
+                Spacer()
+
+                Text("━━ 编辑状态 ━━")
+                    .font(.cliHeadline)
+                    .foregroundColor(CLIColors.green)
+
+                Spacer()
+
+                Button {
+                    Task { await viewModel.saveEdit() }
+                } label: {
+                    Text(viewModel.isSavingEdit ? "[...]" : "[保存]")
+                        .font(.cliBodySmall)
+                        .foregroundColor(viewModel.editEmoji.isEmpty || viewModel.editStatus.isEmpty ? CLIColors.textWeak : CLIColors.green)
+                }
+                .disabled(viewModel.editEmoji.isEmpty || viewModel.editStatus.isEmpty || viewModel.isSavingEdit)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Rectangle()
+                .fill(CLIColors.border)
+                .frame(height: 1)
+
+            // Edit form
+            VStack(spacing: 20) {
+                if let item = viewModel.editingItem {
+                    // Time display (read-only)
+                    HStack {
+                        Text("> 时段:")
+                            .font(.cliBodySmall)
+                            .foregroundColor(CLIColors.textSecondary)
+                        Text("\(item.startTime) - \(item.endTime)")
+                            .font(.cliBody)
+                            .foregroundColor(CLIColors.textPrimary)
+                        Spacer()
+                    }
+                }
+
+                // Emoji picker
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 4) {
+                        Text("> Emoji:")
+                            .font(.cliBodySmall)
+                            .foregroundColor(CLIColors.textSecondary)
+
+                        if viewModel.editEmoji.isEmpty {
+                            Text("点击下方选择")
+                                .font(.cliCaptionSmall)
+                                .foregroundColor(CLIColors.textWeak)
+                        } else {
+                            // Show selected emojis with tap-to-remove
+                            ForEach(viewModel.editEmoji.map { String($0) }, id: \.self) { emoji in
+                                Button {
+                                    viewModel.editEmoji = viewModel.editEmoji.replacingOccurrences(of: emoji, with: "")
+                                } label: {
+                                    HStack(spacing: 2) {
+                                        Text(emoji)
+                                            .font(.system(size: 24))
+                                        Text("×")
+                                            .font(.cliCaptionSmall)
+                                            .foregroundColor(CLIColors.textWeak)
+                                    }
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .stroke(CLIColors.border, lineWidth: 1)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer()
+                    }
+
+                    EmojiGridPicker(selected: $viewModel.editEmoji)
+                }
+
+                // Status text input
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("> 状态:")
+                        .font(.cliBodySmall)
+                        .foregroundColor(CLIColors.textSecondary)
+
+                    TextField("输入状态文字", text: $viewModel.editStatus)
+                        .font(.cliBody)
+                        .foregroundColor(CLIColors.textPrimary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(CLIColors.border, lineWidth: 1)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .fill(CLIColors.backgroundSecondary)
+                                )
+                        )
+                }
+
+                // Highlight toggle (有空/没空)
+                HStack {
+                    Text("> 可用:")
+                        .font(.cliBodySmall)
+                        .foregroundColor(CLIColors.textSecondary)
+
+                    Spacer()
+
+                    HStack(spacing: 0) {
+                        // 没空
+                        Button {
+                            viewModel.editHighlight = false
+                        } label: {
+                            Text(" 没空 ")
+                                .font(.cliBodySmall)
+                                .foregroundColor(!viewModel.editHighlight ? CLIColors.textPrimary : CLIColors.textWeak)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(
+                                    !viewModel.editHighlight ? CLIColors.border : CLIColors.backgroundSecondary
+                                )
+                        }
+
+                        // 有空
+                        Button {
+                            viewModel.editHighlight = true
+                        } label: {
+                            Text(" 有空 ")
+                                .font(.cliBodySmall)
+                                .foregroundColor(viewModel.editHighlight ? CLIColors.green : CLIColors.textWeak)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(
+                                    viewModel.editHighlight ? CLIColors.green.opacity(0.15) : CLIColors.backgroundSecondary
+                                )
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(CLIColors.border, lineWidth: 1)
+                    )
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 20)
+        }
+        .background(CLIColors.background)
+    }
+}
+
+// MARK: - Emoji Grid Picker (multi-select, max 3, paged)
+
+struct EmojiGridPicker: View {
+    @Binding var selected: String
+    @State private var currentPage = 0
+
+    private static let maxSelection = 3
+
+    private let pages: [(String, [[String]])] = [
+        ("日常", [
+            ["💼", "📚", "💻", "🎮", "🎬", "🎵", "🏃", "🧘"],
+            ["✍️", "📖", "🎨", "📝", "🧑‍💻", "🎤", "📺", "🎧"],
+            ["🧹", "🛁", "💈", "🪥", "👔", "🎒", "📦", "🔧"],
+        ]),
+        ("饮食", [
+            ["☕", "🍜", "🍔", "🍺", "🫖", "🍰", "🥗", "🍳"],
+            ["🍕", "🍣", "🥘", "🍝", "🧋", "🍷", "🥤", "🫕"],
+            ["🍞", "🥐", "🍙", "🍱", "🌮", "🥡", "🍿", "🧁"],
+        ]),
+        ("出行", [
+            ["🚗", "🚇", "✈️", "🚶", "🏠", "🏢", "🛏️", "🛒"],
+            ["🚕", "🚌", "🚴", "🛴", "🏖️", "⛰️", "🏕️", "🗺️"],
+            ["🏪", "🏥", "🏫", "🏛️", "🌆", "🌃", "🌄", "🌇"],
+        ]),
+        ("社交", [
+            ["🤝", "🎉", "📱", "📞", "🎯", "⚽", "🏋️", "🎳"],
+            ["👥", "💬", "🍻", "🎂", "🎊", "🎶", "🕺", "💃"],
+            ["❤️", "👨‍👩‍👧", "👫", "🧑‍🤝‍🧑", "🎁", "📸", "🎪", "🏆"],
+        ]),
+        ("心情", [
+            ["😊", "😴", "🤔", "😎", "🔥", "💪", "🌙", "☀️"],
+            ["😤", "😌", "🥱", "🤩", "😇", "🥳", "😵‍💫", "🫠"],
+            ["💤", "⭐", "🌈", "🍀", "🎵", "💡", "⏰", "🔋"],
+        ]),
+    ]
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 8)
+
+    // Parse selected string into array of individual emojis
+    private var selectedEmojis: [String] {
+        selected.map { String($0) }.filter { $0.unicodeScalars.first?.properties.isEmoji == true || $0.count > 0 }
+    }
+
+    private func toggleEmoji(_ emoji: String) {
+        var current = Array(selected)
+            .map { String($0) }
+            .filter { char in
+                char.unicodeScalars.contains { $0.properties.isEmoji && !$0.properties.isEmojiPresentation || $0.properties.isEmojiPresentation }
+            }
+        // Rebuild: split by emoji characters properly
+        current = splitEmojis(selected)
+
+        if let idx = current.firstIndex(of: emoji) {
+            current.remove(at: idx)
+        } else if current.count < Self.maxSelection {
+            current.append(emoji)
+        }
+        selected = current.joined()
+    }
+
+    private func isSelected(_ emoji: String) -> Bool {
+        splitEmojis(selected).contains(emoji)
+    }
+
+    private func splitEmojis(_ str: String) -> [String] {
+        str.map { String($0) }
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            // Page tabs
+            HStack(spacing: 0) {
+                ForEach(Array(pages.enumerated()), id: \.offset) { index, page in
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            currentPage = index
+                        }
+                    } label: {
+                        Text(page.0)
+                            .font(.cliCaptionSmall)
+                            .foregroundColor(currentPage == index ? CLIColors.green : CLIColors.textWeak)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(
+                                currentPage == index
+                                    ? CLIColors.green.opacity(0.1)
+                                    : Color.clear
+                            )
+                            .cornerRadius(4)
+                    }
+                }
+                Spacer()
+
+                Text("\(splitEmojis(selected).count)/\(Self.maxSelection)")
+                    .font(.cliCaptionSmall)
+                    .foregroundColor(CLIColors.textWeak)
+            }
+
+            // Emoji grid for current page
+            let pageEmojis = pages[currentPage].1
+            LazyVGrid(columns: columns, spacing: 6) {
+                ForEach(pageEmojis.flatMap { $0 }, id: \.self) { emoji in
+                    Button {
+                        toggleEmoji(emoji)
+                    } label: {
+                        Text(emoji)
+                            .font(.system(size: 24))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(isSelected(emoji) ? CLIColors.green.opacity(0.2) : Color.clear)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(isSelected(emoji) ? CLIColors.green : Color.clear, lineWidth: 1)
+                            )
+                    }
+                    .disabled(!isSelected(emoji) && splitEmojis(selected).count >= Self.maxSelection)
+                    .opacity(!isSelected(emoji) && splitEmojis(selected).count >= Self.maxSelection ? 0.4 : 1)
+                }
+            }
         }
     }
 }
