@@ -18,9 +18,11 @@ import (
 
 // V4 架构常量
 const (
-	v4MaxLoops        = 5                    // 最大循环次数
-	v4SessionTTL      = 10 * time.Minute     // 会话过期时间
-	v4SessionKeyPrefix = "v4_voice_session:" // Redis key 前缀
+	v4MaxLoops         = 10                   // 最大循环次数
+	v4SessionTTL       = 10 * time.Minute     // 会话过期时间
+	v4SessionKeyPrefix = "v4_voice_session:"  // Redis key 前缀
+	v4SessionLockPrefix = "v4_session_lock:"  // Session 锁前缀
+	v4SessionLockTTL    = 60 * time.Second    // 锁超时（防死锁）
 )
 
 // VoiceScheduleServiceV4 V4 版本语音时刻表服务
@@ -34,9 +36,6 @@ type VoiceScheduleServiceV4 struct {
 	redisClient           *tencent.RedisClient
 	llmAdapter            *agent.LLMAdapter
 	asrClient             *asr.AliyunASRClient // 语音识别客户端
-
-	// V4 工具集
-	tools []*agent.Tool
 
 	// ========== 好友相关依赖 ==========
 	friendshipService   *FriendshipService
@@ -69,7 +68,6 @@ func NewVoiceScheduleServiceV4(
 		userProfileService:  userProfileService,
 		redisClient:         redisClient,
 		asrClient:           asrClient,
-		tools:               agent.V4AllTools(), // 所有工具（时刻表+好友+扩展）
 		friendshipService:   friendshipService,
 		conversationService: conversationService,
 		agentService:        agentService,
@@ -90,17 +88,69 @@ func NewVoiceScheduleServiceV4(
 	return svc
 }
 
-// ProcessTextInput 处理文本输入（主入口）
-// 架构原则：所有输入统一走 Agent 循环，LLM 自主决定是否需要工具
+// getToolsForSession 根据 session 状态动态选择工具集
+// 基础 8 工具始终加载，其余工具按条件加载（LLM 看不到的工具不会误选）
+func (s *VoiceScheduleServiceV4) getToolsForSession(session *model.V4Session) []*agent.Tool {
+	tools := agent.V4BaseTools() // 基础 8 个
+
+	// 条件加载：有安排时暴露删除工具
+	if len(session.CurrentSchedule) > 0 || len(session.TomorrowSchedule) > 0 || len(session.TargetDateSchedule) > 0 {
+		tools = append(tools, agent.V4DeleteScheduleTool())
+	}
+
+	// 条件加载：有好友上下文时暴露删除好友工具
+	if session.LastQueriedFriend != nil {
+		tools = append(tools, agent.V4RemoveFriendTool())
+	}
+
+	// 条件加载：有通讯录数据时（已有逻辑）
+	if len(session.ContactHashes) > 0 || len(session.MatchedContacts) > 0 {
+		tools = append(tools, agent.V4ContactTools()...) // match_contacts, add_friend
+	}
+
+	return tools
+}
+
+// ProcessTextInput 处理文本输入（公共入口，带 session 锁）
+// sensorData 可选，一键生成时传入传感器数据，注入到系统提示词
 func (s *VoiceScheduleServiceV4) ProcessTextInput(
 	ctx context.Context,
 	userID string,
 	sessionID string,
 	text string,
+	sensorData *model.ExtendedStatusReportRequest,
+	callback func(event *model.V4Event),
+) (*model.V4Session, error) {
+	// 获取 session 锁（防止同一 session 并发处理导致状态丢失）
+	if sessionID != "" && !s.acquireSessionLock(ctx, sessionID) {
+		callback(&model.V4Event{
+			Type:    model.V4EventTypeChat,
+			Message: "正在处理上一条消息，请稍后再试",
+		})
+		return nil, fmt.Errorf("session %s is locked", sessionID)
+	}
+	if sessionID != "" {
+		defer s.releaseSessionLock(ctx, sessionID)
+	}
+	return s.processTextInputInternal(ctx, userID, sessionID, text, sensorData, callback)
+}
+
+// processTextInputInternal 处理文本输入（内部方法，调用方已持有锁）
+func (s *VoiceScheduleServiceV4) processTextInputInternal(
+	ctx context.Context,
+	userID string,
+	sessionID string,
+	text string,
+	sensorData *model.ExtendedStatusReportRequest,
 	callback func(event *model.V4Event),
 ) (*model.V4Session, error) {
 	// 1. 获取或创建会话
 	session, isNew := s.getOrCreateSession(ctx, userID, sessionID)
+
+	// 注入传感器数据（一键生成场景）
+	if sensorData != nil {
+		session.SensorData = sensorData
+	}
 
 	// 发送会话开始事件
 	if isNew {
@@ -116,13 +166,20 @@ func (s *VoiceScheduleServiceV4) ProcessTextInput(
 		Message: text,
 	})
 
-	// 2. 加载用户时刻表（如果是新会话）
-	if isNew || len(session.CurrentSchedule) == 0 {
-		s.loadCurrentSchedule(ctx, session)
-	}
+	// 2. 每次请求都刷新时刻表（用户可能在两次对话间修改了安排）
+	s.loadCurrentSchedule(ctx, session)
 
 	// 3. 添加用户消息
 	session.AddMessage("user", text)
+
+	// 3.5 Layer 1: 时间预处理（注入事实，非规则）
+	hint := agent.ParseTemporalHints(text, time.Now())
+	session.TemporalAnnotation = agent.FormatHintAnnotation(hint)
+
+	// 3.6 按需加载目标日期安排（如果用户提到了非今天/明天的日期）
+	if hint.DateMatch != nil {
+		s.loadTargetDateSchedule(ctx, session, hint.DateMatch.ResolvedDate)
+	}
 
 	// 4. 发送阶段：理解请求
 	callback(&model.V4Event{
@@ -195,10 +252,13 @@ func (s *VoiceScheduleServiceV4) processLoopWithTools(
 		// 1. 构建消息列表
 		messages := s.buildMessages(session)
 
-		// 2. 调用 LLM（启用 thinking mode，精确决策低温度）
+		// 2. 动态选择工具集
+		tools := s.getToolsForSession(session)
+
+		// 3. 调用 LLM（启用 thinking mode，精确决策低温度）
 		response, err := s.llmAdapter.ChatWithTools(ctx, &agent.LLMRequest{
 			Messages:       messages,
-			Tools:          s.tools,
+			Tools:          tools,
 			Temperature:    0.3,
 			EnableThinking: true,
 			ThinkingBudget: 2048,
@@ -251,7 +311,7 @@ func (s *VoiceScheduleServiceV4) processLoopWithTools(
 
 // v4TokenBudget 上下文 Token 预算
 // 超过此阈值时触发语义压缩，而非粗暴截断
-const v4TokenBudget = 6000
+const v4TokenBudget = 12000
 
 // v4KeepLastN 压缩时保留最近的消息数量
 const v4KeepLastN = 8
@@ -270,6 +330,9 @@ func (s *VoiceScheduleServiceV4) buildMessages(session *model.V4Session) []agent
 	if session.Summary != "" {
 		messages = append(messages, agent.NewSystemMessage("[历史对话摘要]\n"+session.Summary))
 	}
+
+	// few-shot 示例已禁用：测试表明会干扰 confirm 场景的准确率
+	// messages = append(messages, s.buildFewShotExamples()...)
 
 	// 转换所有 V4Message 为 AgentMessage
 	allMessages := make([]agent.AgentMessage, 0, len(session.Messages))
@@ -373,45 +436,102 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 
 	var sb strings.Builder
 
-	// ========== 角色定义 ==========
-	sb.WriteString(`你是「有空」的 AI 助手。你有一组工具可以帮用户管理日程、查询好友状态、发送消息。
+	// ========== 角色定义 + 行为原则 ==========
+	sb.WriteString(`你是「有空」的 AI 助手，帮用户管理日程、查询好友、发送消息。
 
 行为原则：
-- 先理解用户真正想做什么，再决定用什么工具
-- 如果用户的请求模糊或有多种解读，先用文字问清楚
-- 查询类操作可以直接执行
-- 修改类操作（创建/修改日程）会生成预览等用户确认
-- 发消息/约人前，先用 query_friends 找到好友
-- 回复简洁自然，像朋友聊天，emoji 匹配活动
-- 时间模糊时先确认，不要猜测
-- 用户只是闲聊时，不需要调用任何工具，直接回复即可
+- 先理解用户意图，再选择工具。不确定时用文字问清楚，不要猜测
+- 回复简洁自然，像朋友聊天
+- 工具返回 notices 时，在回复中自然提及（不忽略也不过度强调）
+- 【今日安排】是快照，涉及用户当前实时状态时，用 view_schedule 获取最新数据
 
-【重要区分】
-- 用户描述当前状态（"我在加班"、"好累"、"到公司了"）→ update_current_status（即时生效，不需确认）
-- 用户规划时间安排（"下午3点开会"、"明天去健身"）→ update_schedule（生成预览等确认）
-- 用户给出精确时间+活动，即使多条也应一次性调用 update_schedule（如"10点瑜伽课，2点兼职，7点聚餐"→一次 update_schedule 包含3个items）
-- 修改时刻表时只传变更的条目，operation="modify"，系统会自动保留其他时段
-- 用户说"给他/她发消息"时，使用上一次 query_friends 查到的好友
-- save_schedule 和 confirm_send 是互斥的：save_schedule 保存日程，confirm_send 发送消息/邀请。根据待确认内容类型选择正确的工具
+上下文确认规则：
+- 用户说"好的/保存/发吧" + 有⚠️待确认内容 → confirm
+- 用户说"好的" + 无⚠️ → 闲聊，不调用工具
+- "不对/再改改" + 有⚠️ → 不调用工具，问用户想怎么改
+- 有【最近查询的好友】+ "他/她" → 用该好友ID
+- 有⚠️待确认消息 + "改成XX" → draft_message 重新生成
+- 意图不完整（仅代词、缺关键信息）→ 不调用工具，先问清楚
+- 有⚠️待确认删除 + "确认/删吧" → confirm
+- 有⚠️待确认删除 + "算了/不删了" → 不调用工具
+
+时间参考：
+- "等会/一会儿"≈当前时间+30min，"中午"≈12:00，"下午"≈14:00，"晚上"≈19:00
+
+有空标记：
+- "有空/我有空/标记有空" = 设置时段的有空状态 → plan_activities(available=true) 或 set_status(available=true)
+- "什么时候有空/哪些时段有空" = 查询有空时段 → view_schedule
 
 `)
 
-	// ========== 当前时间 ==========
-	today := now.Format("2006-01-02")
-	tomorrow := now.AddDate(0, 0, 1).Format("2006-01-02")
-	sb.WriteString(fmt.Sprintf("【时间】%s %s %02d:%02d | 今天=%s 明天=%s\n\n",
-		today, weekdays[now.Weekday()], now.Hour(), now.Minute(), today, tomorrow))
+	// ========== 当前时间（增强版：含时段标记 + 7天日历）==========
+	todayStr := now.Format("2006-01-02")
+	period := v4GetTimePeriod(now.Hour())
+	sb.WriteString(fmt.Sprintf("【时间】%s %s %02d:%02d | 当前时段=%s\n",
+		todayStr, weekdays[now.Weekday()], now.Hour(), now.Minute(), period))
+	// 7 天日历参考：让 LLM 知道"后天"/"下周X"对应的具体日期
+	sb.WriteString("日历: ")
+	dayLabels := []string{"今天", "明天", "后天"}
+	for i := 0; i < 7; i++ {
+		d := now.AddDate(0, 0, i)
+		dateStr := d.Format("01-02")
+		wd := weekdays[d.Weekday()]
+		if i < len(dayLabels) {
+			sb.WriteString(fmt.Sprintf("%s=%s(%s)", dayLabels[i], dateStr, wd))
+		} else {
+			sb.WriteString(fmt.Sprintf("%s(%s)", dateStr, wd))
+		}
+		if i < 6 {
+			sb.WriteString(" ")
+		}
+	}
+	sb.WriteString("\n\n")
 
-	// ========== 用户当前时刻表 ==========
+	// ========== 时间预处理注解（Layer 1: 事实注入）==========
+	if session.TemporalAnnotation != "" {
+		sb.WriteString(session.TemporalAnnotation + "\n\n")
+	}
+
+	// ========== 今日安排 ==========
 	if len(session.CurrentSchedule) > 0 {
-		sb.WriteString("【当前时刻表】")
-		for i, item := range session.CurrentSchedule {
+		sb.WriteString(fmt.Sprintf("【今日安排】(%d个时段，会话开始时快照，可能已过时)\n", len(session.CurrentSchedule)))
+		for _, item := range session.CurrentSchedule {
+			availMark := ""
+			if item.Highlight {
+				availMark = " ✅有空"
+			}
+			sb.WriteString(fmt.Sprintf("%s-%s %s%s%s\n", item.StartTime, item.EndTime, item.Emoji, item.Status, availMark))
+		}
+		sb.WriteString("\n")
+	}
+
+	// ========== 明日安排 ==========
+	if len(session.TomorrowSchedule) > 0 {
+		sb.WriteString(fmt.Sprintf("【明日安排】(%d个时段) ", len(session.TomorrowSchedule)))
+		for i, item := range session.TomorrowSchedule {
 			if i > 0 {
 				sb.WriteString(" | ")
 			}
-			sb.WriteString(fmt.Sprintf("%s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
+			availMark := ""
+			if item.Highlight {
+				availMark = " ✅有空"
+			}
+			sb.WriteString(fmt.Sprintf("%s-%s %s%s%s", item.StartTime, item.EndTime, item.Emoji, item.Status, availMark))
 		}
 		sb.WriteString("\n\n")
+	}
+
+	// ========== 目标日期安排（按需加载）==========
+	if len(session.TargetDateSchedule) > 0 && session.TargetDateLabel != "" {
+		sb.WriteString(fmt.Sprintf("【%s 安排】(%d个时段)\n", session.TargetDateLabel, len(session.TargetDateSchedule)))
+		for _, item := range session.TargetDateSchedule {
+			availMark := ""
+			if item.Highlight {
+				availMark = " ✅有空"
+			}
+			sb.WriteString(fmt.Sprintf("%s-%s %s%s%s\n", item.StartTime, item.EndTime, item.Emoji, item.Status, availMark))
+		}
+		sb.WriteString("\n")
 	}
 
 	// ========== 待确认的时刻表 ==========
@@ -424,22 +544,173 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 			sb.WriteString(fmt.Sprintf("%s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
 		}
 		sb.WriteString(" (日期:" + session.PendingDate.Format("01-02") + ")")
-		sb.WriteString("\n用户确认后调用 save_schedule 保存，要修改则调用 update_schedule 重新生成\n\n")
+		sb.WriteString("\n用户确认后调用 confirm 保存，要修改则调用 plan_activities 重新生成\n\n")
 	}
 
 	// ========== 待确认的消息/邀请 ==========
 	if session.HasPendingMessage() {
-		sb.WriteString(fmt.Sprintf("【⚠️待确认消息】发送给 %s: \"%s\"\n用户确认后调用 confirm_send\n\n",
-			session.PendingMessage.FriendName, session.PendingMessage.Message))
+		sb.WriteString(fmt.Sprintf("【⚠️待确认消息】发送给 %s (ID: %s): \"%s\"\n用户确认后调用 confirm，修改内容调用 draft_message(friend_id=%s)\n\n",
+			session.PendingMessage.FriendName, session.PendingMessage.FriendID,
+			session.PendingMessage.Message, session.PendingMessage.FriendID))
 	}
 	if session.HasPendingInvite() {
-		sb.WriteString(fmt.Sprintf("【⚠️待确认邀请】邀请 %s %s %s-%s %s\n用户确认后调用 confirm_send\n\n",
+		sb.WriteString(fmt.Sprintf("【⚠️待确认邀请】邀请 %s %s %s-%s %s\n用户确认后调用 confirm\n\n",
 			session.PendingInvite.FriendName, session.PendingInvite.Date,
 			session.PendingInvite.StartTime, session.PendingInvite.EndTime,
 			session.PendingInvite.Activity))
 	}
 
+	// ========== 待确认的删除操作 ==========
+	if session.HasPendingDeletion() {
+		pd := session.PendingDeletion
+		if pd.Type == "schedule" {
+			sb.WriteString(fmt.Sprintf("【⚠️待确认删除】将删除%d个安排", len(pd.DeletedItems)))
+			for _, item := range pd.DeletedItems {
+				sb.WriteString(fmt.Sprintf(" | %s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
+			}
+			sb.WriteString(fmt.Sprintf(" (日期:%s)", pd.Date))
+			sb.WriteString("\n用户确认后调用 confirm 执行删除，说'算了/不删了'则不操作\n\n")
+		} else if pd.Type == "friend" {
+			sb.WriteString(fmt.Sprintf("【⚠️待确认删除好友】将删除好友 %s (ID: %s)\n用户确认后调用 confirm 执行删除\n\n",
+				pd.FriendName, pd.FriendID))
+		}
+	}
+
+	// ========== 传感器数据（一键生成时注入）==========
+	if session.SensorData != nil {
+		sb.WriteString("【设备数据】（用户请求推断状态时的实时数据）\n")
+		sb.WriteString(formatSensorData(session.SensorData))
+		sb.WriteString("\n请结合设备数据和对话上下文，用 set_status 设置最合适的状态。\n\n")
+	}
+
 	return sb.String()
+}
+
+// formatSensorData 将传感器数据格式化为自然语言
+func formatSensorData(data *model.ExtendedStatusReportRequest) string {
+	var sb strings.Builder
+
+	// 位置
+	if data.ExtendedLocation != nil {
+		loc := data.ExtendedLocation
+		placeNames := map[string]string{
+			"home": "家", "work": "公司", "leisure": "休闲场所", "transit": "路上", "unknown": "未知",
+		}
+		placeName := placeNames[string(loc.PlaceType)]
+		if loc.PlaceName != "" {
+			placeName = loc.PlaceName
+		}
+		sb.WriteString(fmt.Sprintf("- 位置: %s", placeName))
+		if loc.AtPlaceSinceMinutes > 0 {
+			sb.WriteString(fmt.Sprintf("，已停留%d分钟", loc.AtPlaceSinceMinutes))
+		}
+		sb.WriteString("\n")
+	} else if data.Location != nil {
+		loc := data.Location
+		placeNames := map[string]string{
+			"home": "家", "work": "公司", "leisure": "休闲场所", "transit": "路上",
+		}
+		placeName := placeNames[string(loc.PlaceType)]
+		if placeName == "" {
+			placeName = string(loc.PlaceType)
+		}
+		sb.WriteString(fmt.Sprintf("- 位置: %s", placeName))
+		if loc.AtPlaceSinceMinutes > 0 {
+			sb.WriteString(fmt.Sprintf("，已停留%d分钟", loc.AtPlaceSinceMinutes))
+		}
+		sb.WriteString("\n")
+	}
+
+	// 电池
+	if data.Battery != nil {
+		b := data.Battery
+		charging := "未充电"
+		if b.IsCharging {
+			charging = "充电中"
+		}
+		sb.WriteString(fmt.Sprintf("- 电池: %d%%, %s\n", b.BatteryLevel, charging))
+	}
+
+	// 运动
+	if data.Movement != nil {
+		m := data.Movement
+		if m.IsMoving {
+			movTypes := map[string]string{"walking": "步行中", "driving": "驾车中", "running": "跑步中"}
+			if t, ok := movTypes[m.MovementType]; ok {
+				sb.WriteString(fmt.Sprintf("- 运动: %s\n", t))
+			} else {
+				sb.WriteString("- 运动: 移动中\n")
+			}
+		} else {
+			sb.WriteString("- 运动: 静止\n")
+		}
+	}
+
+	// 网络/耳机
+	if data.Connection != nil {
+		c := data.Connection
+		sb.WriteString(fmt.Sprintf("- 网络: %s", c.NetworkType))
+		if c.IsHeadphonesConnected {
+			sb.WriteString("，耳机已连接")
+		}
+		sb.WriteString("\n")
+	}
+
+	// 模式
+	if data.Mode != nil {
+		m := data.Mode
+		if m.IsFocusModeOn {
+			sb.WriteString("- 模式: 专注模式开启\n")
+		}
+		if m.IsLowPowerMode {
+			sb.WriteString("- 模式: 低电量模式\n")
+		}
+	}
+
+	// 日历
+	if data.Calendar != nil {
+		cal := data.Calendar
+		if cal.HasCurrentEvent {
+			sb.WriteString(fmt.Sprintf("- 日历: 当前有事件「%s」", cal.CurrentEventTitle))
+			if cal.EventEndMinutes > 0 {
+				sb.WriteString(fmt.Sprintf("，还有%d分钟结束", cal.EventEndMinutes))
+			}
+			sb.WriteString("\n")
+		} else if cal.NextEventInMinutes > 0 {
+			sb.WriteString(fmt.Sprintf("- 日历: 下个事件在%d分钟后\n", cal.NextEventInMinutes))
+		}
+	}
+
+	return sb.String()
+}
+
+// buildFewShotExamples 构建 few-shot 示例消息（校准口语化输入的工具选择）
+// 只展示 user → tool_call 映射，不包含 tool result/assistant 回复，避免 awaiting_approval 误导
+func (s *VoiceScheduleServiceV4) buildFewShotExamples() []agent.AgentMessage {
+	today := time.Now().Format("2006-01-02")
+
+	return []agent.AgentMessage{
+		// 示例1: 口语化活动 → plan_activities（不是 set_status）
+		agent.NewUserMessage("等会去搓一顿"),
+		agent.NewAssistantMessageWithToolCall("plan_activities",
+			fmt.Sprintf(`{"date":"%s","activities":[{"start_time":"12:00","end_time":"13:30","emoji":"🍜","status":"吃饭"}]}`, today)),
+		agent.NewToolResultMessage("fewshot_plan_activities", "plan_activities", `{"message":"已保存"}`),
+		agent.NewAssistantMessage("帮你安排好了吃饭时间 🍜"),
+
+		// 示例2: 纯状态 → set_status（不是 plan_activities）
+		agent.NewUserMessage("在加班"),
+		agent.NewAssistantMessageWithToolCall("set_status",
+			`{"emoji":"💼","status":"加班中"}`),
+		agent.NewToolResultMessage("fewshot_set_status", "set_status", `{"message":"已更新"}`),
+		agent.NewAssistantMessage("已更新你的状态为 💼加班中"),
+
+		// 示例3: 模糊时间 → plan_activities（合理推断）
+		agent.NewUserMessage("中午出去吃个饭"),
+		agent.NewAssistantMessageWithToolCall("plan_activities",
+			fmt.Sprintf(`{"date":"%s","activities":[{"start_time":"12:00","end_time":"13:00","emoji":"🍽️","status":"午饭"}]}`, today)),
+		agent.NewToolResultMessage("fewshot_plan_activities", "plan_activities", `{"message":"已保存"}`),
+		agent.NewAssistantMessage("安排好了中午的午饭时间 🍽️"),
+	}
 }
 
 // executeToolCallsWithPhase 执行工具调用（带阶段暴露）
@@ -482,9 +753,9 @@ func (s *VoiceScheduleServiceV4) executeToolCallsWithPhase(
 		// 执行工具
 		result, breakLoop := s.executeTool(ctx, session, toolName, args, callback)
 
-		// 添加工具结果到会话
+		// 添加工具结果到会话（裁剪过长结果防止上下文膨胀）
 		resultJSON, _ := json.Marshal(result)
-		session.AddToolResult(tc.ID, toolName, string(resultJSON))
+		session.AddToolResult(tc.ID, toolName, trimToolResult(string(resultJSON), 2000))
 
 		// 发送工具完成事件
 		callback(&model.V4Event{
@@ -504,21 +775,18 @@ func (s *VoiceScheduleServiceV4) executeToolCallsWithPhase(
 // getToolDescription 获取工具的友好描述
 func (s *VoiceScheduleServiceV4) getToolDescription(toolName string) string {
 	descriptions := map[string]string{
-		"get_schedule":              "正在查询时刻表...",
-		"update_schedule":           "正在生成时刻表预览...",
-		"update_current_status":     "正在更新当前状态...",
-		"save_schedule":             "正在保存时刻表...",
+		"view_schedule":             "正在查询时刻表...",
+		"plan_activities":           "正在生成时刻表预览...",
+		"set_status":                "正在更新当前状态...",
+		"confirm":                   "正在确认...",
 		"update_preference":         "正在更新偏好设置...",
-		"query_friends":             "正在查询好友...",
-		"send_message":              "正在生成消息预览...",
-		"create_schedule_invite":    "正在生成日程邀请...",
-		"confirm_send":              "正在发送...",
+		"find_friends":              "正在查询好友...",
+		"draft_message":             "正在生成消息预览...",
+		"draft_invite":              "正在生成日程邀请...",
+		"delete_schedule":           "正在查找要删除的安排...",
+		"remove_friend":             "正在准备删除好友...",
 		"match_contacts":            "正在匹配通讯录...",
 		"add_friend":                "正在添加好友...",
-		"query_device_data":         "正在查询设备数据...",
-		"query_memory":              "正在查询记忆...",
-		"update_memory":             "正在更新记忆...",
-		"get_behavior_suggestion":   "正在生成建议...",
 	}
 
 	if desc, ok := descriptions[toolName]; ok {
@@ -536,33 +804,36 @@ func (s *VoiceScheduleServiceV4) executeTool(
 	callback func(event *model.V4Event),
 ) (interface{}, bool) {
 	switch toolName {
-	case "get_schedule":
+	case "view_schedule":
 		return s.executeGetSchedule(ctx, session, args, callback)
 
-	case "update_schedule":
+	case "plan_activities":
 		return s.executeUpdateSchedule(ctx, session, args, callback)
 
-	case "update_current_status":
+	case "delete_schedule":
+		return s.executeDeleteSchedule(ctx, session, args, callback)
+
+	case "set_status":
 		return s.executeUpdateCurrentStatus(ctx, session, args, callback)
 
-	case "save_schedule":
-		return s.executeSaveSchedule(ctx, session, args, callback)
+	case "confirm":
+		return s.executeConfirm(ctx, session, args, callback)
 
 	case "update_preference":
 		return s.executeUpdatePreference(ctx, session, args, callback)
 
 	// ========== 好友相关工具 ==========
-	case "query_friends":
+	case "find_friends":
 		return s.executeQueryFriends(ctx, session, args, callback)
 
-	case "send_message":
+	case "draft_message":
 		return s.executeSendMessage(ctx, session, args, callback)
 
-	case "create_schedule_invite":
+	case "draft_invite":
 		return s.executeCreateScheduleInvite(ctx, session, args, callback)
 
-	case "confirm_send":
-		return s.executeConfirmSend(ctx, session, args, callback)
+	case "remove_friend":
+		return s.executeRemoveFriend(ctx, session, args, callback)
 
 	// ========== 扩展工具 ==========
 	case "match_contacts":
@@ -571,91 +842,96 @@ func (s *VoiceScheduleServiceV4) executeTool(
 	case "add_friend":
 		return s.executeAddFriend(ctx, session, args, callback)
 
-	case "query_device_data":
-		return s.executeQueryDeviceData(ctx, session, args, callback)
-
-	case "query_memory":
-		return s.executeQueryMemory(ctx, session, args, callback)
-
-	case "update_memory":
-		return s.executeUpdateMemory(ctx, session, args, callback)
-
-	case "get_behavior_suggestion":
-		return s.executeGetBehaviorSuggestion(ctx, session, args, callback)
-
 	default:
 		return map[string]string{"error": "未知工具: " + toolName}, false
 	}
 }
 
-// executeGetSchedule 执行获取时刻表
+// executeGetSchedule 执行获取时刻表（view_schedule）
 func (s *VoiceScheduleServiceV4) executeGetSchedule(
 	ctx context.Context,
 	session *model.V4Session,
 	args map[string]interface{},
 	callback func(event *model.V4Event),
 ) (interface{}, bool) {
-	// 解析日期
+	// 解析日期（date 现在是必填参数）
 	date, err := agent.ParseDate(args)
 	if err != nil {
 		date = time.Now()
 	}
 
-	// 解析时间范围过滤参数
-	startTimeFilter, _ := args["start_time"].(string)
-	endTimeFilter, _ := args["end_time"].(string)
-
-	// 获取时刻表
-	schedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, session.UserID, date)
-	if err != nil || schedule == nil || len(schedule.Items) == 0 {
+	// 获取时刻表：先查 active，再查所有（包含 completed）合并展示
+	schedules, err := s.scheduleRepo.GetAllByUserAndDate(ctx, session.UserID, date)
+	if err != nil || len(schedules) == 0 {
 		return map[string]interface{}{
 			"message": "暂无时刻表",
 			"date":    date.Format("2006-01-02"),
+			"notices": []model.TimeNotice{},
 		}, false
 	}
 
-	// 转换为返回格式，同时应用时间范围过滤
-	filteredItems := make([]map[string]string, 0, len(schedule.Items))
-	for _, item := range schedule.Items {
-		// 应用时间范围过滤
-		if startTimeFilter != "" && item.EndTime <= startTimeFilter {
-			continue // 时段在过滤开始时间之前结束，跳过
+	// 合并所有时刻表的 items（按 start_time 去重，保留最新的）
+	seen := make(map[string]bool)
+	var allItems model.ScheduleItems
+	for _, schedule := range schedules {
+		for _, item := range schedule.Items {
+			key := item.StartTime + "-" + item.EndTime
+			if !seen[key] {
+				seen[key] = true
+				allItems = append(allItems, item)
+			}
 		}
-		if endTimeFilter != "" && item.StartTime >= endTimeFilter {
-			continue // 时段在过滤结束时间之后开始，跳过
-		}
+	}
 
-		filteredItems = append(filteredItems, map[string]string{
+	if len(allItems) == 0 {
+		return map[string]interface{}{
+			"message": "暂无时刻表",
+			"date":    date.Format("2006-01-02"),
+			"notices": []model.TimeNotice{},
+		}, false
+	}
+
+	// 转换为返回格式
+	items := make([]map[string]interface{}, 0, len(allItems))
+	for _, item := range allItems {
+		items = append(items, map[string]interface{}{
 			"start_time": item.StartTime,
 			"end_time":   item.EndTime,
 			"emoji":      item.Emoji,
 			"status":     item.Status,
+			"available":  item.Highlight,
 		})
 	}
 
-	if len(filteredItems) == 0 {
-		msg := "该时间段暂无安排"
-		if startTimeFilter != "" || endTimeFilter != "" {
-			msg = fmt.Sprintf("在%s", date.Format("01月02日"))
-			if startTimeFilter != "" {
-				msg += " " + startTimeFilter
-			}
-			if endTimeFilter != "" {
-				msg += "到" + endTimeFilter
-			}
-			msg += "期间暂无安排"
-		}
-		return map[string]interface{}{
-			"message": msg,
-			"date":    date.Format("2006-01-02"),
-		}, false
-	}
+	// 时间注解：标注 ongoing/soon 项目（不标 past，避免信息过载）
+	notices := s.analyzeViewNotices(allItems, date)
 
 	return map[string]interface{}{
-		"date":  date.Format("2006-01-02"),
-		"items": filteredItems,
-		"count": len(filteredItems),
+		"date":    date.Format("2006-01-02"),
+		"items":   items,
+		"count":   len(items),
+		"notices": notices,
 	}, false
+}
+
+// executeConfirm 统一确认工具（合并原 save_schedule + confirm_send）
+// 根据 session 状态自动判断要确认的类型
+func (s *VoiceScheduleServiceV4) executeConfirm(
+	ctx context.Context,
+	session *model.V4Session,
+	args map[string]interface{},
+	callback func(event *model.V4Event),
+) (interface{}, bool) {
+	if session.HasPendingSchedule() {
+		return s.executeSaveSchedule(ctx, session, args, callback)
+	}
+	if session.HasPendingMessage() || session.HasPendingInvite() {
+		return s.executeConfirmSend(ctx, session, args, callback)
+	}
+	if session.HasPendingDeletion() {
+		return s.executeConfirmDeletion(ctx, session, args, callback)
+	}
+	return map[string]string{"error": "没有待确认的内容"}, false
 }
 
 // executeUpdateSchedule 执行更新时刻表（生成预览）
@@ -684,6 +960,17 @@ func (s *VoiceScheduleServiceV4) executeUpdateSchedule(
 		return map[string]string{"error": err.Error()}, false
 	}
 
+	// Layer 3: 参数后验证
+	isToday := date.Format("2006-01-02") == time.Now().Format("2006-01-02")
+	valErrors, valWarnings := agent.ValidateScheduleParams(items, time.Now(), isToday)
+	if len(valErrors) > 0 {
+		return map[string]interface{}{
+			"error":   true,
+			"message": "参数错误: " + strings.Join(valErrors, "; "),
+			"retry":   true,
+		}, false // breakLoop=false → LLM 重试
+	}
+
 	// 转换为 model.ScheduleItem
 	newItems := make([]model.ScheduleItem, len(items))
 	for i, item := range items {
@@ -692,13 +979,19 @@ func (s *VoiceScheduleServiceV4) executeUpdateSchedule(
 			EndTime:   item.EndTime,
 			Emoji:     item.Emoji,
 			Status:    item.Status,
+			Highlight: item.Available != nil && *item.Available,
 		}
 	}
+	// 保存 Available nil 信息用于 modify 时继承（items 切片与 newItems 索引对应）
+	availableNils := make([]bool, len(items))
+	for i, item := range items {
+		availableNils[i] = item.Available == nil
+	}
 
-	// 获取现有时刻表
+	// 获取现有时刻表（包含 completed）
 	var existingItems []model.ScheduleItem
 	todayDate := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
-	existingSchedule, _ := s.scheduleRepo.GetActiveByUserAndDate(ctx, session.UserID, todayDate)
+	existingSchedule, _ := s.scheduleRepo.GetLatestByUserAndDate(ctx, session.UserID, todayDate)
 	if existingSchedule != nil {
 		existingItems = existingSchedule.Items
 	}
@@ -720,6 +1013,17 @@ func (s *VoiceScheduleServiceV4) executeUpdateSchedule(
 	case "modify":
 		fallthrough
 	default:
+		// 修改模式前：对 Available==nil 的新条目，从被替换的旧条目继承 Highlight
+		for i, newItem := range newItems {
+			if availableNils[i] {
+				for _, existItem := range existingItems {
+					if s.isTimeOverlap(existItem.StartTime, existItem.EndTime, newItem.StartTime, newItem.EndTime) {
+						newItems[i].Highlight = existItem.Highlight
+						break
+					}
+				}
+			}
+		}
 		// 修改模式（默认）：智能合并，更新匹配时间段的条目
 		finalItems = s.mergeScheduleItems(existingItems, newItems, true)
 		fmt.Printf("[V4] 时刻表操作=modify, 现有=%d, 修改=%d, 合并后=%d\n",
@@ -728,6 +1032,14 @@ func (s *VoiceScheduleServiceV4) executeUpdateSchedule(
 
 	// 按时间排序
 	finalItems = s.sortScheduleItems(finalItems)
+
+	// 时间分析：生成时间注解（Phase 7: 工具层时间感知）
+	notices := s.analyzeTimeContext(finalItems, newItems, existingItems, date)
+
+	// Layer 3: 将验证警告附加到 notices
+	for _, w := range valWarnings {
+		notices = append(notices, model.TimeNotice{Type: "warning", Detail: w, ItemIdx: -1})
+	}
 
 	// 保存到 session 的 PendingSchedule
 	session.PendingSchedule = finalItems
@@ -747,7 +1059,8 @@ func (s *VoiceScheduleServiceV4) executeUpdateSchedule(
 		"items_count":       len(finalItems),
 		"operation":         operation,
 		"awaiting_approval": true,
-	}, false
+		"notices":           notices,
+	}, true // breakLoop: 停止循环，等待用户确认
 }
 
 // mergeScheduleItems 合并时刻表条目
@@ -813,6 +1126,7 @@ func (s *VoiceScheduleServiceV4) splitExistingItem(existItem model.ScheduleItem,
 				EndTime:   newItem.StartTime,
 				Emoji:     existItem.Emoji,
 				Status:    existItem.Status,
+				Highlight: existItem.Highlight,
 			})
 		}
 
@@ -823,6 +1137,7 @@ func (s *VoiceScheduleServiceV4) splitExistingItem(existItem model.ScheduleItem,
 				EndTime:   existItem.EndTime,
 				Emoji:     existItem.Emoji,
 				Status:    existItem.Status,
+				Highlight: existItem.Highlight,
 			})
 		}
 
@@ -867,6 +1182,7 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 ) (interface{}, bool) {
 	emoji, _ := args["emoji"].(string)
 	status, _ := args["status"].(string)
+	highlight, _ := args["available"].(bool) // 默认 false
 
 	if emoji == "" || status == "" {
 		return map[string]string{"error": "emoji 和 status 不能为空"}, false
@@ -876,15 +1192,22 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 	now := time.Now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 
-	// 获取或创建今日时刻表
+	// 获取或创建今日时刻表（优先 active，其次 completed，最后新建）
 	schedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, session.UserID, today)
 	if err != nil || schedule == nil {
-		schedule = &model.StatusSchedule{
-			UserID:       session.UserID,
-			ScheduleDate: today,
-			Items:        model.ScheduleItems{},
-			Status:       model.ScheduleStatusActive,
-			Visibility:   model.VisibilityAllFriends,
+		// 没有 active 的，尝试复用最新的 completed
+		schedule, err = s.scheduleRepo.GetLatestByUserAndDate(ctx, session.UserID, today)
+		if err != nil || schedule == nil {
+			schedule = &model.StatusSchedule{
+				UserID:       session.UserID,
+				ScheduleDate: today,
+				Items:        model.ScheduleItems{},
+				Status:       model.ScheduleStatusActive,
+				Visibility:   model.VisibilityAllFriends,
+			}
+		} else {
+			// 复用已有时刻表，重新激活
+			schedule.Status = model.ScheduleStatusActive
 		}
 	}
 
@@ -897,6 +1220,8 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 		if item.StartTime == startTime {
 			schedule.Items[i].Emoji = emoji
 			schedule.Items[i].Status = status
+			schedule.Items[i].Highlight = highlight
+			schedule.Items[i].Executed = false // 重置 executed 状态
 			found = true
 			break
 		}
@@ -907,6 +1232,7 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 			EndTime:   endTime,
 			Emoji:     emoji,
 			Status:    status,
+			Highlight: highlight,
 		})
 	}
 
@@ -920,6 +1246,21 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 
 	if saveErr != nil {
 		return map[string]string{"error": "保存失败: " + saveErr.Error()}, false
+	}
+
+	// 同步更新首页分析缓存，让首页 grid 立即显示新状态
+	analysisResult := &model.AnalysisResult{
+		LifeStatus: model.LifeStatus{
+			Emoji: emoji,
+			Label: status,
+		},
+		Availability: model.AvailabilityAnalysis{
+			Status: "有空",
+		},
+		IsAIGuess: false, // 用户主动设置，非 AI 猜测
+	}
+	if cacheErr := s.memoryRepo.SaveAnalysisCache(ctx, session.UserID, analysisResult); cacheErr != nil {
+		fmt.Printf("[V4] 更新分析缓存失败: %v\n", cacheErr)
 	}
 
 	// 发送状态更新事件
@@ -970,8 +1311,8 @@ func (s *VoiceScheduleServiceV4) executeSaveSchedule(
 		Visibility:   visibility,
 	}
 
-	// 检查是否已存在
-	existing, _ := s.scheduleRepo.GetActiveByUserAndDate(ctx, session.UserID, today)
+	// 检查是否已存在（包含 completed 的也可以复用）
+	existing, _ := s.scheduleRepo.GetLatestByUserAndDate(ctx, session.UserID, today)
 	if existing != nil {
 		schedule.ID = existing.ID
 		if err := s.scheduleRepo.Update(ctx, schedule); err != nil {
@@ -998,6 +1339,232 @@ func (s *VoiceScheduleServiceV4) executeSaveSchedule(
 	return map[string]interface{}{
 		"message": "时刻表已保存",
 		"date":    today.Format("2006-01-02"),
+	}, true // 结束循环
+}
+
+// executeDeleteSchedule 执行删除日程条目（生成删除预览）
+func (s *VoiceScheduleServiceV4) executeDeleteSchedule(
+	ctx context.Context,
+	session *model.V4Session,
+	args map[string]interface{},
+	callback func(event *model.V4Event),
+) (interface{}, bool) {
+	// 解析参数
+	target, _ := args["target"].(string)
+	if target == "" {
+		return map[string]string{"error": "target 参数不能为空"}, false
+	}
+
+	// 解析日期
+	date, err := agent.ParseDate(args)
+	if err != nil {
+		date = time.Now()
+	}
+	dateStr := date.Format("2006-01-02")
+	todayDate := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
+
+	// 获取当前时刻表
+	schedule, err := s.scheduleRepo.GetLatestByUserAndDate(ctx, session.UserID, todayDate)
+	if err != nil || schedule == nil || len(schedule.Items) == 0 {
+		return map[string]interface{}{
+			"message": fmt.Sprintf("%s 没有安排可以删除", dateStr),
+		}, false
+	}
+
+	// 分离：要删除的 vs 剩余的
+	var deletedItems, remainingItems []model.ScheduleItem
+	if target == "all" {
+		deletedItems = schedule.Items
+		remainingItems = nil
+	} else {
+		for _, item := range schedule.Items {
+			if agent.ContainsKeyword(item.Status, target) || agent.ContainsKeyword(item.Emoji, target) {
+				deletedItems = append(deletedItems, item)
+			} else {
+				remainingItems = append(remainingItems, item)
+			}
+		}
+	}
+
+	if len(deletedItems) == 0 {
+		return map[string]interface{}{
+			"message": fmt.Sprintf("没有找到包含「%s」的安排", target),
+			"date":    dateStr,
+		}, false
+	}
+
+	// 保存到 PendingDeletion
+	session.PendingDeletion = &model.V4PendingDeletion{
+		Type:           "schedule",
+		Date:           dateStr,
+		Target:         target,
+		DeletedItems:   deletedItems,
+		RemainingItems: remainingItems,
+	}
+
+	// 发送删除预览事件
+	callback(&model.V4Event{
+		Type:            model.V4EventTypeDeletePreview,
+		PendingDeletion: session.PendingDeletion,
+		Date:            dateStr,
+		Message:         fmt.Sprintf("将删除%d个安排，等待确认", len(deletedItems)),
+	})
+
+	return map[string]interface{}{
+		"message":           fmt.Sprintf("将删除%d个安排，等待用户确认", len(deletedItems)),
+		"deleted_items":     len(deletedItems),
+		"remaining_items":   len(remainingItems),
+		"awaiting_approval": true,
+	}, true // breakLoop: 停止循环，等待用户确认
+}
+
+// executeRemoveFriend 执行删除好友（生成删除预览）
+func (s *VoiceScheduleServiceV4) executeRemoveFriend(
+	ctx context.Context,
+	session *model.V4Session,
+	args map[string]interface{},
+	callback func(event *model.V4Event),
+) (interface{}, bool) {
+	friendID, _ := args["friend_id"].(string)
+	friendName, _ := args["friend_name"].(string)
+
+	if friendID == "" || friendName == "" {
+		return map[string]string{"error": "friend_id 和 friend_name 不能为空"}, false
+	}
+
+	// 保存到 PendingDeletion
+	session.PendingDeletion = &model.V4PendingDeletion{
+		Type:       "friend",
+		FriendID:   friendID,
+		FriendName: friendName,
+	}
+
+	// 发送删除预览事件
+	callback(&model.V4Event{
+		Type:            model.V4EventTypeDeletePreview,
+		PendingDeletion: session.PendingDeletion,
+		Message:         fmt.Sprintf("将删除好友 %s，等待确认", friendName),
+	})
+
+	return map[string]interface{}{
+		"message":           fmt.Sprintf("将删除好友 %s，这是不可逆操作。等待用户确认", friendName),
+		"friend_name":       friendName,
+		"awaiting_approval": true,
+	}, true // breakLoop: 停止循环，等待用户确认
+}
+
+// executeConfirmDeletion 执行确认删除操作（分发到具体类型）
+func (s *VoiceScheduleServiceV4) executeConfirmDeletion(
+	ctx context.Context,
+	session *model.V4Session,
+	args map[string]interface{},
+	callback func(event *model.V4Event),
+) (interface{}, bool) {
+	pd := session.PendingDeletion
+	if pd == nil {
+		return map[string]string{"error": "没有待确认的删除操作"}, false
+	}
+
+	switch pd.Type {
+	case "schedule":
+		return s.confirmScheduleDeletion(ctx, session, callback)
+	case "friend":
+		return s.confirmFriendRemoval(ctx, session, callback)
+	default:
+		return map[string]string{"error": "未知的删除类型: " + pd.Type}, false
+	}
+}
+
+// confirmScheduleDeletion 确认删除日程条目
+func (s *VoiceScheduleServiceV4) confirmScheduleDeletion(
+	ctx context.Context,
+	session *model.V4Session,
+	callback func(event *model.V4Event),
+) (interface{}, bool) {
+	pd := session.PendingDeletion
+	dateStr := pd.Date
+	date, err := time.Parse("2006-01-02", dateStr)
+	if err != nil {
+		session.ClearPendingDeletion()
+		return map[string]string{"error": "日期解析失败"}, false
+	}
+	todayDate := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
+
+	deletedCount := len(pd.DeletedItems)
+
+	if len(pd.RemainingItems) == 0 {
+		// 全部删除 → 取消整个时刻表
+		if err := s.scheduleRepo.CancelUserSchedulesByDate(ctx, session.UserID, todayDate); err != nil {
+			return map[string]string{"error": "删除失败: " + err.Error()}, false
+		}
+		session.CurrentSchedule = nil
+	} else {
+		// 部分删除 → 用 RemainingItems 覆盖
+		schedule, err := s.scheduleRepo.GetLatestByUserAndDate(ctx, session.UserID, todayDate)
+		if err != nil || schedule == nil {
+			session.ClearPendingDeletion()
+			return map[string]string{"error": "获取时刻表失败"}, false
+		}
+		schedule.Items = model.ScheduleItems(pd.RemainingItems)
+		if err := s.scheduleRepo.Update(ctx, schedule); err != nil {
+			return map[string]string{"error": "更新时刻表失败: " + err.Error()}, false
+		}
+		session.CurrentSchedule = pd.RemainingItems
+	}
+
+	// 发送删除成功事件
+	callback(&model.V4Event{
+		Type:         model.V4EventTypeScheduleDeleted,
+		Date:         dateStr,
+		DeletedCount: deletedCount,
+		Items:        pd.RemainingItems,
+		Message:      fmt.Sprintf("已删除%d个安排", deletedCount),
+	})
+
+	session.ClearPendingDeletion()
+
+	return map[string]interface{}{
+		"message":      fmt.Sprintf("已成功删除%d个安排", deletedCount),
+		"date":         dateStr,
+		"deleted_count": deletedCount,
+	}, true // 结束循环
+}
+
+// confirmFriendRemoval 确认删除好友
+func (s *VoiceScheduleServiceV4) confirmFriendRemoval(
+	ctx context.Context,
+	session *model.V4Session,
+	callback func(event *model.V4Event),
+) (interface{}, bool) {
+	if s.friendshipService == nil {
+		session.ClearPendingDeletion()
+		return map[string]string{"error": "好友服务未配置"}, false
+	}
+
+	pd := session.PendingDeletion
+
+	// 执行删除好友
+	if err := s.friendshipService.RemoveFriend(ctx, session.UserID, pd.FriendID); err != nil {
+		return map[string]string{"error": "删除好友失败: " + err.Error()}, false
+	}
+
+	// 发送好友已删除事件
+	callback(&model.V4Event{
+		Type:    model.V4EventTypeFriendRemoved,
+		Message: fmt.Sprintf("已删除好友 %s", pd.FriendName),
+		SentTo:  pd.FriendName,
+	})
+
+	// 清理状态
+	session.ClearPendingDeletion()
+	// 如果最近查询的好友就是被删的，清理掉
+	if session.LastQueriedFriend != nil && session.LastQueriedFriend.ID == pd.FriendID {
+		session.LastQueriedFriend = nil
+	}
+
+	return map[string]interface{}{
+		"message":     fmt.Sprintf("已删除好友 %s", pd.FriendName),
+		"friend_name": pd.FriendName,
 	}, true // 结束循环
 }
 
@@ -1105,19 +1672,200 @@ func (s *VoiceScheduleServiceV4) saveSession(ctx context.Context, session *model
 		return err
 	}
 
-	return s.redisClient.Set(ctx, key, string(data), v4SessionTTL)
+	// 保存 session
+	if err := s.redisClient.Set(ctx, key, string(data), v4SessionTTL); err != nil {
+		return err
+	}
+
+	// 副作用：保存用户上下文摘要（供状态推断使用）
+	s.saveUserContextSummary(ctx, session)
+
+	return nil
 }
 
-// loadCurrentSchedule 加载用户当前时刻表
+// saveUserContextSummary 保存用户对话上下文摘要到 Redis（供推断使用，TTL 30 分钟）
+func (s *VoiceScheduleServiceV4) saveUserContextSummary(ctx context.Context, session *model.V4Session) {
+	if s.redisClient == nil || session == nil || len(session.Messages) == 0 {
+		return
+	}
+
+	summary := extractSessionSummary(session)
+	if summary == "" {
+		return
+	}
+
+	key := fmt.Sprintf("v4:user_context:%s", session.UserID)
+	s.redisClient.Set(ctx, key, summary, 30*time.Minute)
+}
+
+// extractSessionSummary 从 V4 session 提取关键信息摘要（不调用 LLM）
+func extractSessionSummary(session *model.V4Session) string {
+	var sb strings.Builder
+
+	// 提取最近 3 条用户消息
+	userMsgs := 0
+	for i := len(session.Messages) - 1; i >= 0 && userMsgs < 3; i-- {
+		msg := session.Messages[i]
+		if msg.Role == "user" {
+			content := msg.Content
+			if len(content) > 100 {
+				content = content[:100] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("- 用户: %s\n", content))
+			userMsgs++
+		}
+	}
+
+	// 提取使用过的工具
+	toolSet := make(map[string]bool)
+	for _, msg := range session.Messages {
+		if msg.Role == "tool" && msg.Name != "" {
+			toolSet[msg.Name] = true
+		}
+	}
+	if len(toolSet) > 0 {
+		var tools []string
+		for t := range toolSet {
+			tools = append(tools, t)
+		}
+		sb.WriteString(fmt.Sprintf("- 使用工具: %s\n", strings.Join(tools, ", ")))
+	}
+
+	// 提取 pending 操作
+	if session.HasPendingSchedule() {
+		sb.WriteString("- 待确认: 已生成时刻表待用户确认\n")
+	}
+	if session.HasPendingMessage() {
+		sb.WriteString("- 待确认: 已草拟消息待用户确认\n")
+	}
+	if session.HasPendingInvite() {
+		sb.WriteString("- 待确认: 已草拟邀请待用户确认\n")
+	}
+	if session.HasPendingDeletion() {
+		sb.WriteString("- 待确认: 已生成删除预览待用户确认\n")
+	}
+
+	// 最后的 AI 回复
+	for i := len(session.Messages) - 1; i >= 0; i-- {
+		msg := session.Messages[i]
+		if msg.Role == "assistant" && msg.Content != "" {
+			content := msg.Content
+			if len(content) > 100 {
+				content = content[:100] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("- AI回复: %s\n", content))
+			break
+		}
+	}
+
+	return sb.String()
+}
+
+// acquireSessionLock 获取 session 分布式锁，防止同一 session 并发处理
+// 返回 true 表示获取成功，调用方必须 defer releaseSessionLock
+func (s *VoiceScheduleServiceV4) acquireSessionLock(ctx context.Context, sessionID string) bool {
+	if s.redisClient == nil || sessionID == "" {
+		return true // 无 Redis 或无 session 时不锁
+	}
+	key := v4SessionLockPrefix + sessionID
+	acquired, err := s.redisClient.SetNX(ctx, key, "1", v4SessionLockTTL)
+	if err != nil {
+		fmt.Printf("[V4] 获取 session 锁失败: %v\n", err)
+		return true // 出错时不阻塞（降级处理）
+	}
+	return acquired
+}
+
+// releaseSessionLock 释放 session 锁
+func (s *VoiceScheduleServiceV4) releaseSessionLock(ctx context.Context, sessionID string) {
+	if s.redisClient == nil || sessionID == "" {
+		return
+	}
+	key := v4SessionLockPrefix + sessionID
+	_ = s.redisClient.Del(ctx, key)
+}
+
+// loadCurrentSchedule 加载用户当前时刻表（合并所有非取消的时刻表）
 func (s *VoiceScheduleServiceV4) loadCurrentSchedule(ctx context.Context, session *model.V4Session) {
 	today := time.Now()
 	todayDate := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
 
-	schedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, session.UserID, todayDate)
-	if err == nil && schedule != nil && len(schedule.Items) > 0 {
-		session.CurrentSchedule = schedule.Items
-		fmt.Printf("[V4] 加载用户时刻表: %d 个时段\n", len(schedule.Items))
+	// 合并今日所有时刻表（包括 completed 的）
+	schedules, err := s.scheduleRepo.GetAllByUserAndDate(ctx, session.UserID, todayDate)
+	if err == nil && len(schedules) > 0 {
+		seen := make(map[string]bool)
+		var merged model.ScheduleItems
+		for _, sch := range schedules {
+			for _, item := range sch.Items {
+				key := item.StartTime + "-" + item.EndTime
+				if !seen[key] {
+					seen[key] = true
+					merged = append(merged, item)
+				}
+			}
+		}
+		if len(merged) > 0 {
+			session.CurrentSchedule = merged
+			fmt.Printf("[V4] 加载用户时刻表: %d 个时段（合并 %d 个时刻表）\n", len(merged), len(schedules))
+		}
 	}
+
+	// 加载明日时刻表
+	tomorrowDate := todayDate.AddDate(0, 0, 1)
+	tomorrowSchedules, err := s.scheduleRepo.GetAllByUserAndDate(ctx, session.UserID, tomorrowDate)
+	if err == nil && len(tomorrowSchedules) > 0 {
+		seen := make(map[string]bool)
+		var merged model.ScheduleItems
+		for _, sch := range tomorrowSchedules {
+			for _, item := range sch.Items {
+				key := item.StartTime + "-" + item.EndTime
+				if !seen[key] {
+					seen[key] = true
+					merged = append(merged, item)
+				}
+			}
+		}
+		if len(merged) > 0 {
+			session.TomorrowSchedule = merged
+			fmt.Printf("[V4] 加载明日时刻表: %d 个时段\n", len(merged))
+		}
+	}
+}
+
+// loadTargetDateSchedule 按需加载目标日期的安排
+// 如果目标日期是今天或明天，跳过（已在 loadCurrentSchedule 中加载）
+func (s *VoiceScheduleServiceV4) loadTargetDateSchedule(ctx context.Context, session *model.V4Session, targetDate time.Time) {
+	today := time.Now()
+	todayDate := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
+	tomorrowDate := todayDate.AddDate(0, 0, 1)
+	target := time.Date(targetDate.Year(), targetDate.Month(), targetDate.Day(), 0, 0, 0, 0, today.Location())
+
+	if target.Equal(todayDate) || target.Equal(tomorrowDate) {
+		return
+	}
+
+	weekdays := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
+
+	schedules, err := s.scheduleRepo.GetAllByUserAndDate(ctx, session.UserID, target)
+	if err == nil && len(schedules) > 0 {
+		seen := make(map[string]bool)
+		var merged model.ScheduleItems
+		for _, sch := range schedules {
+			for _, item := range sch.Items {
+				key := item.StartTime + "-" + item.EndTime
+				if !seen[key] {
+					seen[key] = true
+					merged = append(merged, item)
+				}
+			}
+		}
+		if len(merged) > 0 {
+			session.TargetDateSchedule = merged
+			fmt.Printf("[V4] 加载目标日期时刻表(%s): %d 个时段\n", target.Format("2006-01-02"), len(merged))
+		}
+	}
+
+	session.TargetDateLabel = target.Format("2006-01-02") + "(" + weekdays[target.Weekday()] + ")"
 }
 
 // ========== 辅助函数 ==========
@@ -1165,6 +1913,151 @@ func (s *VoiceScheduleServiceV4) convertToolCalls(toolCalls []agent.ToolCall) []
 	return result
 }
 
+// ========== 时间感知分析（Phase 7: 工具层时间感知）==========
+
+// analyzeTimeContext 分析 plan_activities 返回值的时间上下文
+// 只对新增项目做检测，不标注已有项目（避免"已过去墙"问题）
+func (s *VoiceScheduleServiceV4) analyzeTimeContext(
+	finalItems []model.ScheduleItem,
+	newItems []model.ScheduleItem,
+	existingItems []model.ScheduleItem,
+	targetDate time.Time,
+) []model.TimeNotice {
+	notices := []model.TimeNotice{}
+	now := time.Now()
+	isToday := targetDate.Format("2006-01-02") == now.Format("2006-01-02")
+	currentTime := now.Format("15:04")
+
+	// 1. 冲突检测：新项目 vs 已有项目
+	for _, newItem := range newItems {
+		for _, exist := range existingItems {
+			if s.isTimeOverlap(newItem.StartTime, newItem.EndTime, exist.StartTime, exist.EndTime) {
+				notices = append(notices, model.TimeNotice{
+					Type: "conflict",
+					Detail: fmt.Sprintf("%s-%s %s 与已有 %s-%s %s%s 时间重叠",
+						newItem.StartTime, newItem.EndTime, newItem.Status,
+						exist.StartTime, exist.EndTime, exist.Emoji, exist.Status),
+					ItemIdx: -1,
+				})
+			}
+		}
+	}
+
+	// 2. 仅对今天的新增项目做 past/ongoing/soon 检测
+	if isToday {
+		for _, newItem := range newItems {
+			if newItem.EndTime <= currentTime {
+				notices = append(notices, model.TimeNotice{
+					Type:    "past",
+					Detail:  fmt.Sprintf("%s-%s 已过去（当前 %s）", newItem.StartTime, newItem.EndTime, currentTime),
+					ItemIdx: -1,
+				})
+			} else if newItem.StartTime <= currentTime && newItem.EndTime > currentTime {
+				notices = append(notices, model.TimeNotice{
+					Type:    "ongoing",
+					Detail:  fmt.Sprintf("%s-%s %s 正在进行中", newItem.StartTime, newItem.EndTime, newItem.Status),
+					ItemIdx: -1,
+				})
+			}
+		}
+	}
+
+	return prioritizeNotices(notices, 3)
+}
+
+// analyzeViewNotices 分析 view_schedule 返回值的时间上下文
+// 只标注 ongoing/soon，不标 past（避免信息过载）
+func (s *VoiceScheduleServiceV4) analyzeViewNotices(
+	items []model.ScheduleItem,
+	targetDate time.Time,
+) []model.TimeNotice {
+	notices := []model.TimeNotice{}
+	now := time.Now()
+	isToday := targetDate.Format("2006-01-02") == now.Format("2006-01-02")
+
+	if !isToday {
+		return notices
+	}
+
+	currentTime := now.Format("15:04")
+	for i, item := range items {
+		if item.StartTime <= currentTime && item.EndTime > currentTime {
+			notices = append(notices, model.TimeNotice{
+				Type:    "ongoing",
+				Detail:  fmt.Sprintf("%s-%s %s%s 正在进行中", item.StartTime, item.EndTime, item.Emoji, item.Status),
+				ItemIdx: i,
+			})
+		} else if item.StartTime > currentTime {
+			// 计算距离开始的分钟数
+			startParts := strings.SplitN(item.StartTime, ":", 2)
+			if len(startParts) == 2 {
+				startHour := 0
+				startMin := 0
+				fmt.Sscanf(startParts[0], "%d", &startHour)
+				fmt.Sscanf(startParts[1], "%d", &startMin)
+				minutesUntil := (startHour-now.Hour())*60 + (startMin - now.Minute())
+				if minutesUntil > 0 && minutesUntil <= 30 {
+					notices = append(notices, model.TimeNotice{
+						Type:    "soon",
+						Detail:  fmt.Sprintf("%s-%s %s%s 将在%d分钟后开始", item.StartTime, item.EndTime, item.Emoji, item.Status, minutesUntil),
+						ItemIdx: i,
+					})
+				}
+			}
+		}
+	}
+
+	return prioritizeNotices(notices, 3)
+}
+
+// prioritizeNotices 限制最多 maxN 条，优先级: conflict > ongoing > soon > past
+func prioritizeNotices(notices []model.TimeNotice, maxN int) []model.TimeNotice {
+	if len(notices) <= maxN {
+		return notices
+	}
+
+	priority := map[string]int{"conflict": 0, "ongoing": 1, "soon": 2, "past": 3}
+	// 简单冒泡排序按优先级
+	for i := 0; i < len(notices)-1; i++ {
+		for j := 0; j < len(notices)-i-1; j++ {
+			pi, pj := priority[notices[j].Type], priority[notices[j+1].Type]
+			if pi > pj {
+				notices[j], notices[j+1] = notices[j+1], notices[j]
+			}
+		}
+	}
+
+	return notices[:maxN]
+}
+
+// trimToolResult 裁剪工具结果，防止大返回值膨胀上下文
+func trimToolResult(result string, maxLen int) string {
+	if len(result) <= maxLen {
+		return result
+	}
+	return result[:maxLen] + "...(已截断)"
+}
+
+// v4GetTimePeriod 根据小时返回当前时段名称（中文标签）
+func v4GetTimePeriod(hour int) string {
+	switch {
+	case hour < 6:
+		return "凌晨"
+	case hour < 9:
+		return "早晨"
+	case hour < 12:
+		return "上午"
+	case hour < 14:
+		return "中午"
+	case hour < 18:
+		return "下午"
+	case hour < 22:
+		return "晚上"
+	default:
+		return "深夜"
+	}
+}
+
 // getCurrentTimeSlot 复用 agent.go 中的函数
 func getCurrentTimeSlot(now time.Time) (string, string) {
 	hour := now.Hour()
@@ -1195,6 +2088,18 @@ func (s *VoiceScheduleServiceV4) ProcessVoiceInput(
 	audioFormat string,
 	callback func(event *model.V4Event),
 ) (*model.V4Session, error) {
+	// 0. 预先获取 session 锁（在 ASR 之前锁住，防止并发请求操作同一 session）
+	if sessionID != "" && !s.acquireSessionLock(ctx, sessionID) {
+		callback(&model.V4Event{
+			Type:    model.V4EventTypeChat,
+			Message: "正在处理上一条消息，请稍后再试",
+		})
+		return nil, fmt.Errorf("session %s is locked", sessionID)
+	}
+	if sessionID != "" {
+		defer s.releaseSessionLock(ctx, sessionID)
+	}
+
 	// 1. 语音识别
 	if s.asrClient == nil || !s.asrClient.IsConfigured() {
 		callback(&model.V4Event{
@@ -1237,8 +2142,8 @@ func (s *VoiceScheduleServiceV4) ProcessVoiceInput(
 
 	fmt.Printf("[V4] 语音识别结果: %s\n", transcript)
 
-	// 2. 使用文本处理流程
-	return s.ProcessTextInput(ctx, userID, sessionID, transcript, callback)
+	// 2. 使用文本处理流程（skipLock=true，因为已在本方法获取了锁）
+	return s.processTextInputInternal(ctx, userID, sessionID, transcript, nil, callback)
 }
 
 // ========== 好友相关工具执行函数 ==========
@@ -1462,7 +2367,7 @@ func (s *VoiceScheduleServiceV4) executeSendMessage(
 		},
 		"awaiting_confirmation": true,
 		"message":               "消息预览已生成，确认发送吗？",
-	}, false
+	}, true // breakLoop: 停止循环，等待用户确认
 }
 
 // executeCreateScheduleInvite 执行创建日程邀请（生成预览）
@@ -1538,7 +2443,7 @@ func (s *VoiceScheduleServiceV4) executeCreateScheduleInvite(
 		},
 		"awaiting_confirmation": true,
 		"message":               "邀请预览已生成，确认发送吗？",
-	}, false
+	}, true // breakLoop: 停止循环，等待用户确认
 }
 
 // executeConfirmSend 执行确认发送
@@ -1858,473 +2763,5 @@ func (s *VoiceScheduleServiceV4) executeAddFriend(
 	}
 }
 
-// executeQueryDeviceData 执行查询设备数据
-func (s *VoiceScheduleServiceV4) executeQueryDeviceData(
-	ctx context.Context,
-	session *model.V4Session,
-	args map[string]interface{},
-	callback func(event *model.V4Event),
-) (interface{}, bool) {
-	dataType, _ := args["data_type"].(string)
-	if dataType == "" {
-		dataType = "all"
-	}
-
-	result := make(map[string]interface{})
-
-	// 从 Redis 获取实时状态
-	var realtimeStatus *model.UserRealtimeStatus
-	if s.agentService != nil {
-		realtimeStatus, _ = s.agentService.GetUserStatus(ctx, session.UserID)
-	}
-
-	// 从 user_analysis_cache 获取分析结果
-	var analysisResult *model.AnalysisResult
-	if s.memoryRepo != nil {
-		analysisResult, _ = s.memoryRepo.GetAnalysisCache(ctx, session.UserID)
-	}
-
-	// 根据 data_type 组装返回数据
-	switch dataType {
-	case "location":
-		if realtimeStatus != nil {
-			result["location"] = map[string]interface{}{
-				"place_type":     realtimeStatus.Location.PlaceType,
-				"place_name":     "", // TODO: 从反向地理编码获取
-				"city":           realtimeStatus.City,
-				"at_place_since": realtimeStatus.Location.AtPlaceSinceMinutes,
-			}
-		} else {
-			result["location"] = map[string]string{"message": "暂无位置数据"}
-		}
-
-	case "calendar":
-		// TODO: 从日历数据收集器获取
-		result["calendar"] = map[string]interface{}{
-			"has_current_event": false,
-			"message":           "暂无日历数据",
-		}
-
-	case "screen":
-		if realtimeStatus != nil {
-			result["screen"] = map[string]interface{}{
-				"is_active":        realtimeStatus.Screen.IsActive,
-				"activity_type":    realtimeStatus.Screen.ActivityType,
-				"session_duration": realtimeStatus.Screen.SessionDurationMinutes,
-			}
-		} else {
-			result["screen"] = map[string]string{"message": "暂无屏幕数据"}
-		}
-
-	case "device":
-		// TODO: 从设备状态收集器获取
-		result["device"] = map[string]interface{}{
-			"message": "暂无设备状态数据",
-		}
-
-	case "status":
-		if analysisResult != nil {
-			result["status"] = map[string]interface{}{
-				"availability": analysisResult.Availability.Status,
-				"probability":  analysisResult.Availability.Probability,
-				"emoji":        analysisResult.LifeStatus.Emoji,
-				"life_status":  analysisResult.LifeStatus.Label,
-			}
-		} else {
-			result["status"] = map[string]string{"message": "暂无状态分析数据"}
-		}
-
-	case "all":
-		fallthrough
-	default:
-		// 返回所有可用数据
-		if realtimeStatus != nil {
-			result["location"] = map[string]interface{}{
-				"place_type":     realtimeStatus.Location.PlaceType,
-				"city":           realtimeStatus.City,
-				"at_place_since": realtimeStatus.Location.AtPlaceSinceMinutes,
-			}
-			result["screen"] = map[string]interface{}{
-				"is_active":        realtimeStatus.Screen.IsActive,
-				"activity_type":    realtimeStatus.Screen.ActivityType,
-				"session_duration": realtimeStatus.Screen.SessionDurationMinutes,
-			}
-		}
-		if analysisResult != nil {
-			result["status"] = map[string]interface{}{
-				"availability": analysisResult.Availability.Status,
-				"probability":  analysisResult.Availability.Probability,
-				"emoji":        analysisResult.LifeStatus.Emoji,
-				"life_status":  analysisResult.LifeStatus.Label,
-			}
-		}
-	}
-
-	if realtimeStatus != nil {
-		result["updated_at"] = realtimeStatus.UpdatedAt.Unix()
-	}
-
-	return result, false
-}
-
-// executeQueryMemory 执行查询记忆
-func (s *VoiceScheduleServiceV4) executeQueryMemory(
-	ctx context.Context,
-	session *model.V4Session,
-	args map[string]interface{},
-	callback func(event *model.V4Event),
-) (interface{}, bool) {
-	memoryType, _ := args["memory_type"].(string)
-	if memoryType == "" {
-		memoryType = "all"
-	}
-
-	result := make(map[string]interface{})
-
-	// 获取用户记忆文档
-	var memDoc *model.UserMemoryDocument
-	if s.memoryLearningService != nil {
-		memDoc, _ = s.memoryLearningService.GetUserMemoryDocument(ctx, session.UserID)
-	}
-
-	// 获取核心记忆
-	var coreMemory *model.CoreMemory
-	if s.memoryRepo != nil {
-		coreMemory, _ = s.memoryRepo.GetCoreMemory(ctx, session.UserID)
-	}
-
-	switch memoryType {
-	case "patterns":
-		if memDoc != nil && len(memDoc.SchedulePatterns) > 0 {
-			patterns := make([]map[string]interface{}, 0, len(memDoc.SchedulePatterns))
-			for _, p := range memDoc.SchedulePatterns {
-				patterns = append(patterns, map[string]interface{}{
-					"pattern":    p.Pattern,
-					"confidence": p.Confidence,
-				})
-			}
-			result["patterns"] = patterns
-		} else {
-			result["patterns"] = []interface{}{}
-			result["message"] = "暂无行为模式记录"
-		}
-
-	case "preferences":
-		if memDoc != nil {
-			result["preferences"] = map[string]interface{}{
-				"hide_past_events":   memDoc.Preferences.HidePastEvents,
-				"default_view_days":  memDoc.Preferences.DefaultViewDays,
-				"preferred_timezone": memDoc.Preferences.PreferredTimezone,
-				"language":           memDoc.Preferences.Language,
-			}
-		} else {
-			result["preferences"] = map[string]interface{}{
-				"message": "使用默认偏好设置",
-			}
-		}
-
-	case "facts":
-		if memDoc != nil && len(memDoc.KeyFacts) > 0 {
-			facts := make([]map[string]interface{}, 0, len(memDoc.KeyFacts))
-			for _, f := range memDoc.KeyFacts {
-				facts = append(facts, map[string]interface{}{
-					"fact":       f.Fact,
-					"source":     f.Source,
-					"learned_at": f.LearnedAt,
-				})
-			}
-			result["facts"] = facts
-		} else {
-			result["facts"] = []interface{}{}
-			result["message"] = "暂无关键事实记录"
-		}
-
-	case "sessions":
-		if memDoc != nil && len(memDoc.SessionSummaries) > 0 {
-			sessions := make([]map[string]interface{}, 0, len(memDoc.SessionSummaries))
-			maxSessions := 3
-			for i, s := range memDoc.SessionSummaries {
-				if i >= maxSessions {
-					break
-				}
-				sessions = append(sessions, map[string]interface{}{
-					"date":    s.Date,
-					"summary": s.Summary,
-				})
-			}
-			result["sessions"] = sessions
-		} else {
-			result["sessions"] = []interface{}{}
-			result["message"] = "暂无历史会话记录"
-		}
-
-	case "core":
-		if coreMemory != nil {
-			result["core"] = map[string]interface{}{
-				"behavior_insights":    coreMemory.BehaviorInsights,
-				"time_patterns":        coreMemory.TimePatterns,
-				"location_preferences": coreMemory.LocationPreferences,
-				"social_tendency":      coreMemory.SocialTendency,
-				"confidence_score":     coreMemory.ConfidenceScore,
-			}
-		} else {
-			result["core"] = map[string]interface{}{
-				"message": "暂无核心记忆洞察",
-			}
-		}
-
-	case "all":
-		fallthrough
-	default:
-		// 返回所有记忆
-		if memDoc != nil {
-			if len(memDoc.SchedulePatterns) > 0 {
-				patterns := make([]map[string]interface{}, 0)
-				for _, p := range memDoc.SchedulePatterns {
-					patterns = append(patterns, map[string]interface{}{
-						"pattern":    p.Pattern,
-						"confidence": p.Confidence,
-					})
-				}
-				result["patterns"] = patterns
-			}
-			result["preferences"] = map[string]interface{}{
-				"hide_past_events":   memDoc.Preferences.HidePastEvents,
-				"default_view_days":  memDoc.Preferences.DefaultViewDays,
-				"preferred_timezone": memDoc.Preferences.PreferredTimezone,
-				"language":           memDoc.Preferences.Language,
-			}
-			if len(memDoc.KeyFacts) > 0 {
-				facts := make([]map[string]interface{}, 0)
-				for _, f := range memDoc.KeyFacts {
-					facts = append(facts, map[string]interface{}{
-						"fact":   f.Fact,
-						"source": f.Source,
-					})
-				}
-				result["facts"] = facts
-			}
-		}
-		if coreMemory != nil {
-			result["core"] = map[string]interface{}{
-				"behavior_insights":    coreMemory.BehaviorInsights,
-				"time_patterns":        coreMemory.TimePatterns,
-				"location_preferences": coreMemory.LocationPreferences,
-				"social_tendency":      coreMemory.SocialTendency,
-			}
-		}
-	}
-
-	return result, false
-}
-
-// executeUpdateMemory 执行更新记忆
-func (s *VoiceScheduleServiceV4) executeUpdateMemory(
-	ctx context.Context,
-	session *model.V4Session,
-	args map[string]interface{},
-	callback func(event *model.V4Event),
-) (interface{}, bool) {
-	if s.memoryLearningService == nil {
-		return map[string]string{"error": "记忆服务未配置"}, false
-	}
-
-	updateType, _ := args["update_type"].(string)
-
-	switch updateType {
-	case "fact":
-		content, _ := args["content"].(string)
-		if content == "" {
-			return map[string]string{"error": "请提供要记住的内容"}, false
-		}
-
-		err := s.memoryLearningService.AddKeyFact(ctx, session.UserID, content, "voice_agent")
-		if err != nil {
-			return map[string]string{"error": "记录失败: " + err.Error()}, false
-		}
-
-		return map[string]interface{}{
-			"success":       true,
-			"message":       fmt.Sprintf("好的，我记住了：%s", content),
-			"updated_field": "key_facts",
-		}, false
-
-	case "pattern":
-		content, _ := args["content"].(string)
-		if content == "" {
-			return map[string]string{"error": "请提供行为模式内容"}, false
-		}
-
-		confidence := 0.8
-		if c, ok := args["confidence"].(float64); ok && c > 0 && c <= 1 {
-			confidence = c
-		}
-
-		err := s.memoryLearningService.AddSchedulePattern(ctx, session.UserID, content, confidence, session.SessionID)
-		if err != nil {
-			return map[string]string{"error": "记录失败: " + err.Error()}, false
-		}
-
-		return map[string]interface{}{
-			"success":       true,
-			"message":       fmt.Sprintf("好的，我记住了你的习惯：%s", content),
-			"updated_field": "schedule_patterns",
-		}, false
-
-	case "preference":
-		key, _ := args["preference_key"].(string)
-		valueStr, _ := args["preference_value"].(string)
-
-		if key == "" {
-			return map[string]string{"error": "请提供偏好键名"}, false
-		}
-
-		// 转换值类型
-		var value interface{}
-		switch key {
-		case "hide_past_events":
-			value = valueStr == "true"
-		case "default_view_days":
-			var days int
-			fmt.Sscanf(valueStr, "%d", &days)
-			value = days
-		default:
-			value = valueStr
-		}
-
-		err := s.memoryLearningService.UpdatePreference(ctx, session.UserID, key, value)
-		if err != nil {
-			return map[string]string{"error": "更新失败: " + err.Error()}, false
-		}
-
-		return map[string]interface{}{
-			"success":       true,
-			"message":       "偏好设置已更新",
-			"updated_field": key,
-		}, false
-
-	default:
-		return map[string]string{"error": "无效的更新类型，支持: fact, pattern, preference"}, false
-	}
-}
-
-// executeGetBehaviorSuggestion 执行获取行为建议
-func (s *VoiceScheduleServiceV4) executeGetBehaviorSuggestion(
-	ctx context.Context,
-	session *model.V4Session,
-	args map[string]interface{},
-	callback func(event *model.V4Event),
-) (interface{}, bool) {
-	suggestionContext, _ := args["context"].(string)
-	if suggestionContext == "" {
-		suggestionContext = "current"
-	}
-	timeRange, _ := args["time_range"].(string)
-	if timeRange == "" {
-		timeRange = "now"
-	}
-
-	// 保存上下文
-	session.LastSuggestionContext = suggestionContext
-
-	// 收集上下文数据
-	var deviceData map[string]interface{}
-	var memoryData map[string]interface{}
-	var friendsData []model.V4FriendInfo
-
-	// 获取设备数据
-	deviceResult, _ := s.executeQueryDeviceData(ctx, session, map[string]interface{}{"data_type": "all"}, callback)
-	if data, ok := deviceResult.(map[string]interface{}); ok {
-		deviceData = data
-	}
-
-	// 获取记忆数据
-	memoryResult, _ := s.executeQueryMemory(ctx, session, map[string]interface{}{"memory_type": "all"}, callback)
-	if data, ok := memoryResult.(map[string]interface{}); ok {
-		memoryData = data
-	}
-
-	// 如果是社交建议，获取有空的好友
-	if suggestionContext == "social" {
-		friendsResult, _ := s.executeQueryFriends(ctx, session, map[string]interface{}{
-			"filter_type":  "available",
-			"filter_value": "free",
-			"limit":        5.0,
-		}, callback)
-		if data, ok := friendsResult.(map[string]interface{}); ok {
-			if friends, ok := data["friends"].([]model.V4FriendInfo); ok {
-				friendsData = friends
-			}
-		}
-	}
-
-	// 构建建议
-	suggestions := make([]map[string]interface{}, 0)
-
-	// 基于设备数据生成建议
-	if deviceData != nil {
-		if status, ok := deviceData["status"].(map[string]interface{}); ok {
-			probability, _ := status["probability"].(int)
-			lifeStatus, _ := status["life_status"].(string)
-
-			if probability > 60 {
-				suggestions = append(suggestions, map[string]interface{}{
-					"type":        "social",
-					"title":       "约个朋友",
-					"description": "你现在看起来有空，可以约朋友聊聊",
-					"reason":      fmt.Sprintf("当前状态: %s, 有空概率 %d%%", lifeStatus, probability),
-					"confidence":  "medium",
-				})
-			}
-		}
-
-		if screen, ok := deviceData["screen"].(map[string]interface{}); ok {
-			duration, _ := screen["session_duration"].(int)
-			activityType, _ := screen["activity_type"].(string)
-
-			if duration > 60 && activityType == "entertainment" {
-				suggestions = append(suggestions, map[string]interface{}{
-					"type":        "activity",
-					"title":       "休息一下",
-					"description": "已经娱乐一个多小时了，起来活动活动",
-					"reason":      fmt.Sprintf("屏幕使用时长 %d 分钟，活动类型: %s", duration, activityType),
-					"confidence":  "high",
-				})
-			}
-		}
-	}
-
-	// 基于社交数据生成建议
-	if suggestionContext == "social" && len(friendsData) > 0 {
-		friend := friendsData[0]
-		suggestions = append(suggestions, map[string]interface{}{
-			"type":        "social",
-			"title":       fmt.Sprintf("可以约 %s", friend.Name),
-			"description": fmt.Sprintf("%s 现在%s，有空概率 %d%%", friend.Name, friend.Status, friend.Probability),
-			"reason":      "基于好友状态分析",
-			"confidence":  friend.Confidence,
-		})
-	}
-
-	// 如果没有具体建议，给出通用建议
-	if len(suggestions) == 0 {
-		suggestions = append(suggestions, map[string]interface{}{
-			"type":        "general",
-			"title":       "继续当前活动",
-			"description": "没有特别的建议，继续你正在做的事情",
-			"reason":      "数据不足以给出具体建议",
-			"confidence":  "low",
-		})
-	}
-
-	return map[string]interface{}{
-		"suggestions": suggestions,
-		"based_on": map[string]interface{}{
-			"device_data": deviceData != nil,
-			"memory_data": memoryData != nil,
-			"friends":     len(friendsData),
-			"context":     suggestionContext,
-			"time_range":  timeRange,
-		},
-	}, false
-}
+// [已删除] executeQueryDeviceData, executeQueryMemory, executeUpdateMemory, executeGetBehaviorSuggestion
+// Phase 5: 设备数据通过系统提示词注入，记忆通过 buildSystemPromptWithMemory 注入，行为建议是 LLM 自身能力

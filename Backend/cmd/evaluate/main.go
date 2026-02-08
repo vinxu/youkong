@@ -32,6 +32,8 @@ func main() {
 	v4Eval := flag.Bool("v4-eval", false, "运行 V4 AI 助手能力评估")
 	v4Single := flag.Int("v4-single", 0, "运行 V4 单个场景测试 (scenario ID)")
 	v4MultiSingle := flag.Int("v4-multi", 0, "运行 V4 单个多轮场景 (scenario ID)")
+	v4Stability := flag.Int("v4-stability", 0, "运行稳定性测试（指定试次数 k，如 -v4-stability 3）")
+	v4TimeReport := flag.Bool("v4-time-report", false, "运行时间理解深度测试（42 场景 + 详细报告）")
 
 	flag.Parse()
 
@@ -57,9 +59,13 @@ func main() {
 	}
 
 	// ========== V4 评估模式 ==========
-	if *v4Eval || *v4Single > 0 || *v4MultiSingle > 0 {
+	if *v4Eval || *v4Single > 0 || *v4MultiSingle > 0 || *v4Stability > 0 || *v4TimeReport {
 		model := viper.GetString("LLM_MODEL")
-		runV4Eval(*qwenKey, model, *listCases, *v4Single, *v4MultiSingle, *outputMD)
+		if *v4TimeReport {
+			runV4TimeReport(*qwenKey, model, *outputMD)
+			return
+		}
+		runV4Eval(*qwenKey, model, *listCases, *v4Single, *v4MultiSingle, *v4Stability, *outputMD)
 		return
 	}
 
@@ -102,8 +108,35 @@ func main() {
 
 // ========== V4 评估入口 ==========
 
-func runV4Eval(apiKey, model string, listCases bool, singleID, multiID int, outputMD string) {
+func runV4Eval(apiKey, model string, listCases bool, singleID, multiID, stabilityK int, outputMD string) {
 	evalService := service.NewV4EvalService(apiKey, model)
+
+	// 稳定性测试
+	if stabilityK > 0 {
+		fmt.Println("========================================")
+		fmt.Printf("  V4 稳定性测试 (k=%d)\n", stabilityK)
+		fmt.Println("========================================")
+
+		ctx := context.Background()
+		report, err := evalService.RunStabilityEval(ctx, stabilityK)
+		if err != nil {
+			fmt.Printf("错误: %v\n", err)
+			return
+		}
+
+		mdContent := evalService.GenerateStabilityReport(report)
+
+		if outputMD != "" {
+			if err := os.WriteFile(outputMD, []byte(mdContent), 0644); err != nil {
+				fmt.Printf("保存报告失败: %v\n", err)
+			} else {
+				fmt.Printf("\n报告已保存到: %s\n", outputMD)
+			}
+		}
+
+		fmt.Println("\n" + mdContent)
+		return
+	}
 
 	// 列出所有场景
 	if listCases {
@@ -212,6 +245,35 @@ func runV4Eval(apiKey, model string, listCases bool, singleID, multiID int, outp
 	fmt.Println("\n" + mdContent)
 }
 
+func runV4TimeReport(apiKey, model, outputMD string) {
+	evalService := service.NewV4EvalService(apiKey, model)
+
+	fmt.Println("========================================")
+	fmt.Println("  V4 时间理解深度测试")
+	fmt.Println("  42 场景（C9基线 10 + 深度 32）")
+	fmt.Println("  预计耗时 3-5 分钟")
+	fmt.Println("========================================")
+
+	ctx := context.Background()
+	report, err := evalService.RunTimeReport(ctx)
+	if err != nil {
+		fmt.Printf("错误: %v\n", err)
+		return
+	}
+
+	mdContent := evalService.GenerateTimeReport(report)
+
+	if outputMD != "" {
+		if err := os.WriteFile(outputMD, []byte(mdContent), 0644); err != nil {
+			fmt.Printf("保存报告失败: %v\n", err)
+		} else {
+			fmt.Printf("\n报告已保存到: %s\n", outputMD)
+		}
+	}
+
+	fmt.Println("\n" + mdContent)
+}
+
 func printV4SingleResult(r *service.SingleTurnResult, sc *service.EvalScenario) {
 	fmt.Printf("输入: %s\n", r.Input)
 	fmt.Printf("分类: %s | 画像: %s\n", r.Category, r.PersonaID)
@@ -237,6 +299,15 @@ func printV4SingleResult(r *service.SingleTurnResult, sc *service.EvalScenario) 
 		}
 	}
 
+	// 显示工具参数
+	if len(r.ToolCallDetails) > 0 {
+		fmt.Println("\n--- 工具参数 ---")
+		for _, td := range r.ToolCallDetails {
+			argsJSON, _ := json.Marshal(td.Arguments)
+			fmt.Printf("  %s: %s\n", td.Name, string(argsJSON))
+		}
+	}
+
 	fmt.Println("\n--- 自动评估 ---")
 	if r.AutoEval != nil {
 		if r.AutoEval.ToolCorrect {
@@ -244,7 +315,7 @@ func printV4SingleResult(r *service.SingleTurnResult, sc *service.EvalScenario) 
 		} else {
 			fmt.Println("❌ 工具调用错误")
 		}
-		fmt.Printf("工具得分: %.0f\n", r.AutoEval.ToolScore)
+		fmt.Printf("工具得分: %.0f | 参数得分: %.0f\n", r.AutoEval.ToolScore, r.AutoEval.ParamScore)
 		if r.AutoEval.Details != "" {
 			fmt.Printf("详情: %s\n", r.AutoEval.Details)
 		}

@@ -40,8 +40,11 @@ type FriendGridItem struct {
 	Status       string `json:"status"`
 	UpdatedAt    string `json:"updated_at"`
 	RelativeTime string `json:"relative_time"`
-	City         string `json:"city,omitempty"` // 城市名称（如"上海"、"北京"）
-	IsAvailable  bool   `json:"is_available"`   // 是否有空（用于高亮显示）
+	City         string `json:"city,omitempty"`       // 城市名称（如"上海"、"北京"）
+	IsAvailable  bool   `json:"is_available"`         // 是否有空（用于高亮显示）
+	GifURL       string `json:"gif_url,omitempty"`    // GIF 动图 URL（仅有空时有值）
+	GiphyQuery   string `json:"giphy_query,omitempty"` // Giphy 搜索词（客户端可自行搜索）
+	UseGif       bool   `json:"use_gif"`              // 是否使用 GIF 显示模式
 }
 
 // GridResponse 宫格响应
@@ -87,7 +90,10 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 	// 6. 批量获取用户的城市显示设置
 	showCityMap := s.getUserShowCitySettings(ctx, friendIDs)
 
-	// 7. 构建宫格数据
+	// 7. 批量检查时刻表 highlight 状态（当前时段是否标记为"有空"）
+	highlightMap := s.getUserHighlightStatus(ctx, friendIDs)
+
+	// 8. 构建宫格数据
 	friends := make([]FriendGridItem, 0, len(friendIDs))
 	for _, fid := range friendIDs {
 		user := userMap[fid]
@@ -120,10 +126,25 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 			}
 		}
 
+		// 时刻表 highlight 优先：用户手动设置的"有空"状态实时生效
+		if hl, ok := highlightMap[fid]; ok {
+			isAvailable = hl
+		}
+
 		// 只有用户开启了城市显示才返回城市信息
 		city := ""
 		if showCityMap[fid] {
 			city = cityMap[fid]
+		}
+
+		// 获取 GIF 信息
+		gifURL := ""
+		giphyQuery := ""
+		useGif := false
+		if analysis != nil {
+			gifURL = analysis.LifeStatus.GifURL
+			giphyQuery = analysis.LifeStatus.GiphyQuery
+			useGif = analysis.LifeStatus.UseGif
 		}
 
 		friends = append(friends, FriendGridItem{
@@ -136,6 +157,9 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 			RelativeTime: formatRelativeTime(updatedAt),
 			City:         city,
 			IsAvailable:  isAvailable,
+			GifURL:       gifURL,
+			GiphyQuery:   giphyQuery,
+			UseGif:       useGif,
 		})
 
 		// 最多显示 16 个（包括自己）
@@ -245,4 +269,35 @@ func formatRelativeTime(t time.Time) string {
 		return fmt.Sprintf("%d天前", days)
 	}
 	return "很久以前"
+}
+
+// getUserHighlightStatus 检查每个用户当前时段的时刻表是否有 highlight=true 的条目
+// 返回 map[userID]bool，仅包含有明确 highlight 设置的用户
+func (s *HomeService) getUserHighlightStatus(ctx context.Context, userIDs []string) map[string]bool {
+	result := make(map[string]bool)
+	if s.scheduleRepo == nil {
+		return result
+	}
+
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	currentTime := now.Format("15:04")
+
+	for _, uid := range userIDs {
+		schedule, err := s.scheduleRepo.GetLatestByUserAndDate(ctx, uid, today)
+		if err != nil || schedule == nil {
+			continue
+		}
+
+		// 检查当前时段是否有 highlight 条目
+		for _, item := range schedule.Items {
+			if item.StartTime <= currentTime && currentTime < item.EndTime {
+				// 找到当前时段的条目，用它的 highlight 值
+				result[uid] = item.Highlight
+				break
+			}
+		}
+	}
+
+	return result
 }

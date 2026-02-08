@@ -101,6 +101,37 @@ func (r *ScheduleRepository) GetActiveByUserAndDate(ctx context.Context, userID 
 	return &schedule, nil
 }
 
+// GetLatestByUserAndDate 获取用户某天最新的时刻表（不限 status，用于查询展示）
+func (r *ScheduleRepository) GetLatestByUserAndDate(ctx context.Context, userID string, date time.Time) (*model.StatusSchedule, error) {
+	var schedule model.StatusSchedule
+	query := `
+		SELECT * FROM status_schedules
+		WHERE user_id = ? AND schedule_date = ? AND status != 'cancelled'
+		ORDER BY updated_at DESC
+		LIMIT 1
+	`
+	err := r.db.GetContext(ctx, &schedule, query, userID, date.Format("2006-01-02"))
+	if err != nil {
+		return nil, err
+	}
+	return &schedule, nil
+}
+
+// GetAllByUserAndDate 获取用户某天所有非取消的时刻表（用于合并展示）
+func (r *ScheduleRepository) GetAllByUserAndDate(ctx context.Context, userID string, date time.Time) ([]*model.StatusSchedule, error) {
+	var schedules []*model.StatusSchedule
+	query := `
+		SELECT * FROM status_schedules
+		WHERE user_id = ? AND schedule_date = ? AND status != 'cancelled'
+		ORDER BY updated_at DESC
+	`
+	err := r.db.SelectContext(ctx, &schedules, query, userID, date.Format("2006-01-02"))
+	if err != nil {
+		return nil, err
+	}
+	return schedules, nil
+}
+
 // GetAllActiveSchedules 获取所有活跃的时刻表（用于定时任务）
 func (r *ScheduleRepository) GetAllActiveSchedules(ctx context.Context, date time.Time) ([]*model.StatusSchedule, error) {
 	var schedules []*model.StatusSchedule

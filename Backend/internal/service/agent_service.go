@@ -1,9 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -27,6 +29,7 @@ const (
 // AgentService Agent 服务
 type AgentService struct {
 	redisClient        *tencent.RedisClient
+	cosClient          *tencent.COSClient
 	userRepo           *repository.UserRepository
 	friendshipRepo     *repository.FriendshipRepository
 	memoryRepo         *repository.MemoryRepository
@@ -60,6 +63,39 @@ func NewAgentService(
 		llmClient:          llmClient,
 		holmesAnalyzer:     holmesAnalyzer,
 	}
+}
+
+// SetCOSClient 设置 COS 客户端（用于 GIF 缓存）
+func (s *AgentService) SetCOSClient(cosClient *tencent.COSClient) {
+	s.cosClient = cosClient
+}
+
+// UploadGifToCOS 将客户端上传的 GIF 二进制数据存储到 COS，返回 COS URL
+func (s *AgentService) UploadGifToCOS(ctx context.Context, reader io.Reader, size int64) (string, error) {
+	if s.cosClient == nil {
+		return "", fmt.Errorf("COS 客户端未配置")
+	}
+
+	// 先读取数据计算 MD5 作为文件名
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return "", fmt.Errorf("读取数据失败: %w", err)
+	}
+
+	cosKey := fmt.Sprintf("gif/status/%s.gif", tencent.MD5Key(string(data)))
+
+	// 检查是否已存在（避免重复上传）
+	if s.cosClient.Exists(ctx, cosKey) {
+		return s.cosClient.GetPublicURL(cosKey), nil
+	}
+
+	// 上传到 COS
+	cosURL, err := s.cosClient.UploadFromReader(ctx, cosKey, bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("上传 COS 失败: %w", err)
+	}
+
+	return cosURL, nil
 }
 
 // ReportStatus 上报用户状态
@@ -1321,6 +1357,10 @@ func (s *AgentService) SaveStatusFeedback(ctx context.Context, userID string, re
 		finalLabel = req.CorrectedPlace + req.CorrectedActivity
 	}
 
+	// GIF 信息（客户端已通过 upload-gif 接口将 GIF 上传到 COS）
+	gifURL := req.GifURL
+	giphyQuery := req.GiphyQuery
+
 	analysisResult := &model.AnalysisResult{
 		Availability: model.AvailabilityAnalysis{
 			Status:      availabilityStatus,
@@ -1332,6 +1372,9 @@ func (s *AgentService) SaveStatusFeedback(ctx context.Context, userID string, re
 			Emoji:       finalEmoji,
 			Label:       finalLabel,
 			Description: req.CorrectedPlace,
+			GifURL:      gifURL,
+			GiphyQuery:  giphyQuery,
+			UseGif:      req.UseGif,
 		},
 		UpdatedAt: time.Now(),
 		IsAIGuess: false, // 用户确认的状态，不是 AI 猜测
@@ -1349,14 +1392,14 @@ func (s *AgentService) SaveStatusFeedback(ctx context.Context, userID string, re
 
 	// 同时更新状态表（status_schedules）的当前时间段
 	if s.scheduleRepo != nil {
-		s.updateCurrentScheduleItem(ctx, userID, finalEmoji, finalLabel)
+		s.updateCurrentScheduleItem(ctx, userID, finalEmoji, finalLabel, gifURL, giphyQuery)
 	}
 
 	return nil
 }
 
 // updateCurrentScheduleItem 更新状态表的当前时间段（只更新今天的）
-func (s *AgentService) updateCurrentScheduleItem(ctx context.Context, userID, emoji, status string) {
+func (s *AgentService) updateCurrentScheduleItem(ctx context.Context, userID, emoji, status, gifURL, giphyQuery string) {
 	// 获取上海时区
 	loc, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
@@ -1368,8 +1411,11 @@ func (s *AgentService) updateCurrentScheduleItem(ctx context.Context, userID, em
 
 	fmt.Printf("[SaveStatusFeedback] 准备更新状态表 user=%s date=%s time=%s\n", userID, todayDate, currentTime)
 
-	// 获取今天的活跃时刻表（只查询今天的日期，不会影响其他日期）
+	// 获取今天的时刻表（优先 active，其次最新的 completed）
 	schedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, userID, now)
+	if (err != nil || schedule == nil) && s.scheduleRepo != nil {
+		schedule, err = s.scheduleRepo.GetLatestByUserAndDate(ctx, userID, now)
+	}
 
 	// 计算新 item 的时间段：当前时间开始，持续1小时
 	startTime := currentTime
@@ -1386,12 +1432,14 @@ func (s *AgentService) updateCurrentScheduleItem(ctx context.Context, userID, em
 		fmt.Printf("[SaveStatusFeedback] 今天(%s)没有状态表，创建新的 user=%s\n", todayDate, userID)
 
 		newItem := model.ScheduleItem{
-			StartTime: startTime,
-			EndTime:   endTime,
-			Emoji:     emoji,
-			Status:    status,
-			Executed:  false,
-			IsAIGuess: false,
+			StartTime:  startTime,
+			EndTime:    endTime,
+			Emoji:      emoji,
+			Status:     status,
+			Executed:   false,
+			IsAIGuess:  false,
+			GifURL:     gifURL,
+			GiphyQuery: giphyQuery,
 		}
 
 		scheduleDate, _ := time.ParseInLocation("2006-01-02", todayDate, loc)
@@ -1429,6 +1477,8 @@ func (s *AgentService) updateCurrentScheduleItem(ctx context.Context, userID, em
 			schedule.Items[i].Emoji = emoji
 			schedule.Items[i].Status = status
 			schedule.Items[i].IsAIGuess = false // 用户确认的状态
+			schedule.Items[i].GifURL = gifURL
+			schedule.Items[i].GiphyQuery = giphyQuery
 			itemUpdated = true
 			fmt.Printf("[SaveStatusFeedback] 更新状态表item user=%s date=%s index=%d time=%s-%s old=[%s %s] new=[%s %s]\n",
 				userID, todayDate, i, schedule.Items[i].StartTime, schedule.Items[i].EndTime,
@@ -1440,12 +1490,14 @@ func (s *AgentService) updateCurrentScheduleItem(ctx context.Context, userID, em
 	if !itemUpdated {
 		// 没有找到当前时间段，需要插入新的 item 并处理时间重叠
 		newItem := model.ScheduleItem{
-			StartTime: startTime,
-			EndTime:   endTime,
-			Emoji:     emoji,
-			Status:    status,
-			Executed:  false,
-			IsAIGuess: false,
+			StartTime:  startTime,
+			EndTime:    endTime,
+			Emoji:      emoji,
+			Status:     status,
+			Executed:   false,
+			IsAIGuess:  false,
+			GifURL:     gifURL,
+			GiphyQuery: giphyQuery,
 		}
 
 		// 处理时间重叠：分割或调整现有条目

@@ -18,6 +18,7 @@ import (
 	"youkong/internal/job"
 	"youkong/internal/middleware"
 	"youkong/internal/pkg/asr"
+	"youkong/internal/pkg/giphy"
 	"youkong/internal/pkg/jwt"
 	"youkong/internal/pkg/llm"
 	"youkong/internal/pkg/poster"
@@ -232,8 +233,44 @@ func main() {
 	conversationHandler := handler.NewConversationHandler(conversationService)
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
 	friendshipHandler := handler.NewFriendshipHandler(friendshipService)
-	agentHandler := handler.NewAgentHandler(agentService, memoryService, voiceScheduleService, agentChatService, scheduleRepo)
+	agentHandler := handler.NewAgentHandler(agentService, memoryService, voiceScheduleService, agentChatService, scheduleRepo, friendshipRepo)
 	agentHandler.SetVoiceScheduleServiceV4(voiceScheduleServiceV4) // 设置 V4 服务
+	// 设置 STS 配置（用于客户端直传 COS）
+	// COS 密钥：优先使用 COS 专用密钥，回退到通用密钥
+	cosSecretID := cfg.Tencent.COSSecretID
+	cosSecretKey := cfg.Tencent.COSSecretKey
+	if cosSecretID == "" {
+		cosSecretID = cfg.Tencent.SecretID
+		cosSecretKey = cfg.Tencent.SecretKey
+	}
+
+	// 设置 STS 配置（用于客户端直传 COS）
+	if cfg.Tencent.COSBucket != "" && cosSecretID != "" {
+		agentHandler.SetSTSConfig(cosSecretID, cosSecretKey, cfg.Tencent.COSBucket, cfg.Tencent.COSRegion)
+		logger.Info("AgentHandler 已启用 STS 直传")
+	}
+
+	// 初始化 COS 客户端（用于 GIF 存储）
+	var cosClient *tencent.COSClient
+	if cfg.Tencent.COSBucket != "" && cfg.Tencent.COSRegion != "" && cosSecretID != "" {
+		cosClient = tencent.NewCOSClient(
+			cosSecretID,
+			cosSecretKey,
+			cfg.Tencent.COSBucket,
+			cfg.Tencent.COSRegion,
+		)
+		logger.Info("COS 客户端初始化成功", zap.String("bucket", cfg.Tencent.COSBucket))
+	}
+
+	// 设置 COS 客户端到 AgentService（用于 GIF URL 缓存到 COS）
+	if cosClient != nil {
+		agentService.SetCOSClient(cosClient)
+		logger.Info("AgentService 已启用 GIF COS 缓存")
+	}
+
+	// 初始化 Giphy 客户端（用于状态 GIF 展示，COS 可选）
+	giphyClient := giphy.NewClient("Ned8bTKUTSlYen6oZXmacc1sLmlLn9U8", cosClient, redisClient)
+	logger.Info("Giphy 客户端初始化成功", zap.Bool("cos_enabled", cosClient != nil))
 
 	// 初始化 V2 推断 Agent
 	if cfg.LLM.APIKey != "" {
@@ -241,6 +278,10 @@ func main() {
 			redisClient, memoryRepo, scheduleRepo, userProfileService,
 			cfg.LLM.APIKey, cfg.LLM.Model,
 		)
+		if llmClient != nil {
+			inferenceAgent.SetGiphyClient(giphyClient, llmClient)
+			logger.Info("V2 推断 Agent 已启用 Giphy GIF 集成")
+		}
 		agentHandler.SetInferenceAgent(inferenceAgent)
 		logger.Info("V2 推断 Agent 初始化成功")
 	}
@@ -424,6 +465,8 @@ func main() {
 				agent.POST("/infer-status-v2", agentHandler.InferStatusV2)              // 同步版
 				agent.POST("/infer-status-v2/stream", agentHandler.InferStatusV2Stream) // SSE 流式版
 				agent.POST("/infer-status-v2/respond", agentHandler.InferStatusRespond) // 用户确认回答
+				agent.POST("/upload-gif", agentHandler.UploadGif)                       // 客户端上传 GIF 到 COS
+				agent.GET("/sts", agentHandler.GetSTSCredentials)                       // 获取 COS 临时上传凭证
 
 				// AI 状态推测
 				agent.POST("/prediction/start", predictionHandler.StartPrediction)      // 开始推测任务
@@ -432,6 +475,9 @@ func main() {
 				agent.GET("/prediction/:id", predictionHandler.GetPrediction)           // 获取推测任务状态
 				agent.POST("/prediction/:id/confirm", predictionHandler.ConfirmPrediction) // 确认推测结果
 				agent.POST("/prediction/:id/reject", predictionHandler.RejectPrediction)  // 放弃推测结果
+
+				// 查看好友行程表
+				agent.GET("/user/:userId/schedule", agentHandler.GetUserSchedule)
 
 				// 模型对比测试接口（Qwen vs Kimi）
 				agent.GET("/test/model/cases", agentHandler.GetTestCases)                   // 获取测试用例

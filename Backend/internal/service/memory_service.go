@@ -479,13 +479,6 @@ func mergeInsight(existing, new string) string {
 	return existing
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // ========== 训练 AI - 状态选择功能 ==========
 
 // GetRecentUserStatusMemory 获取用户最近的状态记忆

@@ -4,16 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
+	"strings"
 	"time"
 
 	"youkong/internal/model"
 	"youkong/internal/pkg/agent"
+	"youkong/internal/pkg/giphy"
+	"youkong/internal/pkg/llm"
 	"youkong/internal/pkg/tencent"
 	"youkong/internal/repository"
 )
 
-// StatusInferenceAgent Agent-based 状态推断服务
+// StatusInferenceAgent 状态推断服务（V3：预聚合 + 单次 LLM）
 type StatusInferenceAgent struct {
 	redisClient        *tencent.RedisClient
 	memoryRepo         *repository.MemoryRepository
@@ -21,13 +23,12 @@ type StatusInferenceAgent struct {
 	userProfileService *UserProfileService
 	llmAPIKey          string
 	llmModel           string
-
-	// 等待用户回答的 channel map
-	pendingAnswers map[string]chan string
-	mu             sync.Mutex
+	giphyClient        *giphy.Client
+	llmClient          *llm.OpenRouterClient
+	llmAdapter         *agent.LLMAdapter
 }
 
-// NewStatusInferenceAgent 创建状态推断 Agent
+// NewStatusInferenceAgent 创建状态推断服务
 func NewStatusInferenceAgent(
 	redisClient *tencent.RedisClient,
 	memoryRepo *repository.MemoryRepository,
@@ -36,20 +37,32 @@ func NewStatusInferenceAgent(
 	llmAPIKey string,
 	llmModel string,
 ) *StatusInferenceAgent {
-	return &StatusInferenceAgent{
+	s := &StatusInferenceAgent{
 		redisClient:        redisClient,
 		memoryRepo:         memoryRepo,
 		scheduleRepo:       scheduleRepo,
 		userProfileService: userProfileService,
 		llmAPIKey:          llmAPIKey,
 		llmModel:           llmModel,
-		pendingAnswers:     make(map[string]chan string),
 	}
+	if llmAPIKey != "" {
+		s.llmAdapter = agent.NewLLMAdapter(&agent.LLMAdapterConfig{
+			APIKey: llmAPIKey,
+			Model:  llmModel,
+		})
+	}
+	return s
+}
+
+// SetGiphyClient 设置 Giphy 客户端（可选）
+func (s *StatusInferenceAgent) SetGiphyClient(giphyClient *giphy.Client, llmClient *llm.OpenRouterClient) {
+	s.giphyClient = giphyClient
+	s.llmClient = llmClient
 }
 
 // InferenceStreamEvent 推断流式事件
 type InferenceStreamEvent struct {
-	Type    string      `json:"type"`              // phase, tool_start, tool_result, thinking, ask_user, result, error
+	Type    string      `json:"type"`              // phase, tool, result, choice, error
 	Data    interface{} `json:"data,omitempty"`
 	Message string      `json:"message,omitempty"`
 }
@@ -57,333 +70,538 @@ type InferenceStreamEvent struct {
 // InferenceStreamCallback 推断流式回调
 type InferenceStreamCallback func(event *InferenceStreamEvent)
 
-// InferWithAgent 同步版推断（兼容旧客户端）
+// InferWithAgent V3 同步推断（返回统一 InferenceResponse）
 func (s *StatusInferenceAgent) InferWithAgent(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest) (*model.CurrentStatusInference, error) {
-	var finalResult *model.CurrentStatusInference
-
-	err := s.doInfer(ctx, userID, sensorData, nil, &finalResult)
+	resp, err := s.doInfer(ctx, userID, sensorData, nil)
 	if err != nil {
 		return nil, err
 	}
-
-	if finalResult == nil {
-		return nil, fmt.Errorf("推断未产生结果")
+	// 同步版：如果需要选择，自动使用 default option
+	if resp.Phase == model.InferencePhaseAwaitingChoice && len(resp.Options) > 0 {
+		idx := resp.DefaultIdx
+		if idx < 0 || idx >= len(resp.Options) {
+			idx = 0
+		}
+		opt := resp.Options[idx]
+		result := &model.CurrentStatusInference{
+			Emoji:      opt.Emoji,
+			Activity:   opt.Activity,
+			IsAvailable: false,
+			Confidence: "low",
+			Reasoning:  fmt.Sprintf("不确定时使用默认选项: %s", opt.Reason),
+			InferredAt: time.Now().UnixMilli(),
+		}
+		s.enrichWithGif(ctx, result)
+		s.setInferenceLock(ctx, userID)
+		s.savePrevInference(ctx, userID, result)
+		s.logInference(ctx, userID, sensorData, result)
+		return result, nil
 	}
+	return resp.Result, nil
+}
 
-	return finalResult, nil
+// InferWithAgentV3 V3 推断（返回完整 InferenceResponse，支持 awaiting_choice）
+func (s *StatusInferenceAgent) InferWithAgentV3(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest) (*model.InferenceResponse, error) {
+	return s.doInfer(ctx, userID, sensorData, nil)
 }
 
 // InferWithAgentStream 流式版推断（SSE）
 func (s *StatusInferenceAgent) InferWithAgentStream(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest, callback InferenceStreamCallback) (*model.CurrentStatusInference, error) {
-	var finalResult *model.CurrentStatusInference
-
-	err := s.doInfer(ctx, userID, sensorData, callback, &finalResult)
+	resp, err := s.doInfer(ctx, userID, sensorData, callback)
 	if err != nil {
 		return nil, err
 	}
-
-	if finalResult == nil {
-		return nil, fmt.Errorf("推断未产生结果")
+	if resp.Phase == model.InferencePhaseAwaitingChoice && len(resp.Options) > 0 {
+		idx := resp.DefaultIdx
+		if idx < 0 || idx >= len(resp.Options) {
+			idx = 0
+		}
+		opt := resp.Options[idx]
+		result := &model.CurrentStatusInference{
+			Emoji:      opt.Emoji,
+			Activity:   opt.Activity,
+			IsAvailable: false,
+			Confidence: "low",
+			Reasoning:  fmt.Sprintf("不确定时使用默认选项: %s", opt.Reason),
+			InferredAt: time.Now().UnixMilli(),
+		}
+		s.enrichWithGif(ctx, result)
+		s.setInferenceLock(ctx, userID)
+		s.savePrevInference(ctx, userID, result)
+		return result, nil
 	}
-
-	return finalResult, nil
+	return resp.Result, nil
 }
 
-// HandleUserResponse 处理用户确认回答
-func (s *StatusInferenceAgent) HandleUserResponse(ctx context.Context, sessionID string, answer string) error {
-	s.mu.Lock()
-	ch, ok := s.pendingAnswers[sessionID]
-	s.mu.Unlock()
-
-	if !ok {
-		return fmt.Errorf("会话 %s 不存在或已超时", sessionID)
+// HandleUserResponse 处理用户选择（从 session 恢复并完成推断）
+func (s *StatusInferenceAgent) HandleUserResponse(ctx context.Context, userID string, sessionID string, selectedIndex int) (*model.CurrentStatusInference, error) {
+	if s.redisClient == nil {
+		return nil, fmt.Errorf("Redis 未配置")
 	}
 
-	select {
-	case ch <- answer:
-		return nil
-	default:
-		return fmt.Errorf("会话 %s 已处理完毕", sessionID)
+	// 从 Redis 获取 session
+	key := fmt.Sprintf("infer:session:%s", sessionID)
+	data, err := s.redisClient.GetBytes(ctx, key)
+	if err != nil || len(data) == 0 {
+		return nil, fmt.Errorf("推断会话已过期或不存在")
 	}
+
+	var session model.InferenceSession
+	if json.Unmarshal(data, &session) != nil {
+		return nil, fmt.Errorf("会话数据损坏")
+	}
+
+	// 验证用户
+	if session.UserID != userID {
+		return nil, fmt.Errorf("无权操作此会话")
+	}
+
+	// 验证选项索引
+	if selectedIndex < 0 || selectedIndex >= len(session.Options) {
+		return nil, fmt.Errorf("无效的选项索引: %d", selectedIndex)
+	}
+
+	opt := session.Options[selectedIndex]
+
+	// 构建最终结果
+	result := &model.CurrentStatusInference{
+		Emoji:      opt.Emoji,
+		Activity:   opt.Activity,
+		IsAvailable: false,
+		Confidence: "high", // 用户主动选择 → high
+		Reasoning:  fmt.Sprintf("用户选择: %s", opt.Activity),
+		InferredAt: time.Now().UnixMilli(),
+	}
+
+	// GIF 翻译
+	s.enrichWithGif(ctx, result)
+
+	// 设置推断锁
+	s.setInferenceLock(ctx, userID)
+
+	// 保存上次推断
+	s.savePrevInference(ctx, userID, result)
+
+	// 清理 session
+	s.redisClient.Del(ctx, key)
+
+	// 记录偏好学习（用户选择了哪个选项）
+	go s.learnFromChoice(context.Background(), userID, &session, selectedIndex)
+
+	// 记录日志
+	s.logInference(ctx, userID, session.SensorData, result)
+
+	return result, nil
 }
 
-// doInfer 执行推断核心逻辑
-func (s *StatusInferenceAgent) doInfer(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest, callback InferenceStreamCallback, resultPtr **model.CurrentStatusInference) error {
-	// 缓存传感器数据到 Redis（供工具查询）
+// ========== 核心推断逻辑 ==========
+
+// doInfer V3 核心推断（预聚合 → 单次 LLM → finalize/ask_choice）
+func (s *StatusInferenceAgent) doInfer(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest, callback InferenceStreamCallback) (*model.InferenceResponse, error) {
+	if s.llmAdapter == nil {
+		return nil, fmt.Errorf("LLM 未配置")
+	}
+
+	// 缓存传感器数据到 Redis
 	if sensorData != nil {
 		s.cacheSensorData(ctx, userID, sensorData)
 	}
 
-	// 创建 session
-	sessionConfig := &agent.SessionConfig{
-		TokenBudget:   4000,
-		MaxIterations: 6, // 推断场景不需要太多迭代
-		TTL:           2 * time.Minute,
-	}
-	session := agent.NewSession(userID, sessionConfig)
-
-	// 创建 answer channel（用于 ask_user_confirmation）
-	answerCh := make(chan string, 1)
-	s.mu.Lock()
-	s.pendingAnswers[session.SessionID] = answerCh
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.pendingAnswers, session.SessionID)
-		s.mu.Unlock()
-	}()
-
-	// 创建工具依赖
-	toolDeps := &agent.InferenceToolDeps{
-		RedisClient:  s.redisClient,
-		MemoryRepo:   s.memoryRepo,
-		ScheduleRepo: s.scheduleRepo,
-		UserID:       userID,
-		AskUserFunc:  s.createAskUserFunc(session.SessionID, answerCh, callback),
-		SaveResultFunc: func(ctx context.Context, result *model.CurrentStatusInference) error {
-			*resultPtr = result
-			return nil
-		},
-	}
-
-	// 注册工具
-	registry := agent.NewToolRegistry()
-	for _, tool := range agent.InferenceTools(toolDeps) {
-		registry.MustRegister(tool)
-	}
-
-	// 创建 LLM 适配器
-	llmAdapter := agent.NewLLMAdapter(&agent.LLMAdapterConfig{
-		APIKey: s.llmAPIKey,
-		Model:  s.llmModel,
-	})
-
-	// 创建执行器
-	executorConfig := &agent.ExecutorConfig{
-		TokenBudget:   4000,
-		MaxIterations: 6,
-		SessionTTL:    2 * time.Minute,
-	}
-	executor := agent.NewAgentExecutor(llmAdapter, registry, s.redisClient, executorConfig)
-
-	// 构建系统提示
-	systemPrompt := s.buildInferenceSystemPrompt(ctx, userID)
-
-	// 发送开始事件
 	if callback != nil {
 		callback(&InferenceStreamEvent{
 			Type:    "phase",
-			Message: "开始推断状态...",
-			Data:    map[string]string{"phase": "starting", "session_id": session.SessionID},
+			Message: "正在收集数据...",
 		})
 	}
 
-	// 构建用户消息
-	userMessage := "请推断我当前的状态。先查询传感器数据和时刻表上下文，再结合历史记忆进行推理，最后通过 finalize_status 输出结果。"
+	// Step 1: Go 预聚合所有数据源（~50ms）
+	deps := s.buildDeps(userID)
+	inferCtx := agent.PreGatherContext(ctx, deps)
+	contextText := agent.FormatContextForPrompt(inferCtx)
 
-	// 构建流式回调
-	var streamCallback agent.StreamCallback
+	fmt.Printf("[InferV3] 预聚合完成 user=%s context_len=%d\n", userID, len(contextText))
+
 	if callback != nil {
-		streamCallback = func(event *agent.AgentStreamEvent) {
-			switch event.Type {
-			case agent.EventToolStart:
-				callback(&InferenceStreamEvent{
-					Type:    "tool_start",
-					Message: fmt.Sprintf("正在查询 %s...", getToolDisplayName(event.ToolName)),
-					Data: map[string]interface{}{
-						"tool": event.ToolName,
-					},
-				})
-			case agent.EventToolResult:
-				summary := summarizeToolResult(event.ToolName, event.ToolResult)
-				callback(&InferenceStreamEvent{
-					Type:    "tool_result",
-					Message: summary,
-					Data: map[string]interface{}{
-						"tool":    event.ToolName,
-						"summary": summary,
-					},
-				})
-			case agent.EventThinkingChunk:
-				callback(&InferenceStreamEvent{
-					Type:    "thinking",
-					Message: event.Content,
-				})
-			}
-		}
-	}
-
-	// 执行 Agent
-	opts := &agent.ExecuteOptions{
-		SystemPrompt:   systemPrompt,
-		StreamCallback: streamCallback,
-		Temperature:    0.3, // 推断需要较低的随机性
-	}
-
-	response, err := executor.Execute(ctx, session, userMessage, opts)
-	if err != nil {
-		return fmt.Errorf("Agent 执行失败: %w", err)
-	}
-
-	// 如果 Agent 没有通过 finalize_status 输出结果，尝试从响应文本解析
-	if *resultPtr == nil {
-		*resultPtr = s.parseResultFromText(response.Content)
-	}
-
-	// 发送最终结果事件
-	if callback != nil && *resultPtr != nil {
 		callback(&InferenceStreamEvent{
-			Type: "result",
-			Data: *resultPtr,
+			Type:    "phase",
+			Message: "正在推断状态...",
 		})
 	}
 
-	// 记录推断日志
-	s.logInference(ctx, userID, sensorData, response, *resultPtr)
+	// Step 2: 构建工具集 + 系统提示词
+	tools := agent.InferenceTools(deps)
+	systemPrompt := s.buildInferenceSystemPrompt(contextText)
 
-	return nil
-}
-
-// buildInferenceSystemPrompt 构建推断系统提示
-func (s *StatusInferenceAgent) buildInferenceSystemPrompt(ctx context.Context, userID string) string {
-	now := time.Now()
-	weekdays := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
-	weekday := weekdays[now.Weekday()]
-	isWeekend := now.Weekday() == time.Saturday || now.Weekday() == time.Sunday
-
-	prompt := fmt.Sprintf(`你是「有空」的状态推理 Agent。你的任务是根据用户的传感器数据、历史规律和记忆，推断用户当前的真实状态。
-
-## 行为原则
-
-1. **数据驱动，不猜测**
-   - 先用 query_sensor_data 获取最新传感器数据
-   - 如果数据不完整，用 query_status_history 查找历史规律补充
-   - 传感器数据和时刻表是最强信号，优先采信
-
-2. **记忆辅助推理**
-   - 用 query_status_history 查看用户的修正记录和历史状态
-   - 参考用户过去在类似时间/地点的状态
-   - 用户修正过的状态是最重要的参考
-
-3. **数据矛盾时主动确认**
-   - 当传感器信号互相矛盾时（如：在公司但已过下班时间），用 ask_user_confirmation 确认
-   - 当置信度低（无传感器数据、新用户）时，主动问用户
-   - 确认问题要简短具体，最多给3个选项
-   - 一次推断最多问用户1个问题，不要连续追问
-
-4. **时刻表优先**
-   - 用 query_schedule_context 检查是否有活跃时刻表
-   - 用户主动设定的时刻表项（is_ai_guess=false） > 传感器推断 > AI推测的时刻表项
-
-5. **输出要求**
-   - 最终结果必须通过 finalize_status 工具输出
-   - emoji 1-3个，组合表达更丰富（场所emoji + 活动emoji）
-   - activity 2-6字，用口语化描述
-   - is_available=true 仅当用户明确处于闲暇状态
-
-## 推断流程（建议）
-1. query_sensor_data(all) - 获取全部传感器数据
-2. query_schedule_context() - 检查时刻表
-3. 如果数据充足 → finalize_status()
-4. 如果数据不足 → query_status_history(corrections) 查看修正记录
-5. 如果仍不确定 → ask_user_confirmation() 问用户
-6. finalize_status() 输出最终结果
-
-## 时间上下文
-当前时间: %s %s %s`, weekday, now.Format("15:04"), now.Format("2006-01-02"))
-
-	if isWeekend {
-		prompt += " (周末)"
+	// Step 3: 单次 LLM 调用
+	messages := []agent.AgentMessage{
+		agent.NewSystemMessage(systemPrompt),
+		agent.NewUserMessage("请根据上述数据推断我此刻的状态"),
 	}
 
-	// 注入用户画像
-	if s.userProfileService != nil {
-		profile, _ := s.userProfileService.GetProfile(userID)
-		if profile != nil {
-			prompt += "\n\n## 用户画像\n"
-			if profile.OccupationType != "" {
-				prompt += fmt.Sprintf("- 职业: %s\n", model.GetProfileTypeName(string(profile.OccupationType)))
-			}
-			if profile.WorkSchedule != "" {
-				prompt += fmt.Sprintf("- 工作模式: %s\n", string(profile.WorkSchedule))
-			}
-			if profile.LifestyleType != "" {
-				lifestyleNames := map[model.LifestyleType]string{
-					model.LifestyleEarlyBird: "早起型",
-					model.LifestyleNightOwl:  "夜猫子",
-					model.LifestyleBalanced:  "规律型",
-				}
-				if name, ok := lifestyleNames[profile.LifestyleType]; ok {
-					prompt += fmt.Sprintf("- 生活方式: %s\n", name)
-				}
-			}
-		}
+	response, err := s.llmAdapter.ChatWithTools(ctx, &agent.LLMRequest{
+		Messages:       messages,
+		Tools:          tools,
+		Temperature:    0.3,
+		EnableThinking: true,
+		ThinkingBudget: 2048,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("LLM 调用失败: %w", err)
 	}
 
-	// 注入核心记忆
-	if s.memoryRepo != nil {
-		coreMemory, _ := s.memoryRepo.GetCoreMemory(ctx, userID)
-		if coreMemory != nil && coreMemory.BehaviorInsights != "" {
-			prompt += "\n## 核心记忆\n"
-			if coreMemory.BehaviorInsights != "" {
-				prompt += fmt.Sprintf("- 行为规律: %s\n", coreMemory.BehaviorInsights)
-			}
-			if coreMemory.TimePatterns != "" {
-				prompt += fmt.Sprintf("- 时间模式: %s\n", coreMemory.TimePatterns)
-			}
-			if coreMemory.LocationPreferences != "" {
-				prompt += fmt.Sprintf("- 地点偏好: %s\n", coreMemory.LocationPreferences)
-			}
-		}
+	// Step 4: 处理工具调用结果
+	if len(response.ToolCalls) == 0 {
+		fmt.Printf("[InferV3] 无工具调用，LLM 返回文本 user=%s\n", userID)
+		return s.buildDefaultResponse(userID), nil
 	}
 
-	return prompt
-}
+	for _, tc := range response.ToolCalls {
+		toolName := tc.Function.Name
+		fmt.Printf("[InferV3] 工具调用: %s user=%s\n", toolName, userID)
 
-// createAskUserFunc 创建用户确认回调函数
-func (s *StatusInferenceAgent) createAskUserFunc(sessionID string, answerCh chan string, callback InferenceStreamCallback) func(ctx context.Context, question string, options []string, contextMsg string) (string, error) {
-	return func(ctx context.Context, question string, options []string, contextMsg string) (string, error) {
-		// 通过 SSE 推送问题到前端
 		if callback != nil {
 			callback(&InferenceStreamEvent{
-				Type: "ask_user",
-				Data: map[string]interface{}{
-					"session_id": sessionID,
-					"question":   question,
-					"options":    options,
-					"context":    contextMsg,
-				},
+				Type:    "tool",
+				Message: s.getInferToolDescription(toolName),
 			})
 		}
 
-		// 等待用户回答（15秒超时）
-		select {
-		case answer := <-answerCh:
-			return answer, nil
-		case <-time.After(15 * time.Second):
-			return "", fmt.Errorf("用户回答超时")
-		case <-ctx.Done():
-			return "", ctx.Err()
+		args, err := tc.ParseArguments()
+		if err != nil {
+			continue
+		}
+
+		// 执行工具
+		var tool *agent.Tool
+		for _, t := range tools {
+			if t.Name == toolName {
+				tool = t
+				break
+			}
+		}
+		if tool == nil {
+			continue
+		}
+
+		result, execErr := tool.Handler(ctx, args)
+		if execErr != nil || result == nil || !result.Success {
+			continue
+		}
+
+		switch toolName {
+		case "finalize_status":
+			return s.handleFinalizeResult(ctx, userID, sensorData, result, callback)
+
+		case "ask_user_choice":
+			return s.handleAskUserChoice(ctx, userID, sensorData, result, callback)
 		}
 	}
+
+	// 兜底
+	return s.buildDefaultResponse(userID), nil
 }
 
-// parseResultFromText 从 LLM 文本响应中尝试解析结果
-func (s *StatusInferenceAgent) parseResultFromText(content string) *model.CurrentStatusInference {
-	// 如果 LLM 没有调用 finalize_status 但给出了文本回答
-	// 返回一个低置信度的默认结果
-	if content == "" {
-		return nil
+// handleFinalizeResult 处理确定性推断结果
+func (s *StatusInferenceAgent) handleFinalizeResult(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest, result *agent.ToolResult, callback InferenceStreamCallback) (*model.InferenceResponse, error) {
+	inference := s.convertInferenceResult(result)
+	if inference == nil {
+		return s.buildDefaultResponse(userID), nil
 	}
 
-	return &model.CurrentStatusInference{
+	// GIF 翻译
+	s.enrichWithGif(ctx, inference)
+
+	// 设置推断锁
+	s.setInferenceLock(ctx, userID)
+
+	// 保存上次推断
+	s.savePrevInference(ctx, userID, inference)
+
+	// 发送结果事件
+	if callback != nil {
+		callback(&InferenceStreamEvent{
+			Type: "result",
+			Data: map[string]interface{}{
+				"result": inference,
+			},
+		})
+	}
+
+	// 记录日志
+	s.logInference(ctx, userID, sensorData, inference)
+
+	return &model.InferenceResponse{
+		Phase:  model.InferencePhaseCompleted,
+		Result: inference,
+	}, nil
+}
+
+// handleAskUserChoice 处理不确定推断（生成选项，创建 session）
+func (s *StatusInferenceAgent) handleAskUserChoice(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest, result *agent.ToolResult, callback InferenceStreamCallback) (*model.InferenceResponse, error) {
+	dataMap, ok := result.Data.(map[string]interface{})
+	if !ok {
+		return s.buildDefaultResponse(userID), nil
+	}
+
+	question, _ := dataMap["question"].(string)
+	defaultIdx, _ := dataMap["default_index"].(int)
+
+	// 解析 options
+	optionsRaw, _ := dataMap["options"].([]model.InferenceOption)
+	if len(optionsRaw) == 0 {
+		// 尝试从 interface{} 解析
+		if rawList, ok := dataMap["options"].([]interface{}); ok {
+			for _, item := range rawList {
+				data, _ := json.Marshal(item)
+				var opt model.InferenceOption
+				if json.Unmarshal(data, &opt) == nil {
+					optionsRaw = append(optionsRaw, opt)
+				}
+			}
+		}
+	}
+
+	if len(optionsRaw) < 2 {
+		return s.buildDefaultResponse(userID), nil
+	}
+
+	// 创建 session
+	sessionID := fmt.Sprintf("infer_%s_%d", userID, time.Now().UnixMilli())
+	session := &model.InferenceSession{
+		SessionID:  sessionID,
+		UserID:     userID,
+		Options:    optionsRaw,
+		Question:   question,
+		DefaultIdx: defaultIdx,
+		SensorData: sensorData,
+		CreatedAt:  time.Now().UnixMilli(),
+	}
+
+	// 存入 Redis（5 分钟 TTL）
+	if s.redisClient != nil {
+		sessionData, _ := json.Marshal(session)
+		key := fmt.Sprintf("infer:session:%s", sessionID)
+		s.redisClient.Set(ctx, key, sessionData, 5*time.Minute)
+	}
+
+	fmt.Printf("[InferV3] 生成选项 user=%s session=%s options=%d\n", userID, sessionID, len(optionsRaw))
+
+	// 发送选项事件
+	if callback != nil {
+		callback(&InferenceStreamEvent{
+			Type: "choice",
+			Data: map[string]interface{}{
+				"session_id":    sessionID,
+				"question":      question,
+				"options":       optionsRaw,
+				"default_index": defaultIdx,
+			},
+		})
+	}
+
+	return &model.InferenceResponse{
+		Phase:      model.InferencePhaseAwaitingChoice,
+		SessionID:  sessionID,
+		Question:   question,
+		Options:    optionsRaw,
+		DefaultIdx: defaultIdx,
+	}, nil
+}
+
+// buildDefaultResponse 构建默认响应（兜底）
+func (s *StatusInferenceAgent) buildDefaultResponse(userID string) *model.InferenceResponse {
+	result := &model.CurrentStatusInference{
 		Emoji:      "🤔",
 		Activity:   "状态未知",
 		IsAvailable: false,
 		Confidence: "low",
-		Reasoning:  "Agent 未通过工具输出结构化结果",
+		Reasoning:  "推断循环未产出结果",
 		InferredAt: time.Now().UnixMilli(),
 	}
+	return &model.InferenceResponse{
+		Phase:  model.InferencePhaseCompleted,
+		Result: result,
+	}
+}
+
+// buildInferenceSystemPrompt 构建 V3 系统提示词（注入预聚合数据）
+func (s *StatusInferenceAgent) buildInferenceSystemPrompt(contextText string) string {
+	now := time.Now()
+	weekdays := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
+
+	return fmt.Sprintf(`你是「有空」状态推断引擎。根据实时设备信号推断用户此刻在做什么。
+
+当前时刻：%s %s %s（%s）
+
+%s
+
+# 推断方法
+1. 首先看实时设备信号（屏幕活动类型、位置、运动、日历），这是此刻状态的直接证据
+2. 结合时间（工作日/周末、上午/下午/深夜）判断最合理的活动
+3. 用户修正历史中纠正过的推断不能再犯
+4. 历史记录和时刻表仅作为辅助参考，不能覆盖实时信号的判断
+
+# 信号→活动映射
+- screen.activity_type=entertainment + home → 刷手机/刷剧/打游戏（具体取决于 session_duration）
+- screen.activity_type=productivity + work → 工作/办公
+- screen.activity_type=communication → 聊天/微信
+- location=transit → 在路上/通勤
+- screen.is_active=false + home + 深夜/凌晨 → 睡觉/休息
+- screen.is_active=false + home + last_active_minutes_ago>60 → 休息/小憩/睡觉
+- movement.activity=running → 跑步/运动
+- calendar.has_current_event=true → 参考日历事件名称
+- location=leisure → 外出/休闲（不是"在家"）
+
+# is_available 判断规则
+- true: 在家+娱乐/休闲/通讯、在家+空闲、充电中无事、已完成工作
+- false: 工作中、开会、通勤、睡觉、专注模式、运动中
+
+# 输出规则
+- 默认用 finalize_status（绝大多数情况）
+- activity 2-6字口语化
+- emoji 应匹配地点和活动（在家用🏠，公司用🏢，路上用🚗）
+- 只在实时传感器信号本身矛盾且无法判断时才用 ask_user_choice
+- 历史记录与当前信号不一致时，以当前信号为准`,
+		now.Format("2006-01-02"),
+		weekdays[now.Weekday()],
+		now.Format("15:04"),
+		getInferTimePeriod(now),
+		contextText,
+	)
+}
+
+// buildDeps 构建工具依赖
+func (s *StatusInferenceAgent) buildDeps(userID string) *agent.InferenceToolDeps {
+	return &agent.InferenceToolDeps{
+		RedisClient:        s.redisClient,
+		MemoryRepo:         s.memoryRepo,
+		ScheduleRepo:       s.scheduleRepo,
+		UserProfileService: s.userProfileService,
+		UserID:             userID,
+	}
+}
+
+// convertInferenceResult 从 finalize_status 的工具结果中提取 CurrentStatusInference
+func (s *StatusInferenceAgent) convertInferenceResult(result *agent.ToolResult) *model.CurrentStatusInference {
+	if result == nil || result.Data == nil {
+		return nil
+	}
+
+	dataMap, ok := result.Data.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	resultObj, ok := dataMap["result"]
+	if !ok {
+		return nil
+	}
+
+	if inference, ok := resultObj.(*model.CurrentStatusInference); ok {
+		return inference
+	}
+
+	data, err := json.Marshal(resultObj)
+	if err != nil {
+		return nil
+	}
+	var inference model.CurrentStatusInference
+	if json.Unmarshal(data, &inference) != nil {
+		return nil
+	}
+	return &inference
+}
+
+// getInferToolDescription 获取工具的友好描述
+func (s *StatusInferenceAgent) getInferToolDescription(toolName string) string {
+	descriptions := map[string]string{
+		"finalize_status":  "✅ 正在生成推断结果...",
+		"ask_user_choice":  "🤔 信号不够明确，准备让你选...",
+	}
+	if desc, ok := descriptions[toolName]; ok {
+		return desc
+	}
+	return "正在处理..."
+}
+
+// ========== 偏好学习 ==========
+
+// learnFromChoice 从用户选择中学习偏好
+func (s *StatusInferenceAgent) learnFromChoice(ctx context.Context, userID string, session *model.InferenceSession, selectedIdx int) {
+	if s.redisClient == nil || s.llmAdapter == nil || len(session.Options) < 2 {
+		return
+	}
+
+	selected := session.Options[selectedIdx]
+	var notSelected []string
+	for i, opt := range session.Options {
+		if i != selectedIdx {
+			notSelected = append(notSelected, fmt.Sprintf("%s %s", opt.Emoji, opt.Activity))
+		}
+	}
+
+	// 用 LLM 提炼偏好
+	prompt := fmt.Sprintf(`用户被问"%s"时，选择了"%s %s"，没有选"%s"。
+请用一句话描述这个偏好规则（15字以内），例如"晚上在家偏好说'刷剧'而非'看手机'"。
+只输出规则，不要其他内容。`, session.Question, selected.Emoji, selected.Activity, strings.Join(notSelected, "、"))
+
+	prefRule, err := s.llmAdapter.Chat(ctx, prompt)
+	if err != nil || prefRule == "" {
+		return
+	}
+	prefRule = strings.TrimSpace(prefRule)
+
+	// 追加到用户偏好
+	prefKey := fmt.Sprintf("infer:pref:%s", userID)
+	var pref model.UserInferencePreference
+	data, err := s.redisClient.GetBytes(ctx, prefKey)
+	if err == nil && len(data) > 0 {
+		json.Unmarshal(data, &pref)
+	}
+	pref.UserID = userID
+	pref.Preferences = append(pref.Preferences, prefRule)
+	// 最多保留 10 条偏好
+	if len(pref.Preferences) > 10 {
+		pref.Preferences = pref.Preferences[len(pref.Preferences)-10:]
+	}
+	pref.UpdatedAt = time.Now().UnixMilli()
+
+	prefData, _ := json.Marshal(pref)
+	s.redisClient.Set(ctx, prefKey, prefData, 30*24*time.Hour) // 30 天有效
+
+	fmt.Printf("[InferV3] 学到偏好 user=%s rule=%s\n", userID, prefRule)
+}
+
+// ========== 辅助函数 ==========
+
+// getInferTimePeriod 获取当前时段标签
+func getInferTimePeriod(t time.Time) string {
+	hour := t.Hour()
+	switch {
+	case hour >= 5 && hour < 8:
+		return "清晨"
+	case hour >= 8 && hour < 11:
+		return "上午"
+	case hour >= 11 && hour < 13:
+		return "中午"
+	case hour >= 13 && hour < 17:
+		return "下午"
+	case hour >= 17 && hour < 19:
+		return "傍晚"
+	case hour >= 19 && hour < 23:
+		return "晚上"
+	default:
+		return "深夜"
+	}
+}
+
+// setInferenceLock 设置推断锁（防止 StatusScheduler 立即覆盖）
+func (s *StatusInferenceAgent) setInferenceLock(ctx context.Context, userID string) {
+	if s.redisClient == nil {
+		return
+	}
+	key := fmt.Sprintf("infer:lock:%s", userID)
+	s.redisClient.Set(ctx, key, "1", 10*time.Minute)
 }
 
 // cacheSensorData 缓存传感器数据到 Redis
@@ -399,76 +617,102 @@ func (s *StatusInferenceAgent) cacheSensorData(ctx context.Context, userID strin
 	s.redisClient.Set(ctx, extKey, jsonData, 30*time.Minute)
 }
 
+// savePrevInference 保存上次推断结果（用于时间连续性）
+func (s *StatusInferenceAgent) savePrevInference(ctx context.Context, userID string, result *model.CurrentStatusInference) {
+	if s.redisClient == nil || result == nil {
+		return
+	}
+	key := fmt.Sprintf("infer:prev:%s", userID)
+	data, err := json.Marshal(result)
+	if err != nil {
+		return
+	}
+	s.redisClient.Set(ctx, key, data, 2*time.Hour) // 2 小时内有效
+}
+
+// enrichWithGif 为推断结果添加 giphy_query
+func (s *StatusInferenceAgent) enrichWithGif(ctx context.Context, result *model.CurrentStatusInference) {
+	giphyQuery := s.translateToGiphyQuery(ctx, result.Activity)
+	if giphyQuery != "" {
+		result.GiphyQuery = giphyQuery
+	}
+}
+
+// translateToGiphyQuery 将中文活动描述翻译为英文 Giphy 搜索词
+func (s *StatusInferenceAgent) translateToGiphyQuery(ctx context.Context, activity string) string {
+	if activity == "" {
+		return ""
+	}
+
+	// 先查缓存
+	cacheKey := fmt.Sprintf("giphy:query:%s", tencent.MD5Key(activity))
+	if s.redisClient != nil {
+		cached, err := s.redisClient.Get(ctx, cacheKey)
+		if err == nil && cached != "" {
+			return cached
+		}
+	}
+
+	// 用 LLM 翻译
+	if s.llmClient == nil {
+		return ""
+	}
+
+	prompt := fmt.Sprintf(`You are generating a Giphy GIF search query. Given a user's current activity, output 2-4 English keywords that would find a relevant, visually matching animated GIF on Giphy.
+
+Rules:
+- Focus on the ACTION or SCENE, not greetings or time of day
+- Use concrete visual words (e.g. "sleeping cozy bed" not "chill at home")
+- Prefer verbs and objects that show up well in animations
+- Do NOT include words like "good morning", "hello", "hi" etc.
+- Only output the search query, nothing else
+
+Activity: %s`, activity)
+
+	query, err := s.llmClient.Chat(ctx, prompt)
+	if err != nil {
+		fmt.Printf("[Infer] LLM 翻译失败: %v\n", err)
+		return ""
+	}
+
+	query = strings.TrimSpace(query)
+	query = strings.Trim(query, "\"'`")
+
+	// 缓存翻译结果
+	if s.redisClient != nil && query != "" {
+		s.redisClient.Set(ctx, cacheKey, query, 24*time.Hour)
+	}
+
+	return query
+}
+
 // logInference 记录推断日志
-func (s *StatusInferenceAgent) logInference(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest, response *agent.AgentResponse, result *model.CurrentStatusInference) {
-	log := &model.InferenceLog{
-		UserID:     userID,
-		Timestamp:  time.Now(),
-		Iterations: response.Iterations,
-	}
-
-	if sensorData != nil {
-		data, _ := json.Marshal(sensorData)
-		log.SensorData = string(data)
-	}
-	if result != nil {
-		data, _ := json.Marshal(result)
-		log.InitialResult = string(data)
-		log.Confidence = result.Confidence
-	}
-	log.ToolsUsed = response.ToolsUsed
-
-	// 异步保存到 Redis（轻量级，避免阻塞）
+func (s *StatusInferenceAgent) logInference(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest, result *model.CurrentStatusInference) {
 	go func() {
 		bgCtx := context.Background()
+		log := map[string]interface{}{
+			"user_id":   userID,
+			"timestamp": time.Now().Format(time.RFC3339),
+			"mode":      "v3_single_call",
+		}
+		if result != nil {
+			log["emoji"] = result.Emoji
+			log["activity"] = result.Activity
+			log["confidence"] = result.Confidence
+			log["reasoning"] = result.Reasoning
+		}
+		if sensorData != nil {
+			data, _ := json.Marshal(sensorData)
+			log["sensor_data"] = string(data)
+		}
+
 		key := fmt.Sprintf("inference:log:%s:%d", userID, time.Now().Unix())
 		data, _ := json.Marshal(log)
 		if s.redisClient != nil {
-			s.redisClient.Set(bgCtx, key, data, 7*24*time.Hour) // 保留7天
+			s.redisClient.Set(bgCtx, key, data, 7*24*time.Hour)
 		}
+
+		fmt.Printf("[InferV3] 推断完成 user=%s emoji=%s activity=%s confidence=%s\n",
+			userID, result.Emoji, result.Activity, result.Confidence)
 	}()
-
-	fmt.Printf("[InferenceAgent] 推断完成 user=%s iterations=%d tools=%v confidence=%s\n",
-		userID, response.Iterations, response.ToolsUsed, log.Confidence)
-}
-
-// ========== 辅助函数 ==========
-
-func getToolDisplayName(toolName string) string {
-	names := map[string]string{
-		"query_sensor_data":      "传感器数据",
-		"query_status_history":   "历史状态",
-		"query_schedule_context": "时刻表",
-		"ask_user_confirmation":  "用户确认",
-		"finalize_status":        "生成结果",
-	}
-	if name, ok := names[toolName]; ok {
-		return name
-	}
-	return toolName
-}
-
-func summarizeToolResult(toolName string, result *agent.ToolResult) string {
-	if result == nil || !result.Success {
-		return "查询失败"
-	}
-
-	switch toolName {
-	case "query_sensor_data":
-		return "传感器数据已获取"
-	case "query_schedule_context":
-		if data, ok := result.Data.(map[string]interface{}); ok {
-			if hasSchedule, ok := data["has_schedule"].(bool); ok && hasSchedule {
-				return "找到今日时刻表"
-			}
-			return "今天没有时刻表"
-		}
-		return "时刻表查询完成"
-	case "query_status_history":
-		return "历史状态已获取"
-	case "finalize_status":
-		return "推断完成"
-	default:
-		return "工具执行完成"
-	}
 }

@@ -56,6 +56,7 @@ type ScheduleItemInfo struct {
 	EndTime   string `json:"end_time"`   // HH:MM 格式
 	Emoji     string `json:"emoji"`
 	Status    string `json:"status"`
+	Available *bool  `json:"available,omitempty"` // nil=不指定（保留原值），true=有空，false=没空
 }
 
 // UserInfo 用户信息

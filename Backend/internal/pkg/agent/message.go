@@ -90,6 +90,23 @@ func NewSystemMessage(content string) AgentMessage {
 	}
 }
 
+// NewAssistantMessageWithToolCall 创建带单个工具调用的助手消息（用于 few-shot 示例）
+func NewAssistantMessageWithToolCall(toolName, argsJSON string) AgentMessage {
+	return AgentMessage{
+		Role: "assistant",
+		ToolCalls: []ToolCall{
+			{
+				ID:   "fewshot_" + toolName,
+				Type: "function",
+				Function: ToolCallFunction{
+					Name:      toolName,
+					Arguments: argsJSON,
+				},
+			},
+		},
+	}
+}
+
 // EstimateTokens 估算消息的 Token 数量（简单估算）
 func (m *AgentMessage) EstimateTokens() int {
 	// 简单估算：平均每个字符约 0.3 token（中英文混合）

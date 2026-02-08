@@ -93,6 +93,11 @@ func (r *RedisClient) GetBytes(ctx context.Context, key string) ([]byte, error) 
 	return r.client.Get(ctx, key).Bytes()
 }
 
+// SetNX 仅在 key 不存在时设置值（用于分布式锁）
+func (r *RedisClient) SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) (bool, error) {
+	return r.client.SetNX(ctx, key, value, expiration).Result()
+}
+
 // IsNil 检查错误是否为 key 不存在
 func IsNil(err error) bool {
 	return err != nil && err.Error() == "redis: nil"

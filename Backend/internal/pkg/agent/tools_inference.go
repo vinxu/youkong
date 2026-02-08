@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"youkong/internal/model"
@@ -13,447 +14,49 @@ import (
 
 // InferenceToolDeps 推断工具依赖
 type InferenceToolDeps struct {
-	RedisClient  *tencent.RedisClient
-	MemoryRepo   *repository.MemoryRepository
-	ScheduleRepo *repository.ScheduleRepository
-	UserID       string
-
-	// 用户确认回调：发送问题到前端，等待用户回答
-	// 返回用户的回答字符串，超时返回空字符串
-	AskUserFunc func(ctx context.Context, question string, options []string, contextMsg string) (string, error)
-
-	// 保存最终结果的回调
-	SaveResultFunc func(ctx context.Context, result *model.CurrentStatusInference) error
+	RedisClient        *tencent.RedisClient
+	MemoryRepo         *repository.MemoryRepository
+	ScheduleRepo       *repository.ScheduleRepository
+	UserProfileService UserProfileProvider
+	UserID             string
 }
 
-// InferenceTools 返回推断专用工具列表
+// UserProfileProvider 用户画像查询接口（避免循环依赖）
+type UserProfileProvider interface {
+	GetProfile(userID string) (*model.UserProfileData, error)
+}
+
+// InferenceTools 返回 V3 推断工具列表（2 个输出工具）
 func InferenceTools(deps *InferenceToolDeps) []*Tool {
 	return []*Tool{
-		inferQuerySensorDataTool(deps),
-		inferQueryStatusHistoryTool(deps),
-		inferQueryScheduleContextTool(deps),
-		inferAskUserConfirmationTool(deps),
-		inferFinalizeStatusTool(deps),
+		finalizeStatusTool(deps),
+		askUserChoiceTool(deps),
 	}
 }
 
-// ========== 工具 1: query_sensor_data ==========
+// ========== 工具 1: finalize_status ==========
 
-func inferQuerySensorDataTool(deps *InferenceToolDeps) *Tool {
-	return &Tool{
-		Name: "query_sensor_data",
-		Description: `查询用户当前的传感器数据（结构化 JSON 输出）。
-
-返回数据包含：
-- screen: 屏幕使用数据（is_active, activity_type, session_duration_minutes, last_active_minutes_ago）
-- location: 位置数据（place_type, place_name, at_place_since_minutes, city）
-- calendar: 日历数据（has_current_event, current_event_title, event_end_minutes, next_event_in_minutes, today_remaining_count）
-- movement: 运动数据（is_moving, movement_type, steps_today, stationary_minutes）
-- device: 设备状态（battery_level, is_charging, is_low_power_mode, is_focus_mode_on, is_headphones_connected, network_type）
-
-data_type 参数可以过滤返回的数据维度。`,
-		Parameters: ToolParameters{
-			Type: "object",
-			Properties: map[string]ToolParam{
-				"data_type": {
-					Type:        "string",
-					Description: "数据类型：all(全部)、location(位置)、screen(屏幕)、calendar(日历)、movement(运动)、device(设备)",
-					Enum:        []string{"all", "location", "screen", "calendar", "movement", "device"},
-				},
-			},
-			Required: []string{"data_type"},
-		},
-		Handler: createQuerySensorDataHandler(deps),
-	}
-}
-
-func createQuerySensorDataHandler(deps *InferenceToolDeps) ToolHandler {
-	return func(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
-		dataType, _ := args["data_type"].(string)
-		if dataType == "" {
-			dataType = "all"
-		}
-
-		// 从 Redis 获取传感器数据
-		sensorData := getCachedSensorForInference(ctx, deps.RedisClient, deps.UserID)
-		if sensorData == nil {
-			return &ToolResult{
-				Success: true,
-				Data:    map[string]string{"message": "无传感器数据，用户可能未上报或数据已过期"},
-			}, nil
-		}
-
-		// 根据 data_type 过滤
-		result := make(map[string]interface{})
-
-		if dataType == "all" || dataType == "screen" {
-			if sensorData.Screen != nil {
-				result["screen"] = sensorData.Screen
-			}
-		}
-		if dataType == "all" || dataType == "location" {
-			loc := map[string]interface{}{}
-			if sensorData.Location != nil {
-				loc["place_type"] = sensorData.Location.PlaceType
-				loc["at_place_since_minutes"] = sensorData.Location.AtPlaceSinceMinutes
-				if sensorData.Location.City != "" {
-					loc["city"] = sensorData.Location.City
-				}
-			}
-			if sensorData.ExtendedLocation != nil {
-				loc["place_type"] = sensorData.ExtendedLocation.PlaceType
-				loc["at_place_since_minutes"] = sensorData.ExtendedLocation.AtPlaceSinceMinutes
-				if sensorData.ExtendedLocation.PlaceName != "" {
-					loc["place_name"] = sensorData.ExtendedLocation.PlaceName
-				}
-			}
-			if len(loc) > 0 {
-				result["location"] = loc
-			}
-		}
-		if dataType == "all" || dataType == "calendar" {
-			if sensorData.Calendar != nil {
-				result["calendar"] = sensorData.Calendar
-			}
-		}
-		if dataType == "all" || dataType == "movement" {
-			if sensorData.Movement != nil {
-				result["movement"] = sensorData.Movement
-			}
-		}
-		if dataType == "all" || dataType == "device" {
-			device := map[string]interface{}{}
-			if sensorData.Battery != nil {
-				device["battery_level"] = sensorData.Battery.BatteryLevel
-				device["is_charging"] = sensorData.Battery.IsCharging
-			}
-			if sensorData.Mode != nil {
-				device["is_low_power_mode"] = sensorData.Mode.IsLowPowerMode
-				device["is_focus_mode_on"] = sensorData.Mode.IsFocusModeOn
-			}
-			if sensorData.Connection != nil {
-				device["is_headphones_connected"] = sensorData.Connection.IsHeadphonesConnected
-				device["network_type"] = sensorData.Connection.NetworkType
-			}
-			if len(device) > 0 {
-				result["device"] = device
-			}
-		}
-
-		if len(result) == 0 {
-			return &ToolResult{
-				Success: true,
-				Data:    map[string]string{"message": "请求的数据维度无数据"},
-			}, nil
-		}
-
-		return &ToolResult{
-			Success:       true,
-			Data:          result,
-			TokenEstimate: estimateTokens(result),
-		}, nil
-	}
-}
-
-// ========== 工具 2: query_status_history ==========
-
-func inferQueryStatusHistoryTool(deps *InferenceToolDeps) *Tool {
-	return &Tool{
-		Name: "query_status_history",
-		Description: `查询用户的历史状态规律，用于辅助推断。
-
-query_type 选项：
-- recent: 最近的状态记录（用户选择或修正过的状态）
-- corrections: 用户修正过的状态映射（AI 推断 → 用户修正，最重要的参考）`,
-		Parameters: ToolParameters{
-			Type: "object",
-			Properties: map[string]ToolParam{
-				"query_type": {
-					Type:        "string",
-					Description: "查询类型：recent(最近状态)、corrections(修正记录)",
-					Enum:        []string{"recent", "corrections"},
-				},
-				"limit": {
-					Type:        "number",
-					Description: "返回数量限制，默认 10",
-					Default:     10,
-				},
-			},
-			Required: []string{"query_type"},
-		},
-		Handler: createQueryStatusHistoryHandler(deps),
-	}
-}
-
-func createQueryStatusHistoryHandler(deps *InferenceToolDeps) ToolHandler {
-	return func(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
-		queryType, _ := args["query_type"].(string)
-		limit := 10
-		if l, ok := args["limit"].(float64); ok && l > 0 {
-			limit = int(l)
-		}
-
-		switch queryType {
-		case "recent":
-			// 查询最近的用户选择状态记忆
-			if deps.MemoryRepo == nil {
-				return &ToolResult{Success: true, Data: map[string]string{"message": "记忆服务未配置"}}, nil
-			}
-			memories, err := deps.MemoryRepo.GetRecentUserStatusMemory(ctx, deps.UserID, limit)
-			if err != nil {
-				return &ToolResult{Success: false, Error: fmt.Sprintf("查询失败: %v", err)}, nil
-			}
-			if len(memories) == 0 {
-				return &ToolResult{Success: true, Data: map[string]string{"message": "无历史状态记录（新用户）"}}, nil
-			}
-			// 格式化输出
-			entries := make([]map[string]string, 0, len(memories))
-			for _, m := range memories {
-				entries = append(entries, map[string]string{
-					"emoji":      m.Emoji,
-					"status":     m.Status,
-					"created_at": m.CreatedAt.Format("01-02 15:04"),
-				})
-			}
-			return &ToolResult{Success: true, Data: entries, TokenEstimate: estimateTokens(entries)}, nil
-
-		case "corrections":
-			// 查询用户修正记录
-			key := fmt.Sprintf("agent:status_feedback:%s", deps.UserID)
-			data, err := deps.RedisClient.GetBytes(ctx, key)
-			if err != nil || len(data) == 0 {
-				return &ToolResult{Success: true, Data: map[string]string{"message": "无修正记录"}}, nil
-			}
-			var corrections []*model.StatusMemoryEntry
-			if err := json.Unmarshal(data, &corrections); err != nil {
-				return &ToolResult{Success: false, Error: "解析修正记录失败"}, nil
-			}
-			if len(corrections) > limit {
-				corrections = corrections[:limit]
-			}
-			// 格式化
-			entries := make([]map[string]string, 0, len(corrections))
-			for _, c := range corrections {
-				entry := map[string]string{
-					"corrected_emoji":    c.CorrectedEmoji,
-					"corrected_activity": c.CorrectedActivity,
-					"created_at":         c.CreatedAt,
-				}
-				if c.OriginalEmoji != "" {
-					entry["original_emoji"] = c.OriginalEmoji
-					entry["original_activity"] = c.OriginalActivity
-				}
-				if c.CorrectedPlace != "" {
-					entry["corrected_place"] = c.CorrectedPlace
-				}
-				entries = append(entries, entry)
-			}
-			return &ToolResult{Success: true, Data: entries, TokenEstimate: estimateTokens(entries)}, nil
-
-		default:
-			return &ToolResult{Success: false, Error: "无效的 query_type"}, nil
-		}
-	}
-}
-
-// ========== 工具 3: query_schedule_context ==========
-
-func inferQueryScheduleContextTool(deps *InferenceToolDeps) *Tool {
-	return &Tool{
-		Name: "query_schedule_context",
-		Description: `查询用户的时刻表上下文。
-返回当前时间段是否有时刻表安排、当前项和下一项的内容。
-时刻表是用户自己设定或 AI 推测的一天状态时间线。`,
-		Parameters: ToolParameters{
-			Type:       "object",
-			Properties: map[string]ToolParam{},
-		},
-		Handler: createQueryScheduleContextHandler(deps),
-	}
-}
-
-func createQueryScheduleContextHandler(deps *InferenceToolDeps) ToolHandler {
-	return func(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
-		if deps.ScheduleRepo == nil {
-			return &ToolResult{Success: true, Data: map[string]string{"message": "时刻表服务未配置"}}, nil
-		}
-
-		now := time.Now()
-		currentTime := now.Format("15:04")
-		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-
-		schedule, err := deps.ScheduleRepo.GetActiveByUserAndDate(ctx, deps.UserID, today)
-		if err != nil || schedule == nil || len(schedule.Items) == 0 {
-			return &ToolResult{
-				Success: true,
-				Data: map[string]interface{}{
-					"has_schedule": false,
-					"message":      "今天没有时刻表",
-				},
-			}, nil
-		}
-
-		result := map[string]interface{}{
-			"has_schedule": true,
-			"total_items":  len(schedule.Items),
-		}
-
-		// 找当前时段和下一个时段
-		for i, item := range schedule.Items {
-			inRange := false
-			if item.EndTime < item.StartTime {
-				// 跨午夜
-				inRange = currentTime >= item.StartTime || currentTime < item.EndTime
-			} else {
-				inRange = currentTime >= item.StartTime && currentTime < item.EndTime
-			}
-
-			if inRange {
-				result["current_item"] = map[string]interface{}{
-					"start_time":  item.StartTime,
-					"end_time":    item.EndTime,
-					"emoji":       item.Emoji,
-					"status":      item.Status,
-					"is_ai_guess": item.IsAIGuess,
-				}
-				// 下一项
-				if i+1 < len(schedule.Items) {
-					next := schedule.Items[i+1]
-					result["next_item"] = map[string]interface{}{
-						"start_time": next.StartTime,
-						"end_time":   next.EndTime,
-						"emoji":      next.Emoji,
-						"status":     next.Status,
-					}
-				}
-				break
-			}
-		}
-
-		if _, ok := result["current_item"]; !ok {
-			result["message"] = "当前时间不在任何时段内"
-		}
-
-		return &ToolResult{
-			Success:       true,
-			Data:          result,
-			TokenEstimate: estimateTokens(result),
-		}, nil
-	}
-}
-
-// ========== 工具 4: ask_user_confirmation ==========
-
-func inferAskUserConfirmationTool(deps *InferenceToolDeps) *Tool {
-	return &Tool{
-		Name: "ask_user_confirmation",
-		Description: `向用户提问以确认当前状态。仅在以下情况使用：
-- 传感器数据互相矛盾
-- 置信度很低（无传感器数据、新用户）
-- 一次推断最多问 1 个问题
-
-问题要简短具体，最多给 3 个选项。`,
-		Parameters: ToolParameters{
-			Type: "object",
-			Properties: map[string]ToolParam{
-				"question": {
-					Type:        "string",
-					Description: "问用户的问题，简短具体，如「你现在是在工作吗？」",
-				},
-				"options": {
-					Type:        "array",
-					Description: "选项列表，最多3个，如[\"是的，在工作\", \"不是，在休息\", \"其他\"]",
-					Items:       &ToolParam{Type: "string"},
-				},
-				"context": {
-					Type:        "string",
-					Description: "为什么要问（展示给用户看的上下文说明）",
-				},
-			},
-			Required: []string{"question", "options"},
-		},
-		Handler: createAskUserConfirmationHandler(deps),
-	}
-}
-
-func createAskUserConfirmationHandler(deps *InferenceToolDeps) ToolHandler {
-	return func(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
-		question, _ := args["question"].(string)
-		contextMsg, _ := args["context"].(string)
-
-		var options []string
-		if opts, ok := args["options"].([]interface{}); ok {
-			for _, opt := range opts {
-				if s, ok := opt.(string); ok {
-					options = append(options, s)
-				}
-			}
-		}
-
-		if question == "" {
-			return &ToolResult{Success: false, Error: "question 不能为空"}, nil
-		}
-
-		// 如果没有配置 AskUserFunc，返回超时提示
-		if deps.AskUserFunc == nil {
-			return &ToolResult{
-				Success: true,
-				Data: map[string]interface{}{
-					"answer":   "",
-					"timeout":  true,
-					"message":  "用户确认功能未启用，请基于现有数据做最佳推测",
-				},
-			}, nil
-		}
-
-		// 调用用户确认回调
-		answer, err := deps.AskUserFunc(ctx, question, options, contextMsg)
-		if err != nil {
-			return &ToolResult{
-				Success: true,
-				Data: map[string]interface{}{
-					"answer":  "",
-					"timeout": true,
-					"message": "等待用户回答超时，请基于现有数据做最佳推测",
-				},
-			}, nil
-		}
-
-		return &ToolResult{
-			Success: true,
-			Data: map[string]interface{}{
-				"answer":  answer,
-				"timeout": false,
-			},
-		}, nil
-	}
-}
-
-// ========== 工具 5: finalize_status ==========
-
-func inferFinalizeStatusTool(deps *InferenceToolDeps) *Tool {
+func finalizeStatusTool(deps *InferenceToolDeps) *Tool {
 	return &Tool{
 		Name: "finalize_status",
-		Description: `输出最终推断结果。必须通过此工具输出结果。
+		Description: `Use this tool to output the final status inference. This is the DEFAULT and PREFERRED tool — use it in the vast majority of cases.
 
-参数说明：
-- emoji: 1-3个emoji组合，如"🎮"或"🏠🛋️"
-- activity: 2-6字活动描述，如"打游戏"、"在家休息"
-- place: 可选，地点描述，如"家里"、"公司"
-- is_available: 是否有空（true=有空/闲/可约, false=忙碌/不方便打扰）
-- confidence: 置信度 high/medium/low
-- duration_hint: 可选，预计持续时长，如"约2小时"
-- reasoning: 推理依据简述`,
+Use this tool when:
+- You have any real-time sensor signal (screen, location, movement, calendar) to base your inference on.
+- Historical records differ from current signals — trust current signals and finalize.
+- You are fairly confident, or even if confidence is low — just set confidence="low".
+
+IMPORTANT: Call exactly once per inference. Base your inference primarily on real-time device signals, not historical records.`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
 				"emoji": {
 					Type:        "string",
-					Description: "1-3个emoji",
+					Description: "1-3个emoji组合",
 				},
 				"activity": {
 					Type:        "string",
-					Description: "活动描述，2-6字",
+					Description: "活动描述，2-6字口语化",
 				},
 				"place": {
 					Type:        "string",
@@ -468,13 +71,9 @@ func inferFinalizeStatusTool(deps *InferenceToolDeps) *Tool {
 					Description: "置信度",
 					Enum:        []string{"high", "medium", "low"},
 				},
-				"duration_hint": {
-					Type:        "string",
-					Description: "预计持续时长（可选）",
-				},
 				"reasoning": {
 					Type:        "string",
-					Description: "推理依据",
+					Description: "推理依据，一句话",
 				},
 			},
 			Required: []string{"emoji", "activity", "is_available", "confidence"},
@@ -490,7 +89,6 @@ func createFinalizeStatusHandler(deps *InferenceToolDeps) ToolHandler {
 		place, _ := args["place"].(string)
 		isAvailable, _ := args["is_available"].(bool)
 		confidence, _ := args["confidence"].(string)
-		durationHint, _ := args["duration_hint"].(string)
 		reasoning, _ := args["reasoning"].(string)
 
 		if emoji == "" || activity == "" {
@@ -501,21 +99,13 @@ func createFinalizeStatusHandler(deps *InferenceToolDeps) ToolHandler {
 		}
 
 		result := &model.CurrentStatusInference{
-			Emoji:        emoji,
-			Activity:     activity,
-			Place:        place,
-			IsAvailable:  isAvailable,
-			DurationHint: durationHint,
-			Confidence:   confidence,
-			Reasoning:    reasoning,
-			InferredAt:   time.Now().UnixMilli(),
-		}
-
-		// 保存结果
-		if deps.SaveResultFunc != nil {
-			if err := deps.SaveResultFunc(ctx, result); err != nil {
-				fmt.Printf("[finalize_status] 保存结果失败: %v\n", err)
-			}
+			Emoji:       emoji,
+			Activity:    activity,
+			Place:       place,
+			IsAvailable: isAvailable,
+			Confidence:  confidence,
+			Reasoning:   reasoning,
+			InferredAt:  time.Now().UnixMilli(),
 		}
 
 		return &ToolResult{
@@ -523,10 +113,482 @@ func createFinalizeStatusHandler(deps *InferenceToolDeps) ToolHandler {
 			Data: map[string]interface{}{
 				"status":  "finalized",
 				"result":  result,
-				"message": "推断结果已保存",
+				"message": "推断结果已生成",
 			},
+			ShouldStop: true,
 		}, nil
 	}
+}
+
+// ========== 工具 2: ask_user_choice ==========
+
+func askUserChoiceTool(deps *InferenceToolDeps) *Tool {
+	return &Tool{
+		Name: "ask_user_choice",
+		Description: `Use this tool ONLY when real-time sensor signals directly contradict each other and there is genuinely no way to determine the most likely state.
+
+Do NOT use when:
+- You can make a reasonable inference from the signals — use finalize_status instead.
+- Historical records conflict with current signals — trust current signals and use finalize_status.
+- You have any screen or location data — that is usually enough to finalize.
+- You are uncertain but one option is more likely than others — just finalize with lower confidence.
+
+IMPORTANT: This tool should be used in less than 10% of cases. When in doubt, use finalize_status.`,
+		Parameters: ToolParameters{
+			Type: "object",
+			Properties: map[string]ToolParam{
+				"question": {
+					Type:        "string",
+					Description: "向用户提问的简短问题，如'你现在在做什么？'",
+				},
+				"options": {
+					Type:        "array",
+					Description: "2-3个选项，每个选项是 {emoji, activity, reason} 对象",
+					Items: &ToolParam{
+						Type:        "object",
+						Description: "选项对象，含 emoji(string)、activity(string)、reason(string)",
+					},
+				},
+				"default_index": {
+					Type:        "integer",
+					Description: "默认选中的选项索引(0-based)，最可能的排第一",
+				},
+			},
+			Required: []string{"question", "options"},
+		},
+		Handler: createAskUserChoiceHandler(deps),
+	}
+}
+
+func createAskUserChoiceHandler(deps *InferenceToolDeps) ToolHandler {
+	return func(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
+		question, _ := args["question"].(string)
+		if question == "" {
+			question = "你现在在做什么？"
+		}
+
+		defaultIdx := 0
+		if idx, ok := args["default_index"].(float64); ok {
+			defaultIdx = int(idx)
+		}
+
+		// 解析 options 数组
+		optionsRaw, _ := args["options"].([]interface{})
+		if len(optionsRaw) < 2 {
+			return &ToolResult{Success: false, Error: "至少需要2个选项"}, nil
+		}
+
+		options := make([]model.InferenceOption, 0, len(optionsRaw))
+		for i, opt := range optionsRaw {
+			optMap, ok := opt.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			emoji, _ := optMap["emoji"].(string)
+			activity, _ := optMap["activity"].(string)
+			reason, _ := optMap["reason"].(string)
+			if emoji == "" || activity == "" {
+				continue
+			}
+			options = append(options, model.InferenceOption{
+				Index:    i,
+				Emoji:    emoji,
+				Activity: activity,
+				Reason:   reason,
+			})
+		}
+
+		if len(options) < 2 {
+			return &ToolResult{Success: false, Error: "有效选项不足2个"}, nil
+		}
+
+		return &ToolResult{
+			Success: true,
+			Data: map[string]interface{}{
+				"status":        "awaiting_choice",
+				"question":      question,
+				"options":       options,
+				"default_index": defaultIdx,
+			},
+			ShouldStop: true,
+		}, nil
+	}
+}
+
+// ========== 预聚合: Go 代码收集所有数据源 ==========
+
+// PreGatherContext 预聚合所有推断数据源（Go 代码执行，~50ms）
+func PreGatherContext(ctx context.Context, deps *InferenceToolDeps) *model.V3InferenceContext {
+	ic := &model.V3InferenceContext{}
+
+	// 1. 设备信号（Redis 缓存）
+	ic.DeviceSignals = gatherDeviceSignals(ctx, deps)
+
+	// 2. 今日时刻表 + 修正记录 + 最近状态
+	gatherHistoryData(ctx, deps, ic)
+
+	// 3. 对话上下文
+	ic.Conversation = gatherConversation(ctx, deps)
+
+	// 4. 用户画像 + 核心记忆
+	gatherProfileData(ctx, deps, ic)
+
+	// 5. 上次推断结果
+	ic.PrevInference = gatherPrevInference(ctx, deps)
+
+	// 6. 用户偏好
+	ic.Preferences = gatherPreferences(ctx, deps)
+
+	return ic
+}
+
+// FormatContextForPrompt 将预聚合的上下文格式化为 prompt 注入文本
+// 数据段按推断优先级排列：实时信号 → 修正/偏好 → 时刻表 → 画像 → 历史参考
+func FormatContextForPrompt(ic *model.V3InferenceContext) string {
+	var sb strings.Builder
+
+	// === 优先级 1: 实时设备信号（最重要）===
+	if len(ic.DeviceSignals) > 0 {
+		sb.WriteString("# 实时设备信号（推断的主要依据）\n")
+		// 按固定顺序输出，避免 map 随机性
+		signalOrder := []string{"screen", "location", "movement", "calendar", "battery", "mode", "connection"}
+		for _, k := range signalOrder {
+			if v, ok := ic.DeviceSignals[k]; ok {
+				data, _ := json.Marshal(v)
+				sb.WriteString(fmt.Sprintf("- %s: %s\n", k, string(data)))
+			}
+		}
+	} else {
+		sb.WriteString("# 实时设备信号\n无（数据未上报）\n")
+	}
+
+	// === 优先级 2: 用户修正历史 ===
+	if len(ic.Corrections) > 0 {
+		sb.WriteString("\n# 用户修正历史（绝对不能再犯）\n")
+		for _, c := range ic.Corrections {
+			if c["original_emoji"] != "" {
+				sb.WriteString(fmt.Sprintf("- %s %s → 修正为 %s %s\n",
+					c["original_emoji"], c["original_activity"],
+					c["corrected_emoji"], c["corrected_activity"]))
+			} else {
+				sb.WriteString(fmt.Sprintf("- 用户主动设为 %s %s\n", c["corrected_emoji"], c["corrected_activity"]))
+			}
+		}
+	}
+
+	// 偏好
+	if len(ic.Preferences) > 0 {
+		sb.WriteString("\n# 用户偏好\n")
+		for _, p := range ic.Preferences {
+			sb.WriteString(fmt.Sprintf("- %s\n", p))
+		}
+	}
+
+	// === 优先级 3: 时刻表 ===
+	if len(ic.TodaySchedule) > 0 {
+		sb.WriteString("\n# 今日时刻表\n")
+		data, _ := json.Marshal(ic.TodaySchedule)
+		sb.WriteString(string(data))
+		sb.WriteString("\n")
+	}
+
+	// === 优先级 4: 用户画像 ===
+	if len(ic.Profile) > 0 {
+		sb.WriteString("\n# 用户画像\n")
+		for k, v := range ic.Profile {
+			sb.WriteString(fmt.Sprintf("- %s: %v\n", k, v))
+		}
+	}
+
+	// === 优先级 5: 历史参考（仅供参考，不能替代实时信号） ===
+	if len(ic.RecentStatuses) > 0 {
+		sb.WriteString("\n# 最近状态记录（仅供参考）\n")
+		// 最多显示 5 条
+		limit := len(ic.RecentStatuses)
+		if limit > 5 {
+			limit = 5
+		}
+		for _, s := range ic.RecentStatuses[:limit] {
+			sb.WriteString(fmt.Sprintf("- %s %s (%s)\n", s["emoji"], s["status"], s["created_at"]))
+		}
+	}
+
+	// 上次推断
+	if ic.PrevInference != nil {
+		sb.WriteString("\n# 上次推断（时间连续性参考）\n")
+		sb.WriteString(fmt.Sprintf("- %s %s (置信度: %s)\n",
+			ic.PrevInference.Emoji, ic.PrevInference.Activity, ic.PrevInference.Confidence))
+		if ic.PrevInference.Place != "" {
+			sb.WriteString(fmt.Sprintf("- 地点: %s\n", ic.PrevInference.Place))
+		}
+	}
+
+	// 对话上下文
+	if ic.Conversation != "" {
+		sb.WriteString("\n# 最近对话\n")
+		sb.WriteString(ic.Conversation)
+		sb.WriteString("\n")
+	}
+
+	// 核心记忆
+	if len(ic.CoreMemory) > 0 {
+		sb.WriteString("\n# 行为记忆\n")
+		for k, v := range ic.CoreMemory {
+			sb.WriteString(fmt.Sprintf("- %s: %v\n", k, v))
+		}
+	}
+
+	return sb.String()
+}
+
+// ========== 数据收集子函数 ==========
+
+func gatherDeviceSignals(ctx context.Context, deps *InferenceToolDeps) map[string]interface{} {
+	sensorData := getCachedSensorForInference(ctx, deps.RedisClient, deps.UserID)
+	if sensorData == nil {
+		return nil
+	}
+
+	result := make(map[string]interface{})
+
+	if sensorData.ExtendedLocation != nil {
+		loc := map[string]interface{}{
+			"place_type":             sensorData.ExtendedLocation.PlaceType,
+			"at_place_since_minutes": sensorData.ExtendedLocation.AtPlaceSinceMinutes,
+		}
+		if sensorData.ExtendedLocation.PlaceName != "" {
+			loc["place_name"] = sensorData.ExtendedLocation.PlaceName
+		}
+		result["location"] = loc
+	} else if sensorData.Location != nil {
+		loc := map[string]interface{}{
+			"place_type":             sensorData.Location.PlaceType,
+			"at_place_since_minutes": sensorData.Location.AtPlaceSinceMinutes,
+		}
+		if sensorData.Location.City != "" {
+			loc["city"] = sensorData.Location.City
+		}
+		result["location"] = loc
+	}
+
+	if sensorData.Movement != nil {
+		result["movement"] = sensorData.Movement
+	}
+	if sensorData.Calendar != nil {
+		result["calendar"] = sensorData.Calendar
+	}
+	if sensorData.Screen != nil {
+		result["screen"] = sensorData.Screen
+	}
+	if sensorData.Battery != nil {
+		result["battery"] = map[string]interface{}{
+			"battery_level": sensorData.Battery.BatteryLevel,
+			"is_charging":   sensorData.Battery.IsCharging,
+		}
+	}
+	if sensorData.Mode != nil {
+		result["mode"] = map[string]interface{}{
+			"is_low_power_mode": sensorData.Mode.IsLowPowerMode,
+			"is_focus_mode_on":  sensorData.Mode.IsFocusModeOn,
+		}
+	}
+	if sensorData.Connection != nil {
+		result["connection"] = map[string]interface{}{
+			"is_headphones_connected": sensorData.Connection.IsHeadphonesConnected,
+			"network_type":            sensorData.Connection.NetworkType,
+		}
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func gatherHistoryData(ctx context.Context, deps *InferenceToolDeps, ic *model.V3InferenceContext) {
+	now := time.Now()
+	currentTime := now.Format("15:04")
+
+	// 今日时刻表
+	if deps.ScheduleRepo != nil {
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		schedule, err := deps.ScheduleRepo.GetActiveByUserAndDate(ctx, deps.UserID, today)
+		if err == nil && schedule != nil && len(schedule.Items) > 0 {
+			scheduleData := map[string]interface{}{
+				"total_items": len(schedule.Items),
+			}
+
+			items := make([]map[string]interface{}, 0, len(schedule.Items))
+			for i, item := range schedule.Items {
+				itemData := map[string]interface{}{
+					"start_time":  item.StartTime,
+					"end_time":    item.EndTime,
+					"emoji":       item.Emoji,
+					"status":      item.Status,
+					"is_ai_guess": item.IsAIGuess,
+				}
+
+				inRange := false
+				if item.EndTime < item.StartTime {
+					inRange = currentTime >= item.StartTime || currentTime < item.EndTime
+				} else {
+					inRange = currentTime >= item.StartTime && currentTime < item.EndTime
+				}
+				if inRange {
+					scheduleData["current_item"] = itemData
+					if i+1 < len(schedule.Items) {
+						next := schedule.Items[i+1]
+						scheduleData["next_item"] = map[string]interface{}{
+							"start_time": next.StartTime,
+							"end_time":   next.EndTime,
+							"emoji":      next.Emoji,
+							"status":     next.Status,
+						}
+					}
+				}
+
+				items = append(items, itemData)
+			}
+			scheduleData["items"] = items
+			ic.TodaySchedule = scheduleData
+		}
+	}
+
+	// 最近状态
+	if deps.MemoryRepo != nil {
+		memories, err := deps.MemoryRepo.GetRecentUserStatusMemory(ctx, deps.UserID, 10)
+		if err == nil && len(memories) > 0 {
+			entries := make([]map[string]string, 0, len(memories))
+			for _, m := range memories {
+				entries = append(entries, map[string]string{
+					"emoji":      m.Emoji,
+					"status":     m.Status,
+					"created_at": m.CreatedAt.Format("01-02 15:04"),
+				})
+			}
+			ic.RecentStatuses = entries
+		}
+	}
+
+	// 修正记录
+	if deps.RedisClient != nil {
+		feedbackKey := fmt.Sprintf("agent:feedback:%s", deps.UserID)
+		data, err := deps.RedisClient.GetBytes(ctx, feedbackKey)
+		if err == nil && len(data) > 0 {
+			var corrections []*model.StatusMemoryEntry
+			if json.Unmarshal(data, &corrections) == nil && len(corrections) > 0 {
+				limit := len(corrections)
+				if limit > 5 {
+					limit = 5
+				}
+				entries := make([]map[string]string, 0, limit)
+				for _, c := range corrections[:limit] {
+					entry := map[string]string{
+						"corrected_emoji":    c.CorrectedEmoji,
+						"corrected_activity": c.CorrectedActivity,
+					}
+					if c.OriginalEmoji != "" {
+						entry["original_emoji"] = c.OriginalEmoji
+						entry["original_activity"] = c.OriginalActivity
+					}
+					entries = append(entries, entry)
+				}
+				ic.Corrections = entries
+			}
+		}
+	}
+}
+
+func gatherConversation(ctx context.Context, deps *InferenceToolDeps) string {
+	if deps.RedisClient == nil {
+		return ""
+	}
+	key := fmt.Sprintf("v4:user_context:%s", deps.UserID)
+	summary, err := deps.RedisClient.Get(ctx, key)
+	if err != nil || summary == "" {
+		return ""
+	}
+	return summary
+}
+
+func gatherProfileData(ctx context.Context, deps *InferenceToolDeps, ic *model.V3InferenceContext) {
+	// 用户画像
+	if deps.UserProfileService != nil {
+		profile, err := deps.UserProfileService.GetProfile(deps.UserID)
+		if err == nil && profile != nil {
+			profileData := make(map[string]interface{})
+			if profile.OccupationType != "" {
+				profileData["occupation_type"] = string(profile.OccupationType)
+				profileData["occupation_name"] = model.GetProfileTypeName(string(profile.OccupationType))
+			}
+			if profile.WorkSchedule != "" {
+				profileData["work_schedule"] = string(profile.WorkSchedule)
+			}
+			if profile.LifestyleType != "" {
+				lifestyleNames := map[model.LifestyleType]string{
+					model.LifestyleEarlyBird: "早起型",
+					model.LifestyleNightOwl:  "夜猫子",
+					model.LifestyleBalanced:  "规律型",
+				}
+				profileData["lifestyle_type"] = lifestyleNames[profile.LifestyleType]
+			}
+			if len(profileData) > 0 {
+				ic.Profile = profileData
+			}
+		}
+	}
+
+	// 核心记忆
+	if deps.MemoryRepo != nil {
+		coreMemory, err := deps.MemoryRepo.GetCoreMemory(ctx, deps.UserID)
+		if err == nil && coreMemory != nil {
+			memoryData := make(map[string]interface{})
+			if coreMemory.BehaviorInsights != "" {
+				memoryData["behavior_insights"] = coreMemory.BehaviorInsights
+			}
+			if coreMemory.TimePatterns != "" {
+				memoryData["time_patterns"] = coreMemory.TimePatterns
+			}
+			if coreMemory.LocationPreferences != "" {
+				memoryData["location_preferences"] = coreMemory.LocationPreferences
+			}
+			if len(memoryData) > 0 {
+				ic.CoreMemory = memoryData
+			}
+		}
+	}
+}
+
+func gatherPrevInference(ctx context.Context, deps *InferenceToolDeps) *model.CurrentStatusInference {
+	if deps.RedisClient == nil {
+		return nil
+	}
+	key := fmt.Sprintf("infer:prev:%s", deps.UserID)
+	data, err := deps.RedisClient.GetBytes(ctx, key)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	var prev model.CurrentStatusInference
+	if json.Unmarshal(data, &prev) != nil {
+		return nil
+	}
+	return &prev
+}
+
+func gatherPreferences(ctx context.Context, deps *InferenceToolDeps) []string {
+	if deps.RedisClient == nil {
+		return nil
+	}
+	key := fmt.Sprintf("infer:pref:%s", deps.UserID)
+	data, err := deps.RedisClient.GetBytes(ctx, key)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	var pref model.UserInferencePreference
+	if json.Unmarshal(data, &pref) != nil {
+		return nil
+	}
+	return pref.Preferences
 }
 
 // ========== 辅助函数 ==========
@@ -537,7 +599,6 @@ func getCachedSensorForInference(ctx context.Context, redisClient *tencent.Redis
 		return nil
 	}
 
-	// 先尝试获取扩展数据
 	extKey := fmt.Sprintf("agent:extended:%s", userID)
 	data, err := redisClient.GetBytes(ctx, extKey)
 	if err == nil && len(data) > 0 {
@@ -547,7 +608,6 @@ func getCachedSensorForInference(ctx context.Context, redisClient *tencent.Redis
 		}
 	}
 
-	// 降级到基础状态数据
 	key := fmt.Sprintf("agent:status:%s", userID)
 	data, err = redisClient.GetBytes(ctx, key)
 	if err != nil || len(data) == 0 {

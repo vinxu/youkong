@@ -96,37 +96,37 @@ func NewModelTestService(qwenAPIKey, kimiAPIKey, claudeAPIKey string) *ModelTest
 func (s *ModelTestService) initTestCases() {
 	s.testCases = []ModelTestCase{
 		// A. 时刻表创建 - create_status_schedule（10 个）
-		{ID: 1, Category: "create_schedule", Input: "明天下午3点到5点开会", ExpectedTools: []string{"update_schedule"}, Description: "基础时刻表创建"},
-		{ID: 2, Category: "create_schedule", Input: "后天上午去健身房", ExpectedTools: []string{"update_schedule"}, Description: "模糊时间推断"},
-		{ID: 3, Category: "create_schedule", Input: "周六晚上约朋友吃饭", ExpectedTools: []string{"update_schedule"}, Description: "相对日期理解"},
-		{ID: 4, Category: "create_schedule", Input: "下周一早上9点面试", ExpectedTools: []string{"update_schedule"}, Description: "跨周日期理解"},
-		{ID: 5, Category: "create_schedule", Input: "今晚7点到9点看电影", ExpectedTools: []string{"update_schedule"}, Description: "时间范围解析"},
-		{ID: 6, Category: "create_schedule", Input: "明天中午吃饭，下午开会", ExpectedTools: []string{"update_schedule"}, Description: "多时段创建"},
-		{ID: 7, Category: "create_schedule", Input: "这周末都在家休息", ExpectedTools: []string{"update_schedule"}, Description: "全天安排"},
-		{ID: 8, Category: "create_schedule", Input: "下午茶时间见个朋友", ExpectedTools: []string{"update_schedule"}, Description: "模糊时间表达"},
-		{ID: 9, Category: "create_schedule", Input: "明早跑步", ExpectedTools: []string{"update_schedule"}, Description: "需推断具体时间"},
-		{ID: 10, Category: "create_schedule", Input: "大概三四点的样子去咖啡厅", ExpectedTools: []string{"update_schedule"}, Description: "口语化模糊表达"},
+		{ID: 1, Category: "create_schedule", Input: "明天下午3点到5点开会", ExpectedTools: []string{"plan_activities"}, Description: "基础时刻表创建"},
+		{ID: 2, Category: "create_schedule", Input: "后天上午去健身房", ExpectedTools: []string{"plan_activities"}, Description: "模糊时间推断"},
+		{ID: 3, Category: "create_schedule", Input: "周六晚上约朋友吃饭", ExpectedTools: []string{"plan_activities"}, Description: "相对日期理解"},
+		{ID: 4, Category: "create_schedule", Input: "下周一早上9点面试", ExpectedTools: []string{"plan_activities"}, Description: "跨周日期理解"},
+		{ID: 5, Category: "create_schedule", Input: "今晚7点到9点看电影", ExpectedTools: []string{"plan_activities"}, Description: "时间范围解析"},
+		{ID: 6, Category: "create_schedule", Input: "明天中午吃饭，下午开会", ExpectedTools: []string{"plan_activities"}, Description: "多时段创建"},
+		{ID: 7, Category: "create_schedule", Input: "这周末都在家休息", ExpectedTools: []string{"plan_activities"}, Description: "全天安排"},
+		{ID: 8, Category: "create_schedule", Input: "下午茶时间见个朋友", ExpectedTools: []string{"plan_activities"}, Description: "模糊时间表达"},
+		{ID: 9, Category: "create_schedule", Input: "明早跑步", ExpectedTools: []string{"plan_activities"}, Description: "需推断具体时间"},
+		{ID: 10, Category: "create_schedule", Input: "大概三四点的样子去咖啡厅", ExpectedTools: []string{"plan_activities"}, Description: "口语化模糊表达"},
 
 		// B. 确认/修改 - confirm_schedule / cancel_session（5 个）
-		{ID: 11, Category: "confirm", Input: "好的", ExpectedTools: []string{"save_schedule"}, Description: "简单确认"},
-		{ID: 12, Category: "confirm", Input: "可以，保存吧", ExpectedTools: []string{"save_schedule"}, Description: "口语化确认"},
-		{ID: 13, Category: "modify", Input: "不对，改成4点开始", ExpectedTools: []string{"update_schedule"}, Description: "修改时间"},
+		{ID: 11, Category: "confirm", Input: "好的", ExpectedTools: []string{"confirm"}, Description: "简单确认"},
+		{ID: 12, Category: "confirm", Input: "可以，保存吧", ExpectedTools: []string{"confirm"}, Description: "口语化确认"},
+		{ID: 13, Category: "modify", Input: "不对，改成4点开始", ExpectedTools: []string{"plan_activities"}, Description: "修改时间"},
 		{ID: 14, Category: "cancel", Input: "取消刚才的安排", ExpectedTools: []string{}, Description: "取消操作"},
-		{ID: 15, Category: "modify", Input: "把开会改成视频会议", ExpectedTools: []string{"update_schedule"}, Description: "修改内容"},
+		{ID: 15, Category: "modify", Input: "把开会改成视频会议", ExpectedTools: []string{"plan_activities"}, Description: "修改内容"},
 
 		// C. 查询时刻表 - get_current_schedule（5 个）
-		{ID: 16, Category: "query_schedule", Input: "两点以后什么状态", ExpectedTools: []string{"get_schedule"}, Description: "查询特定时间"},
-		{ID: 17, Category: "query_schedule", Input: "明天下午有空吗", ExpectedTools: []string{"get_schedule"}, Description: "查询是否有空"},
-		{ID: 18, Category: "query_schedule", Input: "周末安排了什么", ExpectedTools: []string{"get_schedule"}, Description: "查询周末"},
-		{ID: 19, Category: "query_schedule", Input: "今天还有什么事", ExpectedTools: []string{"get_schedule"}, Description: "查询今天"},
-		{ID: 20, Category: "query_schedule", Input: "看看我的时刻表", ExpectedTools: []string{"get_schedule"}, Description: "直接查看"},
+		{ID: 16, Category: "query_schedule", Input: "两点以后什么状态", ExpectedTools: []string{"view_schedule"}, Description: "查询特定时间"},
+		{ID: 17, Category: "query_schedule", Input: "明天下午有空吗", ExpectedTools: []string{"view_schedule"}, Description: "查询是否有空"},
+		{ID: 18, Category: "query_schedule", Input: "周末安排了什么", ExpectedTools: []string{"view_schedule"}, Description: "查询周末"},
+		{ID: 19, Category: "query_schedule", Input: "今天还有什么事", ExpectedTools: []string{"view_schedule"}, Description: "查询今天"},
+		{ID: 20, Category: "query_schedule", Input: "看看我的时刻表", ExpectedTools: []string{"view_schedule"}, Description: "直接查看"},
 
-		// D. 更新状态 - update_current_status（5 个）
-		{ID: 21, Category: "update_status", Input: "我现在睡不着", ExpectedTools: []string{"update_current_status"}, Description: "即时状态"},
-		{ID: 22, Category: "update_status", Input: "在工作中", ExpectedTools: []string{"update_current_status"}, Description: "简短状态"},
-		{ID: 23, Category: "update_status", Input: "刚到公司", ExpectedTools: []string{"update_current_status"}, Description: "位置状态"},
-		{ID: 24, Category: "update_status", Input: "累死了，躺平", ExpectedTools: []string{"update_current_status"}, Description: "口语化状态"},
-		{ID: 25, Category: "update_status", Input: "出门逛街", ExpectedTools: []string{"update_current_status"}, Description: "活动状态"},
+		// D. 更新状态 - set_status（5 个）
+		{ID: 21, Category: "update_status", Input: "我现在睡不着", ExpectedTools: []string{"set_status"}, Description: "即时状态"},
+		{ID: 22, Category: "update_status", Input: "在工作中", ExpectedTools: []string{"set_status"}, Description: "简短状态"},
+		{ID: 23, Category: "update_status", Input: "刚到公司", ExpectedTools: []string{"set_status"}, Description: "位置状态"},
+		{ID: 24, Category: "update_status", Input: "累死了，躺平", ExpectedTools: []string{"set_status"}, Description: "口语化状态"},
+		{ID: 25, Category: "update_status", Input: "出门逛街", ExpectedTools: []string{"set_status"}, Description: "活动状态"},
 
 		// E. 好友状态 - get_friend_status（5 个）
 		{ID: 26, Category: "friend_status", Input: "小明现在有空吗", ExpectedTools: []string{}, Description: "查询好友状态"},
@@ -168,11 +168,11 @@ func (s *ModelTestService) initTestCases() {
 		{ID: 50, Category: "chat", Input: "啊？", ShouldNotCall: true, Description: "无意义输入"},
 
 		// L. 约束输出验证（额外 5 个）
-		{ID: 51, Category: "constraint", Input: "帮我安排一下明天的工作时间，早上9点到中午12点，下午2点到6点", ExpectedTools: []string{"update_schedule"}, Description: "复杂多时段"},
-		{ID: 52, Category: "constraint", Input: "明天上午开会然后中午吃饭再下午健身", ExpectedTools: []string{"update_schedule"}, Description: "连续多事件"},
-		{ID: 53, Category: "constraint", Input: "查一下今天的安排然后帮我加一个晚上8点的约会", ExpectedTools: []string{"get_schedule", "update_schedule"}, Description: "多工具组合"},
-		{ID: 54, Category: "constraint", Input: "我现在很忙，等会儿3点有个会议，5点下班后去健身", ExpectedTools: []string{"update_current_status", "update_schedule"}, Description: "状态+时刻表"},
-		{ID: 55, Category: "constraint", Input: "这是一段很长的描述：我想安排明天的时间，早上7点起床然后8点吃早餐，9点到12点工作，中午休息一小时，下午1点到5点继续工作，晚上6点健身到7点，然后8点晚餐", ExpectedTools: []string{"update_schedule"}, Description: "超长输入"},
+		{ID: 51, Category: "constraint", Input: "帮我安排一下明天的工作时间，早上9点到中午12点，下午2点到6点", ExpectedTools: []string{"plan_activities"}, Description: "复杂多时段"},
+		{ID: 52, Category: "constraint", Input: "明天上午开会然后中午吃饭再下午健身", ExpectedTools: []string{"plan_activities"}, Description: "连续多事件"},
+		{ID: 53, Category: "constraint", Input: "查一下今天的安排然后帮我加一个晚上8点的约会", ExpectedTools: []string{"view_schedule", "plan_activities"}, Description: "多工具组合"},
+		{ID: 54, Category: "constraint", Input: "我现在很忙，等会儿3点有个会议，5点下班后去健身", ExpectedTools: []string{"set_status", "plan_activities"}, Description: "状态+时刻表"},
+		{ID: 55, Category: "constraint", Input: "这是一段很长的描述：我想安排明天的时间，早上7点起床然后8点吃早餐，9点到12点工作，中午休息一小时，下午1点到5点继续工作，晚上6点健身到7点，然后8点晚餐", ExpectedTools: []string{"plan_activities"}, Description: "超长输入"},
 	}
 }
 
@@ -348,10 +348,10 @@ func (s *ModelTestService) buildSystemPrompt() string {
 当前时间：%s %s %02d:%02d
 
 你可以使用以下工具：
-1. get_schedule - 查看用户的时刻表
-2. update_schedule - 创建或修改时刻表（生成预览）
-3. update_current_status - 更新当前即时状态
-4. save_schedule - 保存确认后的时刻表
+1. view_schedule - 查看用户的时刻表
+2. plan_activities - 创建或修改时刻表（生成预览）
+3. set_status - 更新当前即时状态
+4. confirm - 确认并执行待确认操作
 
 回复要求：
 - 简洁友好，像朋友聊天
@@ -602,7 +602,7 @@ func (s *ModelTestService) GenerateMarkdownReport(report *ModelComparisonReport)
 	sb.WriteString("| temperature | 0.7 | 控制输出随机性 |\n")
 	sb.WriteString("| max_tokens | 1024 | 最大输出长度 |\n")
 	sb.WriteString("| system_prompt | 统一 | 所有模型使用相同提示词 |\n")
-	sb.WriteString("| tools | 4个 | get_schedule, update_schedule, update_current_status, save_schedule |\n\n")
+	sb.WriteString("| tools | 4个 | view_schedule, plan_activities, set_status, confirm |\n\n")
 
 	// 总分对比 - 动态生成表头
 	sb.WriteString("## 一、总分对比\n\n")

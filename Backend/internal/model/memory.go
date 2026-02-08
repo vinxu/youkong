@@ -134,6 +134,9 @@ type LifeStatus struct {
 	Emoji       string `json:"emoji"`
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
+	GifURL      string `json:"gif_url,omitempty"`      // GIF 动图 URL（仅有空时）
+	GiphyQuery  string `json:"giphy_query,omitempty"`   // Giphy 搜索词
+	UseGif      bool   `json:"use_gif"`                 // 是否使用 GIF 显示模式
 }
 
 // AvailabilityAnalysis 有空分析结果

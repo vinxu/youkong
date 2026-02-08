@@ -163,7 +163,7 @@ type AutoEvalResult struct {
 }
 
 // AutoEvaluate 自动规则评估（单轮）
-func AutoEvaluate(scenario *EvalScenario, toolsCalled []string, reply string) *AutoEvalResult {
+func AutoEvaluate(scenario *EvalScenario, toolsCalled []string, reply string, toolDetails []ToolCallDetail) *AutoEvalResult {
 	result := &AutoEvalResult{
 		ContainCheck:    true,
 		NotContainCheck: true,
@@ -210,6 +210,11 @@ func AutoEvaluate(scenario *EvalScenario, toolsCalled []string, reply string) *A
 			result.ToolScore = partialScore
 			details = append(details, fmt.Sprintf("❌ 工具不匹配：期望 %v，实际 %v (%.0f分)", scenario.ExpectedTools, toolsCalled, partialScore))
 		}
+	} else {
+		// 无工具期望（仅检查回复内容），工具调用不影响评分
+		result.ToolCorrect = true
+		result.ToolScore = 100
+		details = append(details, "ℹ️ 无工具期望，仅检查回复内容")
 	}
 
 	// 2. 禁止工具检查
@@ -243,9 +248,25 @@ func AutoEvaluate(scenario *EvalScenario, toolsCalled []string, reply string) *A
 		}
 	}
 
-	// 4. 参数质量暂时给默认分（参数验证需要解析具体工具调用）
-	if result.ToolCorrect {
-		result.ParamScore = 80 // 默认参数质量
+	// 4. 内容检查失败时，无工具期望的轮次也算失败
+	if !result.ContainCheck || !result.NotContainCheck {
+		if len(scenario.ExpectedTools) == 0 && !scenario.ExpectedNoTool {
+			result.ToolCorrect = false
+			result.ToolScore = 0
+		}
+	}
+
+	// 5. 参数质量验证
+	if result.ToolCorrect && len(scenario.ParamAssertions) > 0 {
+		paramResult := ValidateParams(scenario.ParamAssertions, toolDetails)
+		result.ParamScore = paramResult.Score
+		if len(paramResult.Failures) > 0 {
+			for _, f := range paramResult.Failures {
+				details = append(details, fmt.Sprintf("⚠️ 参数 %s.%s: %s", f.ToolName, f.ParamPath, f.Message))
+			}
+		}
+	} else if result.ToolCorrect {
+		result.ParamScore = 100 // 无断言时默认满分
 	}
 
 	result.Details = strings.Join(details, "; ")
@@ -253,16 +274,18 @@ func AutoEvaluate(scenario *EvalScenario, toolsCalled []string, reply string) *A
 }
 
 // AutoEvaluateMultiTurn 自动评估多轮对话中的一轮
-func AutoEvaluateMultiTurn(turn *ScenarioTurn, toolsCalled []string, reply string) *AutoEvalResult {
+func AutoEvaluateMultiTurn(turn *ScenarioTurn, toolsCalled []string, reply string, toolDetails []ToolCallDetail) *AutoEvalResult {
 	// 构造一个临时 EvalScenario 复用单轮评估逻辑
 	scenario := &EvalScenario{
 		ExpectedTools:       turn.ExpectedTools,
 		ExpectedNoTool:      turn.ExpectedNoTool,
+		AcceptNoTool:        turn.AcceptNoTool,
 		ForbiddenTools:      turn.ForbiddenTools,
+		ParamAssertions:     turn.ParamAssertions,
 		ReplyMustContain:    turn.ReplyMustContain,
 		ReplyMustNotContain: turn.ReplyMustNotContain,
 	}
-	return AutoEvaluate(scenario, toolsCalled, reply)
+	return AutoEvaluate(scenario, toolsCalled, reply, toolDetails)
 }
 
 // ========== 六维评分聚合 ==========
@@ -287,26 +310,21 @@ func (d *DimensionScores) CalcWeightedScore() float64 {
 
 // ========== 辅助函数 ==========
 
-// matchTools 检查工具调用是否匹配（只要包含期望的工具即可）
+// matchTools 检查工具调用是否匹配（actual 中包含 expected 中任一工具即可）
 func matchTools(expected, actual []string) bool {
 	if len(expected) == 0 {
 		return true
 	}
-	// 检查期望的第一个工具是否出现在实际调用中
-	// （单轮场景通常只关心主要工具是否被调用）
+	// 只要 actual 中包含 expected 中的任何一个工具即算匹配
+	// 多元素 expected 表示"这些工具中的任一个都是合理选择"
 	for _, exp := range expected {
-		found := false
 		for _, act := range actual {
 			if exp == act {
-				found = true
-				break
+				return true
 			}
 		}
-		if !found {
-			return false
-		}
 	}
-	return true
+	return false
 }
 
 // partialMatchScore 计算部分匹配分数

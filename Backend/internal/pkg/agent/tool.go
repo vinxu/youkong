@@ -38,6 +38,7 @@ type ToolResult struct {
 	Data          interface{} `json:"data,omitempty"`
 	Error         string      `json:"error,omitempty"`
 	TokenEstimate int         `json:"token_estimate,omitempty"` // 估算的 token 数
+	ShouldStop    bool        `json:"-"`                        // 终止工具：调用后立即结束 Agent 循环
 }
 
 // ToolCall 工具调用 (LLM 返回)

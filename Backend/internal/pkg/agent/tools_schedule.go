@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 )
 
@@ -22,117 +23,80 @@ type ScheduleToolDeps struct {
 	CurrentSessionID string
 }
 
-// V4ScheduleTools 返回 V4 架构使用的 5 个核心工具
+// V4ScheduleTools 返回 V4 架构使用的 5 个核心日程工具（不含 delete_schedule）
+// delete_schedule 通过条件加载：仅在有安排时暴露
 func V4ScheduleTools() []*Tool {
 	return []*Tool{
-		v4GetScheduleTool(),
-		v4UpdateScheduleTool(),
-		v4UpdateCurrentStatusTool(),
-		v4SaveScheduleTool(),
+		v4ViewScheduleTool(),
+		v4PlanActivitiesTool(),
+		v4SetStatusTool(),
+		v4ConfirmTool(),
 		v4UpdatePreferenceTool(),
 	}
 }
 
-// v4GetScheduleTool 获取时刻表工具
-func v4GetScheduleTool() *Tool {
+// V4DeleteScheduleTool 条件加载：删除日程（仅在有安排时暴露）
+func V4DeleteScheduleTool() *Tool { return v4DeleteScheduleTool() }
+
+// v4ViewScheduleTool 查看时刻表工具（原 get_schedule）
+func v4ViewScheduleTool() *Tool {
 	return &Tool{
-		Name: "get_schedule",
-		Description: `获取用户的时刻表安排。
+		Name: "view_schedule",
+		Description: `查看指定日期的时刻表安排，返回所有时段的时间、活动、emoji。
 
-【何时调用】
-- 用户问"我今天有什么安排"、"查看时刻表"、"看看明天"
-- 用户问"调出来看看"、"帮我查一下安排"
-- 用户问"从现在到明天有什么安排"（使用时间范围过滤）
-- 用户想了解某天或某个时间范围的已有安排
+Use this tool when:
+- 用户想查看某天安排（"看看明天有什么"、"今天下午有空吗"）
+- 需要获取最新时刻表数据
 
-【何时不调用】
-- 用户描述新安排时（应该用 update_schedule）
-- 用户确认保存时（应该用 save_schedule）
-
-【参数示例】
-- 获取今天：{"date": "2024-01-15"} 或不传 date
-- 获取明天：{"date": "2024-01-16"}
-- 查询时间范围：{"date": "2024-01-15", "start_time": "14:00", "end_time": "18:00"}
-- 从现在到明天中午：{"date": "2024-01-15", "start_time": "15:30"} + {"date": "2024-01-16", "end_time": "12:00"}`,
+Do NOT use when:
+- 用户描述新活动 → 直接用 plan_activities，不需要先查`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
 				"date": {
 					Type:        "string",
-					Description: "日期，YYYY-MM-DD 格式。不填则获取今天的时刻表。",
-				},
-				"start_time": {
-					Type:        "string",
-					Description: "可选，开始时间 HH:MM 格式。用于过滤只显示该时间之后的安排。",
-				},
-				"end_time": {
-					Type:        "string",
-					Description: "可选，结束时间 HH:MM 格式。用于过滤只显示该时间之前的安排。",
+					Description: "日期，YYYY-MM-DD 格式。",
 				},
 			},
+			Required: []string{"date"},
 		},
 	}
 }
 
-// v4UpdateScheduleTool 更新时刻表工具（生成预览，不直接保存）
-func v4UpdateScheduleTool() *Tool {
+// v4PlanActivitiesTool 规划活动工具（原 update_schedule）
+func v4PlanActivitiesTool() *Tool {
 	return &Tool{
-		Name: "update_schedule",
-		Description: `创建或修改时刻表（生成预览，不直接保存）。
+		Name: "plan_activities",
+		Description: `创建或修改时刻表条目预览（不直接保存）。用户确认后调用 confirm 保存。
 
-【何时调用】
-- 用户描述时间安排："下午3点到5点开会"、"明天去健身"
-- 用户要修改预览："改成3点"、"时间不对"
-- 用户要添加新时段
-- 用户一次描述多个活动（即使是口语化的），应一次调用包含多个 items
+Use this tool when:
+- 用户提到一个具体活动并面向未来，无论是否指定确切时间
+  如："下午3点开会"、"晚上去撸串"、"出去吃个火锅"、"明天跑步"
+- 修改或删除已有安排（"不用XX了"、"改到4点"）
+- 修改时只传变更条目，operation="modify"
+- 用户说"约人吃饭/撸串"等包含具体活动时，优先用此工具规划活动
 
-【何时不调用】
-- 用户说当前状态但没时间范围（应该用 update_current_status）
-- 用户确认保存（应该用 save_schedule）
+Do NOT use when:
+- 用户描述情绪/感受，无具体活动 → set_status（"好累"、"心情不好"）
+- 用户描述当前位置/场景 → set_status（"到公司了"、"在家"）
+- 用户用"在/正在"描述正在做的事 → set_status（"在开会"、"在打游戏"）
+- 用户提到已完成的事 → set_status（"刚吃完饭"、"跑完步了"）
 
-【重要】
-- 此工具只生成预览，不保存！用户确认后才调用 save_schedule
-- 用户说"改成X点"时，要结合上下文理解是改开始还是结束时间
-- 相对日期（今天/明天/后天/周六）请转换为 YYYY-MM-DD 格式
-- 多条目输入（如"10点瑜伽，2点兼职，7点聚餐"）应在一次调用中用 items 数组传入所有条目
-
-【口语映射】
-- "搓一顿"/"撸串" → 吃饭🍽️
-- "撸铁" → 健身🏃
-- "搞个会" → 开会💼
-- "摸鱼" → 娱乐🎮
-- "Tony老师" → 理发💇
-
-【参数示例】
-示例1 - 单时段：
-{
-  "date": "2024-01-15",
-  "items": [{"start_time": "15:00", "end_time": "17:00", "emoji": "💼", "status": "开会"}]
-}
-
-示例2 - 多时段（一次调用包含多个条目）：
-{
-  "date": "2024-01-16",
-  "items": [
-    {"start_time": "10:00", "end_time": "11:30", "emoji": "🧘", "status": "瑜伽课"},
-    {"start_time": "14:00", "end_time": "18:00", "emoji": "💼", "status": "兼职"},
-    {"start_time": "19:00", "end_time": "21:00", "emoji": "🎉", "status": "聚餐"}
-  ]
-}`,
+IMPORTANT: 当用户提到"有空"时，设置 available=true。如果只说活动不提有空，不要设 available。`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
-				"date": {
-					Type:        "string",
-					Description: "目标日期，YYYY-MM-DD 格式（如 2024-01-15）。不填则使用今天。相对日期请转换为具体日期。",
-				},
-				"items": {
+				"activities": {
 					Type:        "array",
-					Description: "时刻表条目数组。每个元素：{start_time: HH:MM, end_time: HH:MM, emoji: 表情, status: 状态描述}",
+					Description: "时刻表条目数组。每个元素：{start_time: HH:MM, end_time: HH:MM, emoji: 表情, status: 状态描述, available: 是否有空(可选bool)}",
 					Items: &ToolParam{
 						Type:        "object",
 						Description: "时刻表条目对象",
 					},
+				},
+				"date": {
+					Type:        "string",
+					Description: "目标日期，YYYY-MM-DD 格式。不填则使用今天。",
 				},
 				"operation": {
 					Type:        "string",
@@ -140,35 +104,57 @@ func v4UpdateScheduleTool() *Tool {
 					Enum:        []string{"create", "modify", "replace"},
 				},
 			},
-			Required: []string{"items"},
+			Required: []string{"activities"},
 		},
 	}
 }
 
-// v4UpdateCurrentStatusTool 更新当前状态工具
-func v4UpdateCurrentStatusTool() *Tool {
+// v4DeleteScheduleTool 删除日程条目工具
+func v4DeleteScheduleTool() *Tool {
 	return &Tool{
-		Name: "update_current_status",
-		Description: `即时更新用户当前显示在首页的状态（不是时刻表规划）。
+		Name: "delete_schedule",
+		Description: `删除指定日期的日程条目。生成删除预览（不直接删除），用户确认后调用 confirm 执行。
 
-【何时调用】
-- 用户描述当前状态但没有具体时间范围
-- "我现在很累"、"在加班"、"睡不着"
-- "帮我更新状态"、"改成在工作"
+Use this tool when:
+- 用户要取消/删除某个安排（"把下午的会取消"、"不去了"、"不要了"）
+- 用户要清空全部安排（"今天安排全部取消"、"清空时刻表"）
 
-【何时不调用】
-- 用户说了具体时间（如"下午3点开会"）→ 用 update_schedule
-- 用户要保存时刻表 → 用 save_schedule
+IMPORTANT:
+- "取消XX/删掉XX/不要XX了" → 此工具
+- 修改时间或内容 → plan_activities（"改到3点"、"换成自习"）
+- 有⚠️待确认内容时，用户说"取消/算了"通常是拒绝预览，不要用此工具`,
+		Parameters: ToolParameters{
+			Type: "object",
+			Properties: map[string]ToolParam{
+				"target": {
+					Type:        "string",
+					Description: `要删除的活动关键词（如"开会"、"午饭"），或 "all" 清空全部。`,
+				},
+				"date": {
+					Type:        "string",
+					Description: "目标日期，YYYY-MM-DD 格式。不填则使用今天。",
+				},
+			},
+			Required: []string{"target"},
+		},
+	}
+}
 
-【注意】
-- 这是即时生效的，会直接更新用户首页显示的状态
-- 不需要用户确认，调用后立即生效
+// v4SetStatusTool 设置当前状态工具（原 update_current_status）
+func v4SetStatusTool() *Tool {
+	return &Tool{
+		Name: "set_status",
+		Description: `即时更新用户首页显示的当前状态。立即生效，不需要确认。
 
-【参数示例】
-- 加班中：{"emoji": "💼", "status": "加班中"}
-- 睡不着：{"emoji": "😵", "status": "睡不着"}
-- 在家休息：{"emoji": "🏠", "status": "在家休息"}
-- 健身中：{"emoji": "🏃", "status": "健身中"}`,
+Use this tool when:
+- 情绪/感受（"好累"、"心情不错"、"烦死了"、"失眠了"）
+- 位置/场景（"到公司了"、"在家"、"在路上"、"在咖啡厅"）
+- 正在做的事——用"在/正在"描述当前状态（"在开会"、"在打游戏"、"在加班"）
+- 已完成的事+感受（"刚吃完午饭有点困"、"开了三个会好累"）
+
+Do NOT use when:
+- 用户提到一个未来活动（即使时间模糊）→ plan_activities
+  如："晚上去撸串"、"等会出去走走"、"明天开会"、"出去吃火锅"`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
@@ -180,50 +166,31 @@ func v4UpdateCurrentStatusTool() *Tool {
 					Type:        "string",
 					Description: "状态描述，2-6个字。如：加班中、在家休息、睡不着、健身中",
 				},
+				"available": {
+					Type:        "boolean",
+					Description: "标记当前时段是否有空。",
+				},
 			},
 			Required: []string{"emoji", "status"},
 		},
 	}
 }
 
-// v4SaveScheduleTool 保存时刻表工具
-func v4SaveScheduleTool() *Tool {
+// v4ConfirmTool 统一确认工具（合并原 save_schedule + confirm_send）
+func v4ConfirmTool() *Tool {
 	return &Tool{
-		Name: "save_schedule",
-		Description: `保存待确认的时刻表（用户确认后调用）。
+		Name: "confirm",
+		Description: `确认并执行当前待确认的操作。系统自动识别确认类型（时刻表/消息/邀请）。
 
-【何时调用】
-- 系统提示中存在"⚠️待确认时刻表"，且用户表示同意：
-  "好的"、"确认"、"没问题"、"可以"、"保存"、"OK"、"行"、"就这样"
+Use this tool when:
+- 上下文有⚠️待确认内容，且用户同意（"好的"、"保存"、"发吧"、"可以"）
 
-【何时不调用】
-- 没有待确认的时刻表（系统提示中没有"待确认的时刻表"）→ 不要调用
-- 待确认的是消息或邀请（应该用 confirm_send）→ 不要调用
-- 用户还在描述安排（应该先用 update_schedule）
-- 用户表示要修改（应该用 update_schedule 重新生成）
-
-【前置条件】
-- 必须先调用 update_schedule 生成预览
-- 系统提示中会显示"⚠️待确认时刻表"
-- 如果没有待确认内容，不要调用此工具
-
-【参数说明】
-- 通常不需要传参数，系统会使用待确认的日期
-- visibility 默认 all_friends（所有好友可见）`,
+Do NOT use when:
+- 无⚠️待确认内容时，即使用户说"好的"也不调用
+- 用户说"不对/改一下" → 不调用，先问用户怎么改`,
 		Parameters: ToolParameters{
-			Type: "object",
-			Properties: map[string]ToolParam{
-				"date": {
-					Type:        "string",
-					Description: "保存的目标日期，YYYY-MM-DD 格式。通常不需要传，使用待确认时刻表的日期。",
-				},
-				"visibility": {
-					Type:        "string",
-					Description: "可见性设置。默认 all_friends",
-					Enum:        []string{"all_friends", "circles", "private"},
-					Default:     "all_friends",
-				},
-			},
+			Type:       "object",
+			Properties: map[string]ToolParam{},
 		},
 	}
 }
@@ -232,17 +199,10 @@ func v4SaveScheduleTool() *Tool {
 func v4UpdatePreferenceTool() *Tool {
 	return &Tool{
 		Name: "update_preference",
-		Description: `更新用户的时刻表显示偏好设置。
+		Description: `更新用户的时刻表显示偏好。支持隐藏过去日程、修改默认可见性。
 
-【何时调用】
-- 用户说"过去的日程不要显示了"、"隐藏已过的安排"
-- 用户说"以后只显示未来的安排"
-- 用户要修改时刻表的默认可见性
-
-【参数示例】
-- 隐藏过去日程：{"hide_past_events": true}
-- 显示过去日程：{"hide_past_events": false}
-- 修改默认可见性：{"default_visibility": "private"}`,
+Use this tool when:
+- 用户想修改设置（"隐藏已过去的日程"、"改成仅好友可见"）`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
@@ -295,9 +255,9 @@ const (
 
 // ParseScheduleItems 从工具参数中解析时刻表条目
 func ParseScheduleItems(args map[string]interface{}) ([]ScheduleItemInfo, error) {
-	itemsRaw, ok := args["items"].([]interface{})
+	itemsRaw, ok := args["activities"].([]interface{})
 	if !ok {
-		return nil, fmt.Errorf("items parameter is required")
+		return nil, fmt.Errorf("activities parameter is required")
 	}
 
 	items := make([]ScheduleItemInfo, 0, len(itemsRaw))
@@ -319,6 +279,11 @@ func ParseScheduleItems(args map[string]interface{}) ([]ScheduleItemInfo, error)
 		}
 		if v, ok := itemMap["status"].(string); ok {
 			item.Status = v
+		}
+		if avail, ok := itemMap["available"]; ok {
+			if b, ok := avail.(bool); ok {
+				item.Available = &b
+			}
 		}
 
 		// 验证必填字段
@@ -370,7 +335,7 @@ func guessEmojiFromStatus(status string) string {
 	}
 
 	for keyword, emoji := range emojiMap {
-		if containsKeyword(status, keyword) {
+		if ContainsKeyword(status, keyword) {
 			return emoji
 		}
 	}
@@ -379,8 +344,8 @@ func guessEmojiFromStatus(status string) string {
 	return "📋"
 }
 
-// containsKeyword 检查字符串是否包含关键词
-func containsKeyword(s, keyword string) bool {
+// ContainsKeyword 检查字符串是否包含关键词
+func ContainsKeyword(s, keyword string) bool {
 	for i := 0; i <= len(s)-len(keyword); i++ {
 		if s[i:i+len(keyword)] == keyword {
 			return true
@@ -396,4 +361,77 @@ func (e *V4ScheduleEvent) ToJSON() (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// ========== Layer 3: 参数后验证 ==========
+
+// timeFormatRegex HH:MM 格式正则
+var timeFormatRegex = regexp.MustCompile(`^([01]\d|2[0-3]):([0-5]\d)$`)
+
+// ValidateScheduleParams 校验 plan_activities 的时间参数
+// 返回 errors（结构性错误，需要 LLM 重试）和 warnings（提示性，附加到 notices）
+func ValidateScheduleParams(items []ScheduleItemInfo, now time.Time, isToday bool) (errors []string, warnings []string) {
+	currentTime := now.Format("15:04")
+
+	for _, item := range items {
+		// 规则 1: 格式校验 HH:MM
+		if !timeFormatRegex.MatchString(item.StartTime) {
+			errors = append(errors, fmt.Sprintf("start_time \"%s\" 格式无效，需要 HH:MM", item.StartTime))
+			continue
+		}
+		if !timeFormatRegex.MatchString(item.EndTime) {
+			errors = append(errors, fmt.Sprintf("end_time \"%s\" 格式无效，需要 HH:MM", item.EndTime))
+			continue
+		}
+
+		// 规则 2: start < end（跨午夜除外：start≥20:00 且 end≤08:00）
+		if item.StartTime >= item.EndTime {
+			// 检查跨午夜场景
+			isCrossMidnight := item.StartTime >= "20:00" && item.EndTime <= "08:00"
+			if !isCrossMidnight {
+				errors = append(errors, fmt.Sprintf("%s 的 start_time(%s) ≥ end_time(%s)", item.Status, item.StartTime, item.EndTime))
+			}
+		}
+
+		// 规则 3: 时长校验 5min ≤ duration ≤ 12h
+		durationMin := calcDurationMinutes(item.StartTime, item.EndTime)
+		if durationMin > 0 {
+			if durationMin < 5 {
+				errors = append(errors, fmt.Sprintf("%s 时长仅%d分钟，最少需要5分钟", item.Status, durationMin))
+			} else if durationMin > 720 {
+				errors = append(errors, fmt.Sprintf("%s 时长%d分钟(%.1f小时)，超过12小时上限", item.Status, durationMin, float64(durationMin)/60))
+			}
+		}
+
+		// 规则 4: 过去时间（仅警告）
+		if isToday && item.EndTime < currentTime {
+			warnings = append(warnings, fmt.Sprintf("%s(%s-%s) 已过去（当前%s）", item.Status, item.StartTime, item.EndTime, currentTime))
+		}
+	}
+
+	return errors, warnings
+}
+
+// calcDurationMinutes 计算两个 HH:MM 时间之间的分钟数
+func calcDurationMinutes(start, end string) int {
+	startMin := parseTimeToMinutes(start)
+	endMin := parseTimeToMinutes(end)
+	if startMin < 0 || endMin < 0 {
+		return -1
+	}
+	if endMin > startMin {
+		return endMin - startMin
+	}
+	// 跨午夜
+	return (24*60 - startMin) + endMin
+}
+
+// parseTimeToMinutes 将 HH:MM 转换为分钟数
+func parseTimeToMinutes(t string) int {
+	var h, m int
+	n, err := fmt.Sscanf(t, "%d:%d", &h, &m)
+	if err != nil || n != 2 {
+		return -1
+	}
+	return h*60 + m
 }

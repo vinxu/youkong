@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -638,29 +639,56 @@ func (a *LLMAdapter) StreamChatWithTools(ctx context.Context, req *LLMRequest, c
 	}
 	defer resp.Body.Close()
 
-	// 解析流式响应
+	// 解析流式 SSE 响应
+	// SSE 格式: "data: {JSON}\n" 或 "data: [DONE]\n"
 	var fullContent strings.Builder
-	var toolCalls []ToolCall
 	var reasoning string
 
-	decoder := json.NewDecoder(resp.Body)
-	for {
+	// 流式 tool_calls 需要按 index 增量合并
+	type streamToolCall struct {
+		Index    int    `json:"index"`
+		ID       string `json:"id,omitempty"`
+		Type     string `json:"type,omitempty"`
+		Function struct {
+			Name      string `json:"name,omitempty"`
+			Arguments string `json:"arguments,omitempty"`
+		} `json:"function,omitempty"`
+	}
+	toolCallMap := make(map[int]*ToolCall) // index → merged tool call
+
+	scanner := bufio.NewScanner(resp.Body)
+	// 增大缓冲区以处理大型 SSE 行
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// 跳过空行和非 data 行
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		// 去掉 "data: " 前缀
+		data := strings.TrimPrefix(line, "data: ")
+
+		// 检测流结束标记
+		if data == "[DONE]" {
+			break
+		}
+
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content          string     `json:"content"`
-					ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-					ReasoningContent string     `json:"reasoning_content,omitempty"`
+					Content          string           `json:"content"`
+					ToolCalls        []streamToolCall `json:"tool_calls,omitempty"`
+					ReasoningContent string           `json:"reasoning_content,omitempty"`
 				} `json:"delta"`
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 		}
 
-		if err := decoder.Decode(&chunk); err != nil {
-			if err == io.EOF {
-				break
-			}
-			// 跳过无法解析的行（如 "data: [DONE]"）
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			// 跳过无法解析的行
 			continue
 		}
 
@@ -678,9 +706,37 @@ func (a *LLMAdapter) StreamChatWithTools(ctx context.Context, req *LLMRequest, c
 				reasoning += delta.ReasoningContent
 			}
 
-			if len(delta.ToolCalls) > 0 {
-				toolCalls = append(toolCalls, delta.ToolCalls...)
+			// 按 index 增量合并 tool_calls
+			for _, tc := range delta.ToolCalls {
+				existing, ok := toolCallMap[tc.Index]
+				if !ok {
+					existing = &ToolCall{
+						Type: "function",
+					}
+					toolCallMap[tc.Index] = existing
+				}
+				if tc.ID != "" {
+					existing.ID = tc.ID
+				}
+				if tc.Function.Name != "" {
+					existing.Function.Name += tc.Function.Name
+				}
+				if tc.Function.Arguments != "" {
+					existing.Function.Arguments += tc.Function.Arguments
+				}
 			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("读取流式响应失败: %w", err)
+	}
+
+	// 将 toolCallMap 转换为有序切片
+	var toolCalls []ToolCall
+	for i := 0; i < len(toolCallMap); i++ {
+		if tc, ok := toolCallMap[i]; ok {
+			toolCalls = append(toolCalls, *tc)
 		}
 	}
 

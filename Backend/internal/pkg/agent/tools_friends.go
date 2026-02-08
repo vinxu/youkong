@@ -1,41 +1,30 @@
 package agent
 
-// V4FriendTools 返回 V4 架构的好友相关工具
+// V4FriendTools 返回 V4 架构的好友相关工具（3个核心，不含 remove_friend）
+// remove_friend 通过条件加载：仅在有好友上下文时暴露
 func V4FriendTools() []*Tool {
 	return []*Tool{
-		v4QueryFriendsTool(),
-		v4SendMessageTool(),
-		v4CreateScheduleInviteTool(),
-		v4ConfirmSendTool(),
+		v4FindFriendsTool(),
+		v4DraftMessageTool(),
+		v4DraftInviteTool(),
 	}
 }
 
-// v4QueryFriendsTool 查询好友工具
-func v4QueryFriendsTool() *Tool {
+// V4RemoveFriendTool 条件加载：删除好友（仅在有好友上下文时暴露）
+func V4RemoveFriendTool() *Tool { return v4RemoveFriendTool() }
+
+// v4FindFriendsTool 查找好友工具（原 query_friends）
+func v4FindFriendsTool() *Tool {
 	return &Tool{
-		Name: "query_friends",
-		Description: `查询并筛选好友列表。
+		Name: "find_friends",
+		Description: `查询并筛选好友列表，返回好友 ID、名字、有空概率、状态。
 
-【何时调用】
-- 用户问"有空的朋友"、"谁有空"、"现在谁不忙"
-- 用户问"在工作的朋友"、"谁在忙"、"谁在休息"
-- 用户问"在上海的朋友"、"北京的朋友有谁"
-- 用户要找某个朋友："找一下小明"、"小红在吗"
+Use this tool when:
+- 需要获取好友信息（"谁有空"、"小王在干嘛"、"看看我的好友"）
+- draft_message/draft_invite 需要 friend_id 时，必须先调用此工具获取。不要编造 friend_id
 
-【参数说明】
-- filter_type: 筛选类型
-  - available: 按有空状态筛选（free=有空概率>60%, busy=<40%）
-  - status: 按当前状态关键词筛选（如"工作"、"休息"、"游戏"）
-  - location: 按城市筛选（如"上海"、"北京"）
-  - name: 按好友名字或备注查找
-  - all: 返回全部好友
-- filter_value: 筛选值（根据 filter_type 不同而不同）
-- limit: 返回数量限制（默认10，最大50）
-
-【返回数据】
-- friends: 好友数组，每个包含 id, name, avatar, probability, status, emoji, city, confidence
-- total: 符合条件的总数
-- filter_applied: 应用的筛选条件描述`,
+Do NOT use when:
+- 用户说"约人吃饭/撸串"等，重点是安排活动 → 先用 plan_activities`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
@@ -58,36 +47,24 @@ func v4QueryFriendsTool() *Tool {
 	}
 }
 
-// v4SendMessageTool 发送消息工具（生成预览）
-func v4SendMessageTool() *Tool {
+// v4DraftMessageTool 草拟消息工具（原 send_message）
+func v4DraftMessageTool() *Tool {
 	return &Tool{
-		Name: "send_message",
-		Description: `生成消息预览，等待用户确认后发送。
+		Name: "draft_message",
+		Description: `生成消息预览（不直接发送），用户确认后调用 confirm 发送。
 
-【何时调用】
-- 用户说"给XX发消息"
-- 用户说"告诉XX我到了"
-- 用户说"问问XX有没有空"
-- 用户说"跟XX说一下我在路上"
+Use this tool when:
+- 给好友发送文字消息
 
-【前置条件】
-- 必须先用 query_friends 找到好友，获取 friend_id
-- 如果用户只说了名字没有明确消息内容，需要先询问
-
-【注意】
-- 此工具只生成预览，不直接发送
-- 用户确认后需要调用 confirm_send 才会真正发送
-
-【参数说明】
-- friend_id: 必填，好友ID（从 query_friends 获取）
-- friend_name: 必填，好友名字（用于确认显示）
-- message: 必填，消息内容`,
+Do NOT use when:
+- 发日程邀请 → draft_invite
+- 没有 friend_id → 先用 find_friends 获取`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
 				"friend_id": {
 					Type:        "string",
-					Description: "好友ID（从 query_friends 获取）",
+					Description: "好友ID（从 find_friends 获取）",
 				},
 				"friend_name": {
 					Type:        "string",
@@ -103,41 +80,24 @@ func v4SendMessageTool() *Tool {
 	}
 }
 
-// v4CreateScheduleInviteTool 创建日程邀请工具（生成预览）
-func v4CreateScheduleInviteTool() *Tool {
+// v4DraftInviteTool 草拟日程邀请工具（原 create_schedule_invite）
+func v4DraftInviteTool() *Tool {
 	return &Tool{
-		Name: "create_schedule_invite",
-		Description: `生成日程邀请预览，等待用户确认后发送。
+		Name: "draft_invite",
+		Description: `生成日程邀请预览（不直接发送），用户确认后调用 confirm 发送。
 
-【何时调用】
-- 用户说"约XX下午喝咖啡"
-- 用户说"和XX约明天吃饭"
-- 用户说"邀请XX周六一起运动"
-- 用户说"约小明3点见面"
+Use this tool when:
+- 约好友在特定时间做某事
 
-【前置条件】
-- 必须先用 query_friends 找到好友，获取 friend_id
-- 需要从用户输入中解析出时间、活动等信息
-
-【注意】
-- 此工具只生成预览，不直接发送
-- 用户确认后需要调用 confirm_send 才会真正发送
-
-【参数说明】
-- friend_id: 必填，好友ID
-- friend_name: 必填，好友名字
-- date: 必填，日期 YYYY-MM-DD
-- start_time: 必填，开始时间 HH:MM
-- end_time: 可选，结束时间 HH:MM（不填则默认1小时后）
-- activity: 必填，活动内容（如"喝咖啡"、"吃饭"、"运动"）
-- location: 可选，地点
-- message: 可选，附加消息`,
+Do NOT use when:
+- 发普通消息 → draft_message
+- 没有 friend_id → 先用 find_friends 获取`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
 				"friend_id": {
 					Type:        "string",
-					Description: "好友ID（从 query_friends 获取）",
+					Description: "好友ID（从 find_friends 获取）",
 				},
 				"friend_name": {
 					Type:        "string",
@@ -173,45 +133,49 @@ func v4CreateScheduleInviteTool() *Tool {
 	}
 }
 
-// v4ConfirmSendTool 确认发送工具
-func v4ConfirmSendTool() *Tool {
+// v4RemoveFriendTool 删除好友工具
+func v4RemoveFriendTool() *Tool {
 	return &Tool{
-		Name: "confirm_send",
-		Description: `确认发送待发送的消息或邀请。
+		Name: "remove_friend",
+		Description: `删除好友关系。生成删除预览（不直接删除），用户确认后调用 confirm 执行。
 
-【何时调用】
-- 系统提示中存在"⚠️待确认消息"或"⚠️待确认邀请"，且用户表示同意：
-  "好的"、"发送"、"确认"、"发吧"、"可以"、"没问题"、"就这样"
+Use this tool when:
+- 用户明确要删除好友（"把小明从好友列表删了"、"不想跟他做朋友了"）
 
-【何时不调用】
-- 没有待确认的消息或邀请 → 不要调用
-- 待确认的是时刻表（应该用 save_schedule）→ 不要调用
-
-【前置条件】
-- 必须先调用 send_message 或 create_schedule_invite 生成预览
-- session 中必须有待确认的消息/邀请（pending_message 或 pending_invite）
-
-【注意】
-- 不需要传参数，会发送 session 中待确认的内容
-- 发送成功后会清除待确认状态`,
+IMPORTANT:
+- 不可逆操作，需用户确认
+- friend_id 必须从 find_friends 获取，不要编造`,
 		Parameters: ToolParameters{
-			Type:       "object",
-			Properties: map[string]ToolParam{},
+			Type: "object",
+			Properties: map[string]ToolParam{
+				"friend_id": {
+					Type:        "string",
+					Description: "好友ID（从 find_friends 获取）",
+				},
+				"friend_name": {
+					Type:        "string",
+					Description: "好友名字（用于确认显示）",
+				},
+			},
+			Required: []string{"friend_id", "friend_name"},
 		},
 	}
 }
 
-// V4CoreTools 返回 V4 核心工具（9个：时刻表5 + 好友4）
-// V4 语音日程助手只需要核心工具，扩展工具（设备数据、记忆、通讯录）属于 AgentExecutor 通用能力
-func V4CoreTools() []*Tool {
-	tools := V4ScheduleTools()               // 5个时刻表工具
-	tools = append(tools, V4FriendTools()...) // 4个好友工具
+// [已删除] v4ConfirmSendTool - 确认功能已合并到 confirm 工具（tools_schedule.go）
+
+// V4BaseTools 返回始终加载的 8 个核心工具
+// 设计原则：基础工具集 ≤ 8，保持 LLM 选择空间可控
+func V4BaseTools() []*Tool {
+	tools := V4ScheduleTools()               // 5个日程工具（不含 delete_schedule）
+	tools = append(tools, V4FriendTools()...) // 3个好友工具（不含 remove_friend）
 	return tools
 }
 
-// V4AllTools 返回 V4 版本所有工具（时刻表 + 好友 + 扩展）
-func V4AllTools() []*Tool {
-	tools := V4CoreTools()                       // 9个核心工具
-	tools = append(tools, V4ExtendedTools()...)   // 6个扩展工具
+// V4CoreTools 返回全量核心工具（10个，eval 全量测试用）
+func V4CoreTools() []*Tool {
+	tools := V4BaseTools()
+	tools = append(tools, V4DeleteScheduleTool(), V4RemoveFriendTool())
 	return tools
 }
+

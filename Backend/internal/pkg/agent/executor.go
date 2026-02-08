@@ -128,6 +128,7 @@ func (e *AgentExecutor) Execute(ctx context.Context, session *AgentSession, user
 		session.AddMessage(NewAssistantToolCallMessage(response.Content, response.ToolCalls))
 
 		// 4c. 执行工具
+		shouldStop := false
 		for _, toolCall := range response.ToolCalls {
 			// 解析参数
 			args, err := toolCall.ParseArguments()
@@ -173,6 +174,19 @@ func (e *AgentExecutor) Execute(ctx context.Context, session *AgentSession, user
 				toolCall.Function.Name,
 				FormatToolResult(result, nil),
 			))
+
+			// 终止工具：立即结束循环，跳过后续 LLM 调用
+			if result.ShouldStop {
+				shouldStop = true
+			}
+		}
+
+		if shouldStop {
+			return &AgentResponse{
+				Content:    response.Content,
+				ToolsUsed:  toolsUsed,
+				Iterations: session.CurrentIteration,
+			}, nil
 		}
 		// 继续循环，LLM 处理工具结果
 	}

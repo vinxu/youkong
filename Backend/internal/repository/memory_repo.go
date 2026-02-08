@@ -210,6 +210,9 @@ type UserAnalysisCache struct {
 	Mood                    *string   `db:"mood"`                    // 心情
 	Activity                *string   `db:"activity"`                // 活动
 	Context                 *string   `db:"context"`                 // 上下文
+	GifURL                  *string   `db:"gif_url"`                 // GIF URL
+	GiphyQuery              *string   `db:"giphy_query"`             // Giphy 搜索词
+	UseGif                  bool      `db:"use_gif"`                 // 是否使用 GIF 显示模式
 	CreatedAt               time.Time `db:"created_at"`
 	UpdatedAt               time.Time `db:"updated_at"`
 	IsAIGuess               bool      `db:"is_ai_guess"` // 是否为 AI 推测的状态（字段顺序与数据库列顺序一致）
@@ -229,8 +232,8 @@ func (r *MemoryRepository) SaveAnalysisCache(ctx context.Context, userID string,
 
 	query := `INSERT INTO user_analysis_cache (
 		user_id, availability_status, availability_probability, availability_reason, availability_confidence,
-		life_status_emoji, life_status_label, life_status_description, mood, activity, context, is_ai_guess
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		life_status_emoji, life_status_label, life_status_description, mood, activity, context, gif_url, giphy_query, use_gif, is_ai_guess
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON DUPLICATE KEY UPDATE
 		availability_status = VALUES(availability_status),
 		availability_probability = VALUES(availability_probability),
@@ -242,6 +245,9 @@ func (r *MemoryRepository) SaveAnalysisCache(ctx context.Context, userID string,
 		mood = VALUES(mood),
 		activity = VALUES(activity),
 		context = VALUES(context),
+		gif_url = VALUES(gif_url),
+		giphy_query = VALUES(giphy_query),
+		use_gif = VALUES(use_gif),
 		is_ai_guess = VALUES(is_ai_guess),
 		updated_at = NOW()`
 	_, err := r.db.ExecContext(ctx, query,
@@ -256,6 +262,9 @@ func (r *MemoryRepository) SaveAnalysisCache(ctx context.Context, userID string,
 		strPtrOrNull(result.Mood),
 		strPtrOrNull(result.Activity),
 		strPtrOrNull(result.Context),
+		strPtrOrNull(result.LifeStatus.GifURL),
+		strPtrOrNull(result.LifeStatus.GiphyQuery),
+		result.LifeStatus.UseGif,
 		result.IsAIGuess,
 	)
 	return err
@@ -292,6 +301,9 @@ func (r *MemoryRepository) GetAnalysisCache(ctx context.Context, userID string) 
 			Emoji:       cache.LifeStatusEmoji,
 			Label:       cache.LifeStatusLabel,
 			Description: ptrStrToStr(cache.LifeStatusDescription),
+			GifURL:      ptrStrToStr(cache.GifURL),
+			GiphyQuery:  ptrStrToStr(cache.GiphyQuery),
+			UseGif:      cache.UseGif,
 		},
 		Mood:      ptrStrToStr(cache.Mood),
 		Activity:  ptrStrToStr(cache.Activity),
@@ -340,6 +352,9 @@ func (r *MemoryRepository) GetAnalysisCacheByUserIDs(ctx context.Context, userID
 				Emoji:       cache.LifeStatusEmoji,
 				Label:       cache.LifeStatusLabel,
 				Description: ptrStrToStr(cache.LifeStatusDescription),
+				GifURL:      ptrStrToStr(cache.GifURL),
+				GiphyQuery:  ptrStrToStr(cache.GiphyQuery),
+				UseGif:      cache.UseGif,
 			},
 			Mood:      ptrStrToStr(cache.Mood),
 			Activity:  ptrStrToStr(cache.Activity),

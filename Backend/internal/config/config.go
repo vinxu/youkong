@@ -92,6 +92,8 @@ type TencentConfig struct {
 	SMSTemplateID string
 	COSBucket     string
 	COSRegion     string
+	COSSecretID   string // COS 专用密钥（与 SMS 密钥分离）
+	COSSecretKey  string
 }
 
 type WechatConfig struct {
@@ -185,6 +187,8 @@ func Load() (*Config, error) {
 			SMSTemplateID: viper.GetString("TENCENT_SMS_TEMPLATE_ID"),
 			COSBucket:     viper.GetString("TENCENT_COS_BUCKET"),
 			COSRegion:     viper.GetString("TENCENT_COS_REGION"),
+			COSSecretID:   viper.GetString("TENCENT_COS_SECRET_ID"),
+			COSSecretKey:  viper.GetString("TENCENT_COS_SECRET_KEY"),
 		},
 		Wechat: WechatConfig{
 			AppID:     viper.GetString("WECHAT_APP_ID"),

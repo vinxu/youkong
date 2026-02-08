@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,8 +15,14 @@ import (
 	"youkong/internal/model"
 	"youkong/internal/pkg/agent"
 	"youkong/internal/pkg/response"
+	"youkong/internal/pkg/tencent"
 	"youkong/internal/service"
 )
+
+// FriendshipChecker 好友关系检查接口
+type FriendshipChecker interface {
+	AreFriends(ctx context.Context, userID, friendID string) (bool, error)
+}
 
 // AgentHandler Agent 处理器
 type AgentHandler struct {
@@ -25,7 +32,13 @@ type AgentHandler struct {
 	voiceScheduleServiceV4 *service.VoiceScheduleServiceV4 // V4 版本
 	agentChatService       *service.AgentChatService
 	scheduleRepo           ScheduleRepositoryInterface
+	friendshipRepo         FriendshipChecker              // 好友关系检查
 	inferenceAgent         *service.StatusInferenceAgent // V2 推断 Agent
+	// STS 配置
+	stsSecretID  string
+	stsSecretKey string
+	stsBucket    string
+	stsRegion    string
 }
 
 // ScheduleRepositoryInterface 时刻表 Repository 接口
@@ -34,18 +47,21 @@ type ScheduleRepositoryInterface interface {
 	GetUserOldestScheduleDate(ctx context.Context, userID string) (string, error)
 	CountUserSchedules(ctx context.Context, userID string) (int, error)
 	GetActiveByUserAndDate(ctx context.Context, userID string, date time.Time) (*model.StatusSchedule, error)
+	GetLatestByUserAndDate(ctx context.Context, userID string, date time.Time) (*model.StatusSchedule, error)
+	GetAllByUserAndDate(ctx context.Context, userID string, date time.Time) ([]*model.StatusSchedule, error)
 	Create(ctx context.Context, schedule *model.StatusSchedule) error
 	Update(ctx context.Context, schedule *model.StatusSchedule) error
 }
 
 // NewAgentHandler 创建 Agent 处理器
-func NewAgentHandler(agentService *service.AgentService, memoryService *service.MemoryService, voiceScheduleService *service.VoiceScheduleService, agentChatService *service.AgentChatService, scheduleRepo ScheduleRepositoryInterface) *AgentHandler {
+func NewAgentHandler(agentService *service.AgentService, memoryService *service.MemoryService, voiceScheduleService *service.VoiceScheduleService, agentChatService *service.AgentChatService, scheduleRepo ScheduleRepositoryInterface, friendshipRepo FriendshipChecker) *AgentHandler {
 	return &AgentHandler{
 		agentService:         agentService,
 		memoryService:        memoryService,
 		voiceScheduleService: voiceScheduleService,
 		agentChatService:     agentChatService,
 		scheduleRepo:         scheduleRepo,
+		friendshipRepo:       friendshipRepo,
 	}
 }
 
@@ -59,7 +75,15 @@ func (h *AgentHandler) SetInferenceAgent(agent *service.StatusInferenceAgent) {
 	h.inferenceAgent = agent
 }
 
-// ReportStatus 上报状态（简化版，仅用于手动触发分析）
+// SetSTSConfig 设置 STS 配置
+func (h *AgentHandler) SetSTSConfig(secretID, secretKey, bucket, region string) {
+	h.stsSecretID = secretID
+	h.stsSecretKey = secretKey
+	h.stsBucket = bucket
+	h.stsRegion = region
+}
+
+// ReportStatus 上报状态（Agent 循环推断）
 // POST /api/agent/status
 func (h *AgentHandler) ReportStatus(c *gin.Context) {
 	userID := middleware.GetUserID(c)
@@ -68,205 +92,103 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 		return
 	}
 
+	// 允许空 body（用缓存的传感器数据推断）
 	var req model.ExtendedStatusReportRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.ParamError(c, "参数错误")
+	c.ShouldBindJSON(&req)
+
+	// 使用 Agent 推断
+	if h.inferenceAgent == nil {
+		response.InternalError(c, "推断服务未初始化")
 		return
 	}
 
-	// ✅ 同步分析并返回结果
-	if h.memoryService == nil {
-		response.InternalError(c, "分析服务未初始化")
-		return
-	}
-
-	// 【优先级检查】如果有活跃时刻表，使用时刻表状态而不是 LLM 分析
-	if scheduleResult := h.checkActiveScheduleStatus(c.Request.Context(), userID); scheduleResult != nil {
-		fmt.Printf("[上报] 使用时刻表状态 user=%s emoji=%s status=%s\n",
-			userID, scheduleResult.LifeStatus.Emoji, scheduleResult.LifeStatus.Label)
-
-		// 缓存时刻表状态
-		if h.memoryService != nil {
-			_ = h.memoryService.CacheAnalysisResult(c.Request.Context(), userID, scheduleResult)
-		}
-
-		response.Success(c, gin.H{
-			"success":  true,
-			"message":  "使用时刻表状态",
-			"analysis": scheduleResult,
-		})
-		return
-	}
-
-	fmt.Printf("[上报] 开始分析 user=%s\n", userID)
-	result, err := h.memoryService.AnalyzeAndUpdateMemory(c.Request.Context(), userID, &req)
+	fmt.Printf("[上报] 开始 V3 推断 user=%s\n", userID)
+	inference, err := h.inferenceAgent.InferWithAgent(c.Request.Context(), userID, &req)
 	if err != nil {
-		fmt.Printf("[上报] 分析失败 user=%s error=%v\n", userID, err)
-		response.InternalError(c, "分析失败")
+		fmt.Printf("[上报] 推断失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "推断失败")
 		return
 	}
 
-	fmt.Printf("[上报] 分析完成 user=%s status=%s\n", userID, result.Availability.Status)
+	fmt.Printf("[上报] 推断完成 user=%s emoji=%s activity=%s confidence=%s\n",
+		userID, inference.Emoji, inference.Activity, inference.Confidence)
 
-	// 注意：不再自动同步到时刻表，只有通过 AI 推理界面确认发布的状态才会写入时刻表
-	// 之前的 syncAIGuessToSchedule 会导致旧的 LLM 分析结果覆盖正确的推理结果
+	// 转换为 AnalysisResult 格式（兼容现有前端）
+	analysisResult := inferenceToAnalysisResult(inference)
 
-	// 返回分析结果
+	// 缓存分析结果
+	if h.memoryService != nil {
+		_ = h.memoryService.CacheAnalysisResult(c.Request.Context(), userID, analysisResult)
+	}
+
 	response.Success(c, gin.H{
 		"success":  true,
-		"message":  "分析完成",
-		"analysis": result,
+		"message":  "推断完成",
+		"analysis": analysisResult,
 	})
 }
 
-// checkActiveScheduleStatus 检查用户是否有活跃时刻表，如果有返回当前时段的状态
-func (h *AgentHandler) checkActiveScheduleStatus(ctx context.Context, userID string) *model.AnalysisResult {
-	if h.scheduleRepo == nil {
-		return nil
-	}
-
-	now := time.Now()
-	currentTime := now.Format("15:04")
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	yesterday := today.AddDate(0, 0, -1)
-
-	// ============ 第一步：检查昨天的跨午夜时段 ============
-	// 凌晨时段（00:00-12:00），优先检查昨天的时刻表中是否有跨午夜到今天的时段
-	if currentTime < "12:00" {
-		yesterdaySchedule, err := h.scheduleRepo.GetActiveByUserAndDate(ctx, userID, yesterday)
-		if err == nil && yesterdaySchedule != nil && len(yesterdaySchedule.Items) > 0 {
-			for _, item := range yesterdaySchedule.Items {
-				// 只检查跨午夜的时段（end < start，如 22:00-09:00）
-				if item.EndTime < item.StartTime {
-					// 当前时间在跨午夜时段的"第二天部分"（00:00 到 end）
-					if currentTime < item.EndTime {
-						fmt.Printf("[Schedule] 匹配到昨天(%s)的跨午夜时段: %s-%s %s\n",
-							yesterday.Format("01-02"), item.StartTime, item.EndTime, item.Status)
-						return &model.AnalysisResult{
-							Availability: model.AvailabilityAnalysis{
-								Status:      getScheduleStatusText(item.Status),
-								Probability: guessScheduleProbability(item.Status),
-								Reason:      item.Status,
-								Confidence:  "high",
-							},
-							LifeStatus: model.LifeStatus{
-								Emoji:       item.Emoji,
-								Label:       item.Status,
-								Description: item.Status,
-							},
-							UpdatedAt: now,
-						}
-					}
-				}
-			}
+// inferenceToAnalysisResult 将 CurrentStatusInference 转换为 AnalysisResult（兼容旧格式）
+func inferenceToAnalysisResult(inference *model.CurrentStatusInference) *model.AnalysisResult {
+	// 根据 confidence 精确映射 probability
+	statusText := "可能有空"
+	probability := 50
+	if inference.IsAvailable {
+		switch inference.Confidence {
+		case "high":
+			statusText = "有空"
+			probability = 90
+		case "medium":
+			statusText = "可能有空"
+			probability = 70
+		default:
+			statusText = "可能有空"
+			probability = 60
+		}
+	} else {
+		switch inference.Confidence {
+		case "high":
+			statusText = "忙碌"
+			probability = 10
+		case "medium":
+			statusText = "可能忙碌"
+			probability = 30
+		default:
+			statusText = "状态未知"
+			probability = 40
 		}
 	}
 
-	// ============ 第二步：检查今天的时刻表 ============
-	schedule, err := h.scheduleRepo.GetActiveByUserAndDate(ctx, userID, today)
-	if err != nil || schedule == nil || len(schedule.Items) == 0 {
-		return nil
+	result := &model.AnalysisResult{
+		Availability: model.AvailabilityAnalysis{
+			Status:      statusText,
+			Probability: probability,
+			Reason:      inference.Activity,
+			Confidence:  inference.Confidence,
+		},
+		LifeStatus: model.LifeStatus{
+			Emoji:       inference.Emoji,
+			Label:       inference.Activity,
+			Description: inference.Reasoning,
+		},
+		UpdatedAt: time.Now(),
+		IsAIGuess: true,
 	}
 
-	// 检查当前时间是否在今天某个时段内
-	for _, item := range schedule.Items {
-		// 对于跨午夜时段（end < start），只有当前时间 >= start 时才匹配
-		// 跨午夜时段的"第二天部分"已在第一步处理
-		if item.EndTime < item.StartTime {
-			// 跨午夜：只匹配"今天部分"（start 到 23:59）
-			if currentTime >= item.StartTime {
-				fmt.Printf("[Schedule] 匹配到今天(%s)的跨午夜时段(今天部分): %s-%s %s\n",
-					today.Format("01-02"), item.StartTime, item.EndTime, item.Status)
-				return &model.AnalysisResult{
-					Availability: model.AvailabilityAnalysis{
-						Status:      getScheduleStatusText(item.Status),
-						Probability: guessScheduleProbability(item.Status),
-						Reason:      item.Status,
-						Confidence:  "high",
-					},
-					LifeStatus: model.LifeStatus{
-						Emoji:       item.Emoji,
-						Label:       item.Status,
-						Description: item.Status,
-					},
-					UpdatedAt: now,
-				}
-			}
-		} else {
-			// 普通时段（同一天内）
-			if currentTime >= item.StartTime && currentTime < item.EndTime {
-				fmt.Printf("[Schedule] 匹配到今天(%s)的普通时段: %s-%s %s\n",
-					today.Format("01-02"), item.StartTime, item.EndTime, item.Status)
-				return &model.AnalysisResult{
-					Availability: model.AvailabilityAnalysis{
-						Status:      getScheduleStatusText(item.Status),
-						Probability: guessScheduleProbability(item.Status),
-						Reason:      item.Status,
-						Confidence:  "high",
-					},
-					LifeStatus: model.LifeStatus{
-						Emoji:       item.Emoji,
-						Label:       item.Status,
-						Description: item.Status,
-					},
-					UpdatedAt: now,
-				}
-			}
-		}
+	// 传递 place 信息
+	if inference.Place != "" {
+		result.LifeStatus.Description = fmt.Sprintf("%s（%s）", inference.Reasoning, inference.Place)
 	}
 
-	return nil
-}
-
-// isTimeInRange 检查时间是否在范围内（复用调度器逻辑）
-func isTimeInRange(current, start, end string) bool {
-	// 处理跨午夜的情况
-	if end < start {
-		return current >= start || current < end
+	// 传递 GIF 信息
+	if inference.GifURL != "" {
+		result.LifeStatus.GifURL = inference.GifURL
 	}
-	return current >= start && current < end
-}
-
-// getScheduleStatusText 根据状态描述判断有空/忙碌
-func getScheduleStatusText(status string) string {
-	busyKeywords := []string{"开会", "工作", "上班", "上课", "出差", "加班", "忙"}
-	for _, keyword := range busyKeywords {
-		if containsStr(status, keyword) {
-			return "忙碌"
-		}
+	if inference.GiphyQuery != "" {
+		result.LifeStatus.GiphyQuery = inference.GiphyQuery
 	}
 
-	freeKeywords := []string{"休息", "休闲", "逛街", "刷", "玩", "躺", "看", "吃", "喝", "聚"}
-	for _, keyword := range freeKeywords {
-		if containsStr(status, keyword) {
-			return "有空"
-		}
-	}
-
-	return "可能有空"
-}
-
-// guessScheduleProbability 猜测有空概率
-func guessScheduleProbability(status string) int {
-	statusText := getScheduleStatusText(status)
-	switch statusText {
-	case "有空":
-		return 80
-	case "忙碌":
-		return 20
-	default:
-		return 50
-	}
-}
-
-// containsStr 检查字符串是否包含子串
-func containsStr(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
+	return result
 }
 
 // syncAIGuessToSchedule 同步 AI 推测状态到时刻表
@@ -1130,8 +1052,9 @@ func (h *AgentHandler) VoiceScheduleText(c *gin.Context) {
 	}
 
 	var req struct {
-		SessionID string `json:"session_id"` // 可选，用于继续会话
-		Text      string `json:"text" binding:"required"`
+		SessionID  string                          `json:"session_id"`  // 可选，用于继续会话
+		Text       string                          `json:"text" binding:"required"`
+		SensorData *model.ExtendedStatusReportRequest `json:"sensor_data"` // 可选，一键生成时附带传感器数据
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1139,7 +1062,7 @@ func (h *AgentHandler) VoiceScheduleText(c *gin.Context) {
 		return
 	}
 
-	fmt.Printf("[VoiceScheduleTextV4] user=%s session=%s text=%s\n", userID, req.SessionID, req.Text)
+	fmt.Printf("[VoiceScheduleTextV4] user=%s session=%s text=%s hasSensor=%v\n", userID, req.SessionID, req.Text, req.SensorData != nil)
 
 	// 设置 SSE 响应头
 	c.Header("Content-Type", "text/event-stream")
@@ -1150,7 +1073,7 @@ func (h *AgentHandler) VoiceScheduleText(c *gin.Context) {
 	w := c.Writer
 
 	// 使用 V4 服务处理文本输入
-	_, err := h.voiceScheduleServiceV4.ProcessTextInput(c.Request.Context(), userID, req.SessionID, req.Text, func(event *model.V4Event) {
+	_, err := h.voiceScheduleServiceV4.ProcessTextInput(c.Request.Context(), userID, req.SessionID, req.Text, req.SensorData, func(event *model.V4Event) {
 		data, err := json.Marshal(event)
 		if err != nil {
 			return
@@ -1190,8 +1113,9 @@ func (h *AgentHandler) VoiceScheduleTextV4(c *gin.Context) {
 	}
 
 	var req struct {
-		SessionID string `json:"session_id"` // 可选，用于继续会话
-		Text      string `json:"text" binding:"required"`
+		SessionID  string                          `json:"session_id"`  // 可选，用于继续会话
+		Text       string                          `json:"text" binding:"required"`
+		SensorData *model.ExtendedStatusReportRequest `json:"sensor_data"` // 可选，一键生成时附带传感器数据
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1199,7 +1123,7 @@ func (h *AgentHandler) VoiceScheduleTextV4(c *gin.Context) {
 		return
 	}
 
-	fmt.Printf("[VoiceScheduleTextV4] user=%s session=%s text=%s\n", userID, req.SessionID, req.Text)
+	fmt.Printf("[VoiceScheduleTextV4] user=%s session=%s text=%s hasSensor=%v\n", userID, req.SessionID, req.Text, req.SensorData != nil)
 
 	// 设置 SSE 响应头
 	c.Header("Content-Type", "text/event-stream")
@@ -1210,7 +1134,7 @@ func (h *AgentHandler) VoiceScheduleTextV4(c *gin.Context) {
 	w := c.Writer
 
 	// 使用 V4 服务处理
-	_, err := h.voiceScheduleServiceV4.ProcessTextInput(c.Request.Context(), userID, req.SessionID, req.Text, func(event *model.V4Event) {
+	_, err := h.voiceScheduleServiceV4.ProcessTextInput(c.Request.Context(), userID, req.SessionID, req.Text, req.SensorData, func(event *model.V4Event) {
 		data, err := json.Marshal(event)
 		if err != nil {
 			return
@@ -1489,6 +1413,94 @@ func parseLimit(s string) (int, error) {
 	return limit, err
 }
 
+// GetUserSchedule 获取好友的时刻表（只返回当前和未来的条目）
+// GET /api/v1/agent/user/:userId/schedule
+func (h *AgentHandler) GetUserSchedule(c *gin.Context) {
+	viewerID := middleware.GetUserID(c)
+	if viewerID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.scheduleRepo == nil {
+		response.InternalError(c, "时刻表服务未启用")
+		return
+	}
+
+	targetUserID := c.Param("userId")
+	if targetUserID == "" {
+		response.ParamError(c, "用户 ID 不能为空")
+		return
+	}
+
+	// 检查好友关系
+	if h.friendshipRepo != nil {
+		areFriends, err := h.friendshipRepo.AreFriends(c.Request.Context(), viewerID, targetUserID)
+		if err != nil {
+			fmt.Printf("[GetUserSchedule] 检查好友关系失败 viewer=%s target=%s error=%v\n", viewerID, targetUserID, err)
+			response.InternalError(c, "检查好友关系失败")
+			return
+		}
+		if !areFriends {
+			response.Error(c, 403, "只能查看好友的行程表")
+			return
+		}
+	}
+
+	// 获取最近的时刻表数据
+	schedules, err := h.scheduleRepo.GetUserScheduleHistory(c.Request.Context(), targetUserID, "", 10)
+	if err != nil {
+		fmt.Printf("[GetUserSchedule] 获取失败 target=%s error=%v\n", targetUserID, err)
+		response.InternalError(c, "获取失败")
+		return
+	}
+
+	// 过滤：只保留今天及未来的时刻表，今天的条目过滤掉已结束的
+	now := time.Now()
+	todayStr := now.Format("2006-01-02")
+	currentTime := now.Format("15:04")
+
+	var filtered []*model.StatusSchedule
+	for _, s := range schedules {
+		dateStr := s.ScheduleDate.Format("2006-01-02")
+
+		if dateStr < todayStr {
+			// 过去的日期，跳过
+			continue
+		}
+
+		if dateStr == todayStr {
+			// 今天：过滤掉已结束的条目
+			var activeItems model.ScheduleItems
+			for _, item := range s.Items {
+				// 跨午夜时段（end < start）不会结束于今天，保留
+				if item.EndTime < item.StartTime {
+					activeItems = append(activeItems, item)
+				} else if item.EndTime > currentTime {
+					activeItems = append(activeItems, item)
+				}
+			}
+			if len(activeItems) > 0 {
+				filteredSchedule := *s
+				filteredSchedule.Items = activeItems
+				filtered = append(filtered, &filteredSchedule)
+			}
+		} else {
+			// 未来的日期，全部保留
+			filtered = append(filtered, s)
+		}
+	}
+
+	// 格式化响应
+	daySchedules := formatSchedulesByDate(filtered)
+
+	response.Success(c, gin.H{
+		"schedules":   daySchedules,
+		"has_more":    false,
+		"oldest_date": "",
+	})
+}
+
 // UpdateScheduleItemRequest 更新时刻表条目请求
 type UpdateScheduleItemRequest struct {
 	OldStartTime string `json:"old_start_time" binding:"required"`
@@ -1497,6 +1509,7 @@ type UpdateScheduleItemRequest struct {
 	NewEndTime   string `json:"new_end_time" binding:"required"`
 	Emoji        string `json:"emoji" binding:"required"`
 	Status       string `json:"status" binding:"required"`
+	Highlight    *bool  `json:"highlight,omitempty"` // 高亮状态（有空），nil 表示不修改
 }
 
 // UpdateScheduleItem 更新时刻表条目
@@ -1532,8 +1545,8 @@ func (h *AgentHandler) UpdateScheduleItem(c *gin.Context) {
 		return
 	}
 
-	// 获取当天的时刻表
-	schedule, err := h.scheduleRepo.GetActiveByUserAndDate(c.Request.Context(), userID, scheduleDate)
+	// 获取当天的时刻表（不限 status，允许编辑已完成的时刻表）
+	schedule, err := h.scheduleRepo.GetLatestByUserAndDate(c.Request.Context(), userID, scheduleDate)
 	if err != nil || schedule == nil {
 		response.NotFound(c, "未找到该日期的时刻表")
 		return
@@ -1543,6 +1556,10 @@ func (h *AgentHandler) UpdateScheduleItem(c *gin.Context) {
 	found := false
 	for i, item := range schedule.Items {
 		if item.StartTime == req.OldStartTime && item.EndTime == req.OldEndTime {
+			highlight := item.Highlight // 默认保留原值
+			if req.Highlight != nil {
+				highlight = *req.Highlight
+			}
 			schedule.Items[i] = model.ScheduleItem{
 				StartTime: req.NewStartTime,
 				EndTime:   req.NewEndTime,
@@ -1550,6 +1567,9 @@ func (h *AgentHandler) UpdateScheduleItem(c *gin.Context) {
 				Status:    req.Status,
 				Executed:  item.Executed,
 				IsAIGuess: false, // 用户编辑后不再是 AI 推测
+				GifURL:    item.GifURL,
+				GiphyQuery: item.GiphyQuery,
+				Highlight: highlight,
 			}
 			found = true
 			break
@@ -1611,8 +1631,8 @@ func (h *AgentHandler) DeleteScheduleItem(c *gin.Context) {
 		return
 	}
 
-	// 获取当天的时刻表
-	schedule, err := h.scheduleRepo.GetActiveByUserAndDate(c.Request.Context(), userID, scheduleDate)
+	// 获取当天的时刻表（不限 status，允许编辑已完成的时刻表）
+	schedule, err := h.scheduleRepo.GetLatestByUserAndDate(c.Request.Context(), userID, scheduleDate)
 	if err != nil || schedule == nil {
 		response.NotFound(c, "未找到该日期的时刻表")
 		return
@@ -1673,13 +1693,18 @@ func formatSchedulesByDate(schedules []*model.StatusSchedule) []DayScheduleRespo
 		}
 	}
 
-	// 按日期顺序构建响应
+	// 按日期顺序构建响应，items 按 start_time 排序
 	result := make([]DayScheduleResponse, 0, len(dateOrder))
 	for _, dateStr := range dateOrder {
 		s := dateMap[dateStr]
+		items := make([]model.ScheduleItem, len(s.Items))
+		copy(items, s.Items)
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].StartTime < items[j].StartTime
+		})
 		result = append(result, DayScheduleResponse{
 			ScheduleDate: dateStr,
-			Items:        s.Items,
+			Items:        items,
 			Status:       string(s.Status),
 		})
 	}
@@ -1978,10 +2003,11 @@ func (h *AgentHandler) InferStatus(c *gin.Context) {
 			CorrectedActivity:    result.Activity,
 			CorrectedPlace:       result.Place,
 			CorrectedIsAvailable: &result.IsAvailable,
+			GifURL:               result.GifURL,
+			GiphyQuery:           result.GiphyQuery,
 		}
 		if err := h.agentService.SaveStatusFeedback(c.Request.Context(), userID, feedbackReq); err != nil {
 			fmt.Printf("[InferStatus] 更新首页状态失败 user=%s error=%v\n", userID, err)
-			// 不返回错误，推理结果已经成功
 		} else {
 			fmt.Printf("[InferStatus] 首页状态已更新 user=%s\n", userID)
 		}
@@ -2022,9 +2048,77 @@ func (h *AgentHandler) StatusFeedback(c *gin.Context) {
 	})
 }
 
+// UploadGif 客户端上传 GIF 文件，后端转存到 COS
+// POST /api/v1/agent/upload-gif
+func (h *AgentHandler) UploadGif(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	file, err := c.FormFile("gif")
+	if err != nil {
+		response.ParamError(c, "请上传 GIF 文件")
+		return
+	}
+
+	// 限制文件大小 5MB
+	if file.Size > 5*1024*1024 {
+		response.ParamError(c, "GIF 文件不能超过 5MB")
+		return
+	}
+
+	f, err := file.Open()
+	if err != nil {
+		response.InternalError(c, "读取文件失败")
+		return
+	}
+	defer f.Close()
+
+	// 上传到 COS
+	cosURL, err := h.agentService.UploadGifToCOS(c.Request.Context(), f, file.Size)
+	if err != nil {
+		fmt.Printf("[UploadGif] 上传失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "上传失败")
+		return
+	}
+
+	fmt.Printf("[UploadGif] 上传成功 user=%s size=%d url=%s\n", userID, file.Size, cosURL)
+
+	response.Success(c, gin.H{
+		"gif_url": cosURL,
+	})
+}
+
+// GetSTSCredentials 获取 COS 临时上传凭证
+// GET /api/v1/agent/sts
+func (h *AgentHandler) GetSTSCredentials(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.stsSecretID == "" || h.stsBucket == "" {
+		response.InternalError(c, "STS 未配置")
+		return
+	}
+
+	prefix := "gif/status/"
+	cred, err := tencent.GenerateSTSCredentials(h.stsSecretID, h.stsSecretKey, h.stsBucket, h.stsRegion, prefix)
+	if err != nil {
+		fmt.Printf("[STS] 生成临时凭证失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "获取上传凭证失败")
+		return
+	}
+
+	response.Success(c, gin.H{"sts": cred})
+}
+
 // ========== V2 Agent-based 状态推断接口 ==========
 
-// InferStatusV2 Agent-based AI 推断当下状态（同步版）
+// InferStatusV2 Agent-based AI 推断当下状态（V3 架构：支持选项交互）
 // POST /api/v1/agent/infer-status-v2
 func (h *AgentHandler) InferStatusV2(c *gin.Context) {
 	userID := middleware.GetUserID(c)
@@ -2041,30 +2135,38 @@ func (h *AgentHandler) InferStatusV2(c *gin.Context) {
 	var req model.ExtendedStatusReportRequest
 	c.ShouldBindJSON(&req)
 
-	result, err := h.inferenceAgent.InferWithAgent(c.Request.Context(), userID, &req)
+	// 使用 V3 接口返回完整 InferenceResponse
+	inferResp, err := h.inferenceAgent.InferWithAgentV3(c.Request.Context(), userID, &req)
 	if err != nil {
-		fmt.Printf("[InferStatusV2] 推断失败 user=%s error=%v\n", userID, err)
+		fmt.Printf("[InferStatusV3] 推断失败 user=%s error=%v\n", userID, err)
 		response.InternalError(c, "推断失败")
 		return
 	}
 
-	fmt.Printf("[InferStatusV2] 推断成功 user=%s emoji=%s activity=%s confidence=%s\n",
-		userID, result.Emoji, result.Activity, result.Confidence)
+	// 如果直接完成（非选项交互），更新首页状态
+	if inferResp.Phase == model.InferencePhaseCompleted && inferResp.Result != nil {
+		fmt.Printf("[InferStatusV3] 推断成功 user=%s emoji=%s activity=%s confidence=%s\n",
+			userID, inferResp.Result.Emoji, inferResp.Result.Activity, inferResp.Result.Confidence)
 
-	// 推断成功后更新首页状态
-	if h.agentService != nil {
-		feedbackReq := &model.StatusFeedbackRequest{
-			CorrectedEmoji:       result.Emoji,
-			CorrectedActivity:    result.Activity,
-			CorrectedPlace:       result.Place,
-			CorrectedIsAvailable: &result.IsAvailable,
+		if h.agentService != nil {
+			feedbackReq := &model.StatusFeedbackRequest{
+				CorrectedEmoji:       inferResp.Result.Emoji,
+				CorrectedActivity:    inferResp.Result.Activity,
+				CorrectedPlace:       inferResp.Result.Place,
+				CorrectedIsAvailable: &inferResp.Result.IsAvailable,
+				GifURL:               inferResp.Result.GifURL,
+				GiphyQuery:           inferResp.Result.GiphyQuery,
+			}
+			if err := h.agentService.SaveStatusFeedback(c.Request.Context(), userID, feedbackReq); err != nil {
+				fmt.Printf("[InferStatusV3] 更新首页状态失败 user=%s error=%v\n", userID, err)
+			}
 		}
-		if err := h.agentService.SaveStatusFeedback(c.Request.Context(), userID, feedbackReq); err != nil {
-			fmt.Printf("[InferStatusV2] 更新首页状态失败 user=%s error=%v\n", userID, err)
-		}
+	} else {
+		fmt.Printf("[InferStatusV3] 等待用户选择 user=%s session=%s options=%d\n",
+			userID, inferResp.SessionID, len(inferResp.Options))
 	}
 
-	response.Success(c, result)
+	response.Success(c, inferResp)
 }
 
 // InferStatusV2Stream Agent-based AI 推断当下状态（SSE 流式版）
@@ -2092,6 +2194,24 @@ func (h *AgentHandler) InferStatusV2Stream(c *gin.Context) {
 
 	w := c.Writer
 
+	// 启动心跳保活，防止 iOS URLSession 认为流已结束
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		ticker := time.NewTicker(1500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				// SSE 注释行，客户端会忽略，但保持连接活跃
+				fmt.Fprintf(w, ":keepalive\n\n")
+				w.Flush()
+			}
+		}
+	}()
+
 	// 流式推断
 	result, err := h.inferenceAgent.InferWithAgentStream(c.Request.Context(), userID, &req, func(event *service.InferenceStreamEvent) {
 		data, err := json.Marshal(event)
@@ -2113,7 +2233,7 @@ func (h *AgentHandler) InferStatusV2Stream(c *gin.Context) {
 		return
 	}
 
-	// 推断成功后更新首页状态
+	// 推断成功后更新首页状态（保留 GIF 信息）
 	if result != nil && h.agentService != nil {
 		go func() {
 			ctx := context.Background()
@@ -2122,6 +2242,8 @@ func (h *AgentHandler) InferStatusV2Stream(c *gin.Context) {
 				CorrectedActivity:    result.Activity,
 				CorrectedPlace:       result.Place,
 				CorrectedIsAvailable: &result.IsAvailable,
+				GifURL:               result.GifURL,
+				GiphyQuery:           result.GiphyQuery,
 			}
 			h.agentService.SaveStatusFeedback(ctx, userID, feedbackReq)
 		}()
@@ -2132,7 +2254,7 @@ func (h *AgentHandler) InferStatusV2Stream(c *gin.Context) {
 	w.Flush()
 }
 
-// InferStatusRespond 接收用户确认回答
+// InferStatusRespond 接收用户选择（V3: 从 session 完成推断）
 // POST /api/v1/agent/infer-status-v2/respond
 func (h *AgentHandler) InferStatusRespond(c *gin.Context) {
 	userID := middleware.GetUserID(c)
@@ -2147,25 +2269,41 @@ func (h *AgentHandler) InferStatusRespond(c *gin.Context) {
 	}
 
 	var req struct {
-		SessionID string `json:"session_id" binding:"required"`
-		Answer    string `json:"answer" binding:"required"`
+		SessionID     string `json:"session_id" binding:"required"`
+		SelectedIndex int    `json:"selected_index"` // 用户选择的选项索引
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.ParamError(c, "参数错误: session_id 和 answer 必填")
+		response.ParamError(c, "参数错误: session_id 必填")
 		return
 	}
 
-	fmt.Printf("[InferStatusRespond] user=%s session=%s answer=%s\n", userID, req.SessionID, req.Answer)
+	fmt.Printf("[InferStatusRespond] user=%s session=%s selected=%d\n", userID, req.SessionID, req.SelectedIndex)
 
-	err := h.inferenceAgent.HandleUserResponse(c.Request.Context(), req.SessionID, req.Answer)
+	result, err := h.inferenceAgent.HandleUserResponse(c.Request.Context(), userID, req.SessionID, req.SelectedIndex)
 	if err != nil {
 		fmt.Printf("[InferStatusRespond] 处理失败 user=%s error=%v\n", userID, err)
 		response.InternalError(c, err.Error())
 		return
 	}
 
-	response.Success(c, gin.H{
-		"success": true,
-		"message": "回答已接收",
+	// 更新首页状态
+	if h.agentService != nil && result != nil {
+		feedbackReq := &model.StatusFeedbackRequest{
+			CorrectedEmoji:       result.Emoji,
+			CorrectedActivity:    result.Activity,
+			CorrectedPlace:       result.Place,
+			CorrectedIsAvailable: &result.IsAvailable,
+			GifURL:               result.GifURL,
+			GiphyQuery:           result.GiphyQuery,
+		}
+		if err := h.agentService.SaveStatusFeedback(c.Request.Context(), userID, feedbackReq); err != nil {
+			fmt.Printf("[InferStatusRespond] 更新首页状态失败 user=%s error=%v\n", userID, err)
+		}
+	}
+
+	response.Success(c, &model.InferenceResponse{
+		Phase:  model.InferencePhaseCompleted,
+		Result: result,
 	})
 }
+

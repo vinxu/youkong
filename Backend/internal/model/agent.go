@@ -150,14 +150,18 @@ type GeoPoint struct {
 
 // CurrentStatusInference 当下状态推理结果
 type CurrentStatusInference struct {
-	Emoji        string `json:"emoji"`                   // 1-3个emoji，如"🎮"或"🎮🎧"
-	Place        string `json:"place,omitempty"`         // 可选，如"家里"、"公司"、"咖啡厅"
-	Activity     string `json:"activity"`                // 活动描述，如"打游戏"、"休息中"
-	IsAvailable  bool   `json:"is_available"`            // 是否有空
-	DurationHint string `json:"duration_hint,omitempty"` // 预计持续时长，如"约2小时"、"半天"
-	Confidence   string `json:"confidence"`              // 置信度：high/medium/low
-	InferredAt   int64  `json:"inferred_at"`             // 推理时间戳（毫秒）
-	Reasoning    string `json:"reasoning,omitempty"`     // 推理依据（内部使用，可选返回）
+	Emoji        string `json:"emoji"`                      // 1-3个emoji，如"🎮"或"🎮🎧"
+	Place        string `json:"place,omitempty"`            // 可选，如"家里"、"公司"、"咖啡厅"
+	Activity     string `json:"activity"`                   // 活动描述，如"打游戏"、"休息中"
+	IsAvailable  bool   `json:"is_available"`               // 是否有空
+	DurationHint string `json:"duration_hint,omitempty"`    // 预计持续时长，如"约2小时"、"半天"
+	Confidence   string `json:"confidence"`                 // 置信度：high/medium/low
+	InferredAt   int64  `json:"inferred_at"`                // 推理时间戳（毫秒）
+	Reasoning    string `json:"reasoning,omitempty"`        // 推理依据（内部使用，可选返回）
+	GifURL       string `json:"gif_url,omitempty"`          // GIF URL（仅有空时填充）
+	GifSmallURL  string `json:"gif_small_url,omitempty"`    // 缩略版 GIF URL
+	GiphyQuery   string `json:"giphy_query,omitempty"`      // Giphy 搜索词（英文，供客户端直接搜索）
+	UseGif       bool   `json:"use_gif"`                    // 是否使用 GIF 显示模式
 }
 
 // StatusFeedbackRequest 状态反馈请求（用户修正状态）
@@ -168,6 +172,9 @@ type StatusFeedbackRequest struct {
 	CorrectedActivity   string `json:"corrected_activity" binding:"required"`
 	CorrectedPlace      string `json:"corrected_place,omitempty"`
 	CorrectedIsAvailable *bool `json:"corrected_is_available,omitempty"`
+	GifURL              string `json:"gif_url,omitempty"`         // 客户端获取的 GIF URL
+	GiphyQuery          string `json:"giphy_query,omitempty"`     // Giphy 搜索词（用于后续重新搜索）
+	UseGif              bool   `json:"use_gif"`                   // 是否使用 GIF 显示模式（默认 false 显示 emoji）
 }
 
 // StatusMemoryEntry 状态记忆条目（存储用户修正历史，用于改进推理）
@@ -182,4 +189,63 @@ type StatusMemoryEntry struct {
 	CorrectedIsAvailable bool `json:"corrected_is_available" db:"corrected_is_available"`
 	DeviceContext   string `json:"device_context" db:"device_context"` // JSON: 当时的设备状态
 	CreatedAt       string `json:"created_at" db:"created_at"`
+}
+
+// ========== V3 推断系统模型 ==========
+
+// InferencePhase V3 推断响应阶段
+type InferencePhase string
+
+const (
+	InferencePhaseCompleted     InferencePhase = "completed"      // 推断完成
+	InferencePhaseAwaitingChoice InferencePhase = "awaiting_choice" // 等待用户选择
+)
+
+// InferenceOption 推断选项（不确定时让用户选）
+type InferenceOption struct {
+	Index    int    `json:"index"`
+	Emoji    string `json:"emoji"`
+	Activity string `json:"activity"`
+	Reason   string `json:"reason,omitempty"` // 为何推测此选项
+}
+
+// InferenceSession 推断交互 session（Redis, 5min TTL）
+type InferenceSession struct {
+	SessionID   string              `json:"session_id"`
+	UserID      string              `json:"user_id"`
+	Options     []InferenceOption   `json:"options"`
+	Question    string              `json:"question"`
+	DefaultIdx  int                 `json:"default_index"`
+	SensorData  *ExtendedStatusReportRequest `json:"sensor_data,omitempty"` // 推断时的传感器快照
+	CreatedAt   int64               `json:"created_at"`
+}
+
+// UserInferencePreference 用户推断偏好（从修正历史提炼）
+type UserInferencePreference struct {
+	UserID      string   `json:"user_id"`
+	Preferences []string `json:"preferences"` // 偏好规则列表，如 "晚上在家时更偏好说'刷剧'而不是'看手机'"
+	UpdatedAt   int64    `json:"updated_at"`
+}
+
+// InferenceResponse V3 统一推断响应
+type InferenceResponse struct {
+	Phase     InferencePhase        `json:"phase"`
+	Result    *CurrentStatusInference `json:"result,omitempty"`     // phase=completed 时有值
+	SessionID string                `json:"session_id,omitempty"` // phase=awaiting_choice 时有值
+	Question  string                `json:"question,omitempty"`   // phase=awaiting_choice 时有值
+	Options   []InferenceOption     `json:"options,omitempty"`    // phase=awaiting_choice 时有值
+	DefaultIdx int                  `json:"default_index,omitempty"`
+}
+
+// V3InferenceContext 预聚合的推断上下文（Go 代码收集，注入 system prompt）
+type V3InferenceContext struct {
+	DeviceSignals    map[string]interface{} `json:"device_signals,omitempty"`
+	TodaySchedule    map[string]interface{} `json:"today_schedule,omitempty"`
+	RecentStatuses   []map[string]string    `json:"recent_statuses,omitempty"`
+	Corrections      []map[string]string    `json:"corrections,omitempty"`
+	Conversation     string                 `json:"conversation,omitempty"`
+	Profile          map[string]interface{} `json:"profile,omitempty"`
+	CoreMemory       map[string]interface{} `json:"core_memory,omitempty"`
+	PrevInference    *CurrentStatusInference `json:"prev_inference,omitempty"`
+	Preferences      []string               `json:"preferences,omitempty"`
 }

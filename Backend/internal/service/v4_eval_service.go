@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -17,7 +18,6 @@ import (
 type V4EvalService struct {
 	llmAdapter *agent.LLMAdapter
 	judge      *EvalJudge
-	tools      []*agent.Tool
 	modelName  string
 
 	// 并发控制
@@ -41,10 +41,35 @@ func NewV4EvalService(apiKey, model string) *V4EvalService {
 	return &V4EvalService{
 		llmAdapter:  llmAdapter,
 		judge:       NewEvalJudge(llmAdapter),
-		tools:       agent.V4CoreTools(),
 		concurrency: 3,
 		modelName:   model,
 	}
+}
+
+// evalTime 返回 eval 使用的固定时间（工作日下午 14:30）
+// 确保测试结果不受运行时间影响
+func (s *V4EvalService) evalTime() time.Time {
+	now := time.Now()
+	// 使用今天的日期，但固定为 14:30（下午，最中性的时段）
+	return time.Date(now.Year(), now.Month(), now.Day(), 14, 30, 0, 0, now.Location())
+}
+
+// getEvalToolsForSession 根据 session 状态动态选择工具集（eval 版）
+// 与生产代码 getToolsForSession 逻辑一致：基础 8 工具 + 条件加载
+func (s *V4EvalService) getEvalToolsForSession(session *model.V4Session) []*agent.Tool {
+	tools := agent.V4BaseTools() // 基础 8 个
+
+	// 条件加载：有安排时暴露删除工具
+	if len(session.CurrentSchedule) > 0 || len(session.TomorrowSchedule) > 0 || len(session.TargetDateSchedule) > 0 {
+		tools = append(tools, agent.V4DeleteScheduleTool())
+	}
+
+	// 条件加载：有好友上下文时暴露删除好友工具
+	if session.LastQueriedFriend != nil {
+		tools = append(tools, agent.V4RemoveFriendTool())
+	}
+
+	return tools
 }
 
 // ========== 场景列表 ==========
@@ -70,9 +95,10 @@ type SingleTurnResult struct {
 	Description string
 
 	// LLM 响应
-	Response   string
-	ToolCalls  []string
-	ResponseMs int64
+	Response        string
+	ToolCalls       []string
+	ToolCallDetails []ToolCallDetail // 含参数的工具调用详情
+	ResponseMs      int64
 
 	// 评估结果
 	AutoEval    *AutoEvalResult
@@ -97,7 +123,7 @@ func (s *V4EvalService) RunSingleScenario(ctx context.Context, scenario EvalScen
 	// 跳过空输入
 	if strings.TrimSpace(scenario.Input) == "" {
 		result.Response = "（空输入，跳过 LLM 调用）"
-		result.AutoEval = AutoEvaluate(&scenario, nil, result.Response)
+		result.AutoEval = AutoEvaluate(&scenario, nil, result.Response, nil)
 		result.JudgeScores = s.judge.defaultScores()
 		return result, nil
 	}
@@ -154,16 +180,85 @@ func (s *V4EvalService) RunSingleScenario(ctx context.Context, scenario EvalScen
 				Name: ic.LastQueriedFriend.Name,
 			}
 		}
+		// 注入 PendingDeletion
+		if ic.PendingDeletion != nil {
+			pd := ic.PendingDeletion
+			deletion := &model.V4PendingDeletion{
+				Type:       pd.Type,
+				Date:       pd.Date,
+				Target:     pd.Target,
+				FriendID:   pd.FriendID,
+				FriendName: pd.FriendName,
+			}
+			for _, item := range pd.DeletedItems {
+				deletion.DeletedItems = append(deletion.DeletedItems, model.ScheduleItem{
+					StartTime: item.StartTime,
+					EndTime:   item.EndTime,
+					Emoji:     item.Emoji,
+					Status:    item.Status,
+				})
+			}
+			for _, item := range pd.RemainingItems {
+				deletion.RemainingItems = append(deletion.RemainingItems, model.ScheduleItem{
+					StartTime: item.StartTime,
+					EndTime:   item.EndTime,
+					Emoji:     item.Emoji,
+					Status:    item.Status,
+				})
+			}
+			session.PendingDeletion = deletion
+		}
+		// 覆盖当前时刻表（用于时间感知/有空场景）
+		if len(ic.CurrentSchedule) > 0 {
+			session.CurrentSchedule = nil
+			for _, item := range ic.CurrentSchedule {
+				session.CurrentSchedule = append(session.CurrentSchedule, model.ScheduleItem{
+					StartTime: item.StartTime,
+					EndTime:   item.EndTime,
+					Emoji:     item.Emoji,
+					Status:    item.Status,
+					Highlight: item.Highlight,
+				})
+			}
+		}
+		// 覆盖明日时刻表
+		if len(ic.TomorrowSchedule) > 0 {
+			session.TomorrowSchedule = nil
+			for _, item := range ic.TomorrowSchedule {
+				session.TomorrowSchedule = append(session.TomorrowSchedule, model.ScheduleItem{
+					StartTime: item.StartTime,
+					EndTime:   item.EndTime,
+					Emoji:     item.Emoji,
+					Status:    item.Status,
+				})
+			}
+		}
+		// 覆盖目标日期安排（用于未来日期场景）
+		if len(ic.TargetDateSchedule) > 0 {
+			session.TargetDateSchedule = nil
+			for _, item := range ic.TargetDateSchedule {
+				session.TargetDateSchedule = append(session.TargetDateSchedule, model.ScheduleItem{
+					StartTime: item.StartTime,
+					EndTime:   item.EndTime,
+					Emoji:     item.Emoji,
+					Status:    item.Status,
+				})
+			}
+			session.TargetDateLabel = ic.TargetDateLabel
+		}
 	}
 
-	// 构建消息
+	// 构建消息（注：buildEvalMessages 中的 ParseTemporalHints 会自动设置 DateMatch → TargetDateLabel）
 	messages := s.buildEvalMessages(session, scenario.Input)
+
+	// 动态选择工具集（条件加载）
+	tools := s.getEvalToolsForSession(session)
 
 	// 调用 LLM（与生产代码一致：低温度 + thinking mode）
 	startTime := time.Now()
 	response, err := s.llmAdapter.ChatWithTools(ctx, &agent.LLMRequest{
 		Messages:       messages,
-		Tools:          s.tools,
+		Tools:          tools,
 		Temperature:    0.3,
 		EnableThinking: true,
 		ThinkingBudget: 2048,
@@ -179,10 +274,20 @@ func (s *V4EvalService) RunSingleScenario(ctx context.Context, scenario EvalScen
 	result.Response = response.Content
 	for _, tc := range response.ToolCalls {
 		result.ToolCalls = append(result.ToolCalls, tc.Function.Name)
+		// 解析并保留参数
+		var args map[string]interface{}
+		if tc.Function.Arguments != "" {
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+		}
+		result.ToolCallDetails = append(result.ToolCallDetails, ToolCallDetail{
+			Name:      tc.Function.Name,
+			Arguments: args,
+			RawArgs:   tc.Function.Arguments,
+		})
 	}
 
-	// 自动评估
-	result.AutoEval = AutoEvaluate(&scenario, result.ToolCalls, result.Response)
+	// 自动评估（含参数验证）
+	result.AutoEval = AutoEvaluate(&scenario, result.ToolCalls, result.Response, result.ToolCallDetails)
 
 	// LLM Judge 评估
 	judgeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -218,14 +323,15 @@ type MultiTurnResult struct {
 
 // TurnResult 单轮结果
 type TurnResult struct {
-	TurnNum    int
-	UserInput  string
-	Response   string
-	ToolCalls  []string
-	AutoEval   *AutoEvalResult
-	JudgeScore float64
-	ResponseMs int64
-	Error      string
+	TurnNum         int
+	UserInput       string
+	Response        string
+	ToolCalls       []string
+	ToolCallDetails []ToolCallDetail // 含参数的工具调用详情
+	AutoEval        *AutoEvalResult
+	JudgeScore      float64
+	ResponseMs      int64
+	Error           string
 }
 
 // RunMultiTurnScenario 运行多轮对话场景
@@ -260,11 +366,14 @@ func (s *V4EvalService) RunMultiTurnScenario(ctx context.Context, scenario Multi
 		// 构建消息
 		messages := s.buildMessagesFromSession(session)
 
+		// 动态选择工具集（条件加载）
+		tools := s.getEvalToolsForSession(session)
+
 		// 调用 LLM（与生产代码一致：低温度 + thinking mode）
 		turnStart := time.Now()
 		response, err := s.llmAdapter.ChatWithTools(ctx, &agent.LLMRequest{
 			Messages:       messages,
-			Tools:          s.tools,
+			Tools:          tools,
 			Temperature:    0.3,
 			EnableThinking: true,
 			ThinkingBudget: 2048,
@@ -274,6 +383,7 @@ func (s *V4EvalService) RunMultiTurnScenario(ctx context.Context, scenario Multi
 		if err != nil {
 			turnResult.Error = err.Error()
 			result.TurnResults = append(result.TurnResults, turnResult)
+			fmt.Printf("    T%d 错误: %s\n", turnNum, err.Error())
 			continue
 		}
 
@@ -281,6 +391,15 @@ func (s *V4EvalService) RunMultiTurnScenario(ctx context.Context, scenario Multi
 		turnResult.Response = response.Content
 		for _, tc := range response.ToolCalls {
 			turnResult.ToolCalls = append(turnResult.ToolCalls, tc.Function.Name)
+			var args map[string]interface{}
+			if tc.Function.Arguments != "" {
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			}
+			turnResult.ToolCallDetails = append(turnResult.ToolCallDetails, ToolCallDetail{
+				Name:      tc.Function.Name,
+				Arguments: args,
+				RawArgs:   tc.Function.Arguments,
+			})
 		}
 
 		// 模拟工具执行并注入结果
@@ -308,13 +427,16 @@ func (s *V4EvalService) RunMultiTurnScenario(ctx context.Context, scenario Multi
 					}
 				}
 				session.AddToolResult(tc.ID, tc.Function.Name, mockResult)
+
+				// 同步 session 状态（模拟生产代码的副作用）
+				s.syncMockSessionState(session, tc.Function.Name, tc.Function.Arguments, mockResult)
 			}
 
 			// 在工具结果注入后，再调 LLM 让它生成最终回复
 			messages2 := s.buildMessagesFromSession(session)
 			response2, err2 := s.llmAdapter.ChatWithTools(ctx, &agent.LLMRequest{
 				Messages:       messages2,
-				Tools:          s.tools,
+				Tools:          tools,
 				Temperature:    0.3,
 				EnableThinking: true,
 				ThinkingBudget: 2048,
@@ -328,8 +450,8 @@ func (s *V4EvalService) RunMultiTurnScenario(ctx context.Context, scenario Multi
 			session.AddMessage("assistant", response.Content)
 		}
 
-		// 自动评估
-		turnResult.AutoEval = AutoEvaluateMultiTurn(&turn, turnResult.ToolCalls, turnResult.Response)
+		// 自动评估（含参数验证）
+		turnResult.AutoEval = AutoEvaluateMultiTurn(&turn, turnResult.ToolCalls, turnResult.Response, turnResult.ToolCallDetails)
 
 		result.TurnResults = append(result.TurnResults, turnResult)
 
@@ -456,8 +578,9 @@ func (s *V4EvalService) RunFullEvaluation(ctx context.Context) (*V4EvalReport, e
 	scenarios := s.GetAllScenarios()
 	report.SingleTurnResults = s.runSingleTurnBatch(ctx, scenarios)
 
-	// 2. 运行所有多轮测试
-	fmt.Println("\n========== 多轮测试 ==========")
+	// 2. 运行所有多轮测试（延迟 5 秒等待 API 限流恢复）
+	fmt.Println("\n========== 多轮测试（等待 5 秒）==========")
+	time.Sleep(5 * time.Second)
 	multiScenarios := s.GetMultiTurnScenarios()
 	for i, ms := range multiScenarios {
 		fmt.Printf("[%d/%d] M%d: %s\n", i+1, len(multiScenarios), ms.ID, ms.Name)
@@ -469,7 +592,7 @@ func (s *V4EvalService) RunFullEvaluation(ctx context.Context) (*V4EvalReport, e
 		report.MultiTurnResults = append(report.MultiTurnResults, *result)
 		fmt.Printf("  准确率: %.1f%% (%d轮, %dms)\n", result.ToolAccuracy, len(result.TurnResults), result.TotalMs)
 
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(2 * time.Second)
 	}
 
 	report.TotalDurationMs = time.Since(totalStart).Milliseconds()
@@ -645,8 +768,23 @@ func (s *V4EvalService) calcDimensionScores(dimCounts map[EvalDimension]struct{ 
 		ds.D1Intent = float64(entry.correct) / float64(entry.total) * 100
 	}
 
-	// D2 参数质量
-	if entry, ok := dimCounts[DimParamQuality]; ok && entry.total > 0 {
+	// D2 参数质量 - 基于参数断言验证结果（有断言时用真实分数，否则用工具选择准确率）
+	paramScores := []float64{}
+	for _, r := range report.SingleTurnResults {
+		if r.AutoEval != nil && r.AutoEval.ToolCorrect {
+			sc := findScenarioByID(r.ScenarioID)
+			if sc != nil && len(sc.ParamAssertions) > 0 {
+				paramScores = append(paramScores, r.AutoEval.ParamScore)
+			}
+		}
+	}
+	if len(paramScores) > 0 {
+		var sum float64
+		for _, s := range paramScores {
+			sum += s
+		}
+		ds.D2Param = sum / float64(len(paramScores))
+	} else if entry, ok := dimCounts[DimParamQuality]; ok && entry.total > 0 {
 		ds.D2Param = float64(entry.correct) / float64(entry.total) * 100
 	}
 
@@ -715,6 +853,9 @@ func (s *V4EvalService) GenerateMarkdownReport(report *V4EvalReport) string {
 		sb.WriteString("\n")
 	}
 
+	// 2.5 参数验证详情
+	s.writeParamValidationSection(&sb, report)
+
 	// 3. 分类详细结果
 	sb.WriteString("## 3. 分类详细结果\n\n")
 	sb.WriteString("| 分类 | 场景数 | 通过 | 准确率 | 平均延迟 | Judge 均分 |\n")
@@ -723,7 +864,8 @@ func (s *V4EvalService) GenerateMarkdownReport(report *V4EvalReport) string {
 	categoryOrder := []EvalCategory{
 		CatScheduleCreate, CatScheduleQuery, CatScheduleModify,
 		CatStatusUpdate, CatFriendSocial, CatMultiTurn,
-		CatChatBoundary, CatRobustSecurity,
+		CatChatBoundary, CatRobustSecurity, CatTimeAwareness, CatScheduleDelete,
+		CatAvailability,
 	}
 	categoryNames := map[EvalCategory]string{
 		CatScheduleCreate: "C1 日程创建",
@@ -734,6 +876,9 @@ func (s *V4EvalService) GenerateMarkdownReport(report *V4EvalReport) string {
 		CatMultiTurn:      "C6 多轮对话",
 		CatChatBoundary:   "C7 闲聊边界",
 		CatRobustSecurity: "C8 鲁棒安全",
+		CatTimeAwareness:  "C9 时间感知",
+		CatScheduleDelete: "C10 日程删除",
+		CatAvailability:   "C11 有空标记",
 	}
 
 	for _, cat := range categoryOrder {
@@ -880,6 +1025,67 @@ func (s *V4EvalService) GenerateMarkdownReport(report *V4EvalReport) string {
 	return sb.String()
 }
 
+// writeParamValidationSection 写入参数验证详情
+func (s *V4EvalService) writeParamValidationSection(sb *strings.Builder, report *V4EvalReport) {
+	sb.WriteString("## 2.5 参数验证详情\n\n")
+
+	// 统计有断言的场景
+	assertedCount := 0
+	assertedPassed := 0
+	var avgParamScore float64
+	paramScoreCount := 0
+	var failures []struct {
+		scenarioID int
+		input      string
+		details    string
+	}
+
+	for _, r := range report.SingleTurnResults {
+		sc := findScenarioByID(r.ScenarioID)
+		if sc == nil || len(sc.ParamAssertions) == 0 {
+			continue
+		}
+		assertedCount++
+
+		if r.AutoEval != nil && r.AutoEval.ToolCorrect {
+			paramScoreCount++
+			avgParamScore += r.AutoEval.ParamScore
+			if r.AutoEval.ParamScore >= 100 {
+				assertedPassed++
+			} else {
+				// 提取参数失败详情
+				for _, detail := range strings.Split(r.AutoEval.Details, "; ") {
+					if strings.HasPrefix(detail, "⚠️ 参数") {
+						failures = append(failures, struct {
+							scenarioID int
+							input      string
+							details    string
+						}{r.ScenarioID, r.Input, detail})
+					}
+				}
+			}
+		}
+	}
+
+	if paramScoreCount > 0 {
+		avgParamScore /= float64(paramScoreCount)
+	}
+
+	sb.WriteString(fmt.Sprintf("| 指标 | 值 |\n|------|----|\n"))
+	sb.WriteString(fmt.Sprintf("| 有断言的场景数 | %d / %d |\n", assertedCount, len(report.SingleTurnResults)))
+	sb.WriteString(fmt.Sprintf("| 参数全通过的场景 | %d / %d |\n", assertedPassed, assertedCount))
+	sb.WriteString(fmt.Sprintf("| 平均参数得分 | %.1f |\n", avgParamScore))
+	sb.WriteString("\n")
+
+	if len(failures) > 0 {
+		sb.WriteString("### 参数验证失败详情\n\n")
+		for _, f := range failures {
+			sb.WriteString(fmt.Sprintf("- **#%d** 「%s」: %s\n", f.scenarioID, truncate(f.input, 30), f.details))
+		}
+		sb.WriteString("\n")
+	}
+}
+
 // writeIssuesAndSuggestions 写入问题与建议
 func (s *V4EvalService) writeIssuesAndSuggestions(sb *strings.Builder, report *V4EvalReport) {
 	// 分析低分分类
@@ -935,6 +1141,15 @@ func (s *V4EvalService) buildMockSession(persona *EvalPersona) *model.V4Session 
 				Status:    item.Status,
 			})
 		}
+		// 注入画像的明日时刻表
+		for _, item := range persona.TomorrowScheduleItems {
+			session.TomorrowSchedule = append(session.TomorrowSchedule, model.ScheduleItem{
+				StartTime: item.StartTime,
+				EndTime:   item.EndTime,
+				Emoji:     item.Emoji,
+				Status:    item.Status,
+			})
+		}
 		// 注入历史摘要
 		session.Summary = persona.Summary
 	}
@@ -944,6 +1159,21 @@ func (s *V4EvalService) buildMockSession(persona *EvalPersona) *model.V4Session 
 
 // buildEvalMessages 构建单轮评估消息
 func (s *V4EvalService) buildEvalMessages(session *model.V4Session, userInput string) []agent.AgentMessage {
+	// Layer 1: 时间预处理
+	hint := agent.ParseTemporalHints(userInput, s.evalTime())
+	session.TemporalAnnotation = agent.FormatHintAnnotation(hint)
+
+	// 如果解析出日期表达式且没有 InjectContext 预设，自动设置 TargetDateLabel
+	if hint.DateMatch != nil && session.TargetDateLabel == "" {
+		now := s.evalTime()
+		todayDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		tomorrowDate := todayDate.AddDate(0, 0, 1)
+		target := time.Date(hint.DateMatch.ResolvedDate.Year(), hint.DateMatch.ResolvedDate.Month(), hint.DateMatch.ResolvedDate.Day(), 0, 0, 0, 0, now.Location())
+		if !target.Equal(todayDate) && !target.Equal(tomorrowDate) {
+			session.TargetDateLabel = hint.DateMatch.DateStr + "(" + hint.DateMatch.Weekday + ")"
+		}
+	}
+
 	systemPrompt := s.buildEvalSystemPrompt(session)
 
 	messages := []agent.AgentMessage{
@@ -953,6 +1183,9 @@ func (s *V4EvalService) buildEvalMessages(session *model.V4Session, userInput st
 	if session.Summary != "" {
 		messages = append(messages, agent.NewSystemMessage("[历史对话摘要]\n"+session.Summary))
 	}
+
+	// few-shot 示例已禁用：测试表明会干扰 confirm 场景的准确率
+	// messages = append(messages, s.buildFewShotExamples()...)
 
 	messages = append(messages, agent.NewUserMessage(userInput))
 	return messages
@@ -960,6 +1193,25 @@ func (s *V4EvalService) buildEvalMessages(session *model.V4Session, userInput st
 
 // buildMessagesFromSession 从 session 构建消息（多轮）
 func (s *V4EvalService) buildMessagesFromSession(session *model.V4Session) []agent.AgentMessage {
+	// Layer 1: 取最后一条 user 消息做时间预处理
+	for i := len(session.Messages) - 1; i >= 0; i-- {
+		if session.Messages[i].Role == "user" {
+			hint := agent.ParseTemporalHints(session.Messages[i].Content, s.evalTime())
+			session.TemporalAnnotation = agent.FormatHintAnnotation(hint)
+			// 同步 DateMatch → TargetDateLabel（多轮场景）
+			if hint.DateMatch != nil && session.TargetDateLabel == "" {
+				now := s.evalTime()
+				todayDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+				tomorrowDate := todayDate.AddDate(0, 0, 1)
+				target := time.Date(hint.DateMatch.ResolvedDate.Year(), hint.DateMatch.ResolvedDate.Month(), hint.DateMatch.ResolvedDate.Day(), 0, 0, 0, 0, now.Location())
+				if !target.Equal(todayDate) && !target.Equal(tomorrowDate) {
+					session.TargetDateLabel = hint.DateMatch.DateStr + "(" + hint.DateMatch.Weekday + ")"
+				}
+			}
+			break
+		}
+	}
+
 	systemPrompt := s.buildEvalSystemPrompt(session)
 
 	messages := []agent.AgentMessage{
@@ -969,6 +1221,9 @@ func (s *V4EvalService) buildMessagesFromSession(session *model.V4Session) []age
 	if session.Summary != "" {
 		messages = append(messages, agent.NewSystemMessage("[历史对话摘要]\n"+session.Summary))
 	}
+
+	// few-shot 示例已禁用
+	// messages = append(messages, s.buildFewShotExamples()...)
 
 	// 转换所有 V4Message
 	for _, msg := range session.Messages {
@@ -997,50 +1252,132 @@ func (s *V4EvalService) buildMessagesFromSession(session *model.V4Session) []age
 	return messages
 }
 
+// buildFewShotExamples 构建 few-shot 示例（与生产代码 buildFewShotExamples 一致）
+func (s *V4EvalService) buildFewShotExamples() []agent.AgentMessage {
+	today := time.Now().Format("2006-01-02")
+
+	return []agent.AgentMessage{
+		agent.NewUserMessage("等会去搓一顿"),
+		agent.NewAssistantMessageWithToolCall("plan_activities",
+			fmt.Sprintf(`{"date":"%s","activities":[{"start_time":"12:00","end_time":"13:30","emoji":"🍜","status":"吃饭"}]}`, today)),
+		agent.NewToolResultMessage("fewshot_plan_activities", "plan_activities", `{"message":"已保存"}`),
+		agent.NewAssistantMessage("帮你安排好了吃饭时间 🍜"),
+
+		agent.NewUserMessage("在加班"),
+		agent.NewAssistantMessageWithToolCall("set_status",
+			`{"emoji":"💼","status":"加班中"}`),
+		agent.NewToolResultMessage("fewshot_set_status", "set_status", `{"message":"已更新"}`),
+		agent.NewAssistantMessage("已更新你的状态为 💼加班中"),
+
+		agent.NewUserMessage("中午出去吃个饭"),
+		agent.NewAssistantMessageWithToolCall("plan_activities",
+			fmt.Sprintf(`{"date":"%s","activities":[{"start_time":"12:00","end_time":"13:00","emoji":"🍽️","status":"午饭"}]}`, today)),
+		agent.NewToolResultMessage("fewshot_plan_activities", "plan_activities", `{"message":"已保存"}`),
+		agent.NewAssistantMessage("安排好了中午的午饭时间 🍽️"),
+	}
+}
+
 // buildEvalSystemPrompt 构建评估用的系统提示词
 // 与 V4 生产代码的 buildSystemPrompt 保持一致
 func (s *V4EvalService) buildEvalSystemPrompt(session *model.V4Session) string {
-	now := time.Now()
+	// eval 使用固定时间（工作日下午 14:30），确保测试可重复性
+	// 避免深夜/凌晨运行时 LLM 将"夜里赶方案"等语句误判为描述当前状态
+	now := s.evalTime()
 	weekdays := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
 
 	var sb strings.Builder
 
-	sb.WriteString(`你是「有空」的 AI 助手。你有一组工具可以帮用户管理日程、查询好友状态、发送消息。
+	sb.WriteString(`你是「有空」的 AI 助手，帮用户管理日程、查询好友、发送消息。
 
 行为原则：
-- 先理解用户真正想做什么，再决定用什么工具
-- 如果用户的请求模糊或有多种解读，先用文字问清楚
-- 查询类操作可以直接执行
-- 修改类操作（创建/修改日程）会生成预览等用户确认
-- 发消息/约人前，先用 query_friends 找到好友
-- 回复简洁自然，像朋友聊天，emoji 匹配活动
-- 时间模糊时先确认，不要猜测
-- 用户只是闲聊时，不需要调用任何工具，直接回复即可
+- 先理解用户意图，再选择工具。不确定时用文字问清楚，不要猜测
+- 回复简洁自然，像朋友聊天
+- 工具返回 notices 时，在回复中自然提及（不忽略也不过度强调）
 
-【重要区分】
-- 用户描述当前状态（"我在加班"、"好累"、"到公司了"）→ update_current_status（即时生效，不需确认）
-- 用户规划时间安排（"下午3点开会"、"明天去健身"）→ update_schedule（生成预览等确认）
-- 用户给出精确时间+活动，即使多条也应一次性调用 update_schedule（如"10点瑜伽课，2点兼职，7点聚餐"→一次 update_schedule 包含3个items）
-- 修改时刻表时只传变更的条目，operation="modify"，系统会自动保留其他时段
-- 用户说"给他/她发消息"时，使用上一次 query_friends 查到的好友
-- save_schedule 和 confirm_send 是互斥的：save_schedule 保存日程，confirm_send 发送消息/邀请。根据待确认内容类型选择正确的工具
+上下文确认规则：
+- 用户说"好的/保存/发吧" + 有⚠️待确认内容 → confirm
+- 用户说"好的" + 无⚠️ → 闲聊，不调用工具
+- "不对/再改改" + 有⚠️ → 不调用工具，问用户想怎么改
+- 有【最近查询的好友】+ "他/她" → 用该好友ID
+- 有⚠️待确认消息 + "改成XX" → draft_message 重新生成
+- 意图不完整（仅代词、缺关键信息）→ 不调用工具，先问清楚
+- 有⚠️待确认删除 + "确认/删吧" → confirm
+- 有⚠️待确认删除 + "算了/不删了" → 不调用工具
+
+时间参考：
+- "等会/一会儿"≈当前时间+30min，"中午"≈12:00，"下午"≈14:00，"晚上"≈19:00
+
+有空标记：
+- "有空/我有空/标记有空" = 设置时段的有空状态 → plan_activities(available=true) 或 set_status(available=true)
+- "什么时候有空/哪些时段有空" = 查询有空时段 → view_schedule
 
 `)
 
-	today := now.Format("2006-01-02")
-	tomorrow := now.AddDate(0, 0, 1).Format("2006-01-02")
-	sb.WriteString(fmt.Sprintf("【时间】%s %s %02d:%02d | 今天=%s 明天=%s\n\n",
-		today, weekdays[now.Weekday()], now.Hour(), now.Minute(), today, tomorrow))
+	todayStr := now.Format("2006-01-02")
+	period := v4GetTimePeriod(now.Hour())
+	sb.WriteString(fmt.Sprintf("【时间】%s %s %02d:%02d | 当前时段=%s\n",
+		todayStr, weekdays[now.Weekday()], now.Hour(), now.Minute(), period))
+	// 7 天日历参考
+	sb.WriteString("日历: ")
+	dayLabels := []string{"今天", "明天", "后天"}
+	for i := 0; i < 7; i++ {
+		d := now.AddDate(0, 0, i)
+		dateStr := d.Format("01-02")
+		wd := weekdays[d.Weekday()]
+		if i < len(dayLabels) {
+			sb.WriteString(fmt.Sprintf("%s=%s(%s)", dayLabels[i], dateStr, wd))
+		} else {
+			sb.WriteString(fmt.Sprintf("%s(%s)", dateStr, wd))
+		}
+		if i < 6 {
+			sb.WriteString(" ")
+		}
+	}
+	sb.WriteString("\n\n")
+
+	// ========== 时间预处理注解（Layer 1: 事实注入）==========
+	if session.TemporalAnnotation != "" {
+		sb.WriteString(session.TemporalAnnotation + "\n\n")
+	}
 
 	if len(session.CurrentSchedule) > 0 {
-		sb.WriteString("【当前时刻表】")
-		for i, item := range session.CurrentSchedule {
+		sb.WriteString(fmt.Sprintf("【今日安排】(%d个时段)\n", len(session.CurrentSchedule)))
+		for _, item := range session.CurrentSchedule {
+			availMark := ""
+			if item.Highlight {
+				availMark = " ✅有空"
+			}
+			sb.WriteString(fmt.Sprintf("%s-%s %s%s%s\n", item.StartTime, item.EndTime, item.Emoji, item.Status, availMark))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(session.TomorrowSchedule) > 0 {
+		sb.WriteString(fmt.Sprintf("【明日安排】(%d个时段) ", len(session.TomorrowSchedule)))
+		for i, item := range session.TomorrowSchedule {
 			if i > 0 {
 				sb.WriteString(" | ")
 			}
-			sb.WriteString(fmt.Sprintf("%s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
+			availMark := ""
+			if item.Highlight {
+				availMark = " ✅有空"
+			}
+			sb.WriteString(fmt.Sprintf("%s-%s %s%s%s", item.StartTime, item.EndTime, item.Emoji, item.Status, availMark))
 		}
 		sb.WriteString("\n\n")
+	}
+
+	// ========== 目标日期安排（按需加载）==========
+	if len(session.TargetDateSchedule) > 0 && session.TargetDateLabel != "" {
+		sb.WriteString(fmt.Sprintf("【%s 安排】(%d个时段)\n", session.TargetDateLabel, len(session.TargetDateSchedule)))
+		for _, item := range session.TargetDateSchedule {
+			availMark := ""
+			if item.Highlight {
+				availMark = " ✅有空"
+			}
+			sb.WriteString(fmt.Sprintf("%s-%s %s%s%s\n", item.StartTime, item.EndTime, item.Emoji, item.Status, availMark))
+		}
+		sb.WriteString("\n")
 	}
 
 	if session.HasPendingSchedule() {
@@ -1052,18 +1389,35 @@ func (s *V4EvalService) buildEvalSystemPrompt(session *model.V4Session) string {
 			sb.WriteString(fmt.Sprintf("%s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
 		}
 		sb.WriteString(" (日期:" + session.PendingDate.Format("01-02") + ")")
-		sb.WriteString("\n用户确认后调用 save_schedule 保存，要修改则调用 update_schedule 重新生成\n\n")
+		sb.WriteString("\n用户确认后调用 confirm 保存，要修改则调用 plan_activities 重新生成\n\n")
 	}
 
 	if session.HasPendingMessage() {
-		sb.WriteString(fmt.Sprintf("【⚠️待确认消息】发送给 %s: \"%s\"\n用户确认后调用 confirm_send\n\n",
-			session.PendingMessage.FriendName, session.PendingMessage.Message))
+		sb.WriteString(fmt.Sprintf("【⚠️待确认消息】发送给 %s (ID: %s): \"%s\"\n用户确认后调用 confirm，修改内容调用 draft_message(friend_id=%s)\n\n",
+			session.PendingMessage.FriendName, session.PendingMessage.FriendID,
+			session.PendingMessage.Message, session.PendingMessage.FriendID))
 	}
 	if session.HasPendingInvite() {
-		sb.WriteString(fmt.Sprintf("【⚠️待确认邀请】邀请 %s %s %s-%s %s\n用户确认后调用 confirm_send\n\n",
+		sb.WriteString(fmt.Sprintf("【⚠️待确认邀请】邀请 %s %s %s-%s %s\n用户确认后调用 confirm\n\n",
 			session.PendingInvite.FriendName, session.PendingInvite.Date,
 			session.PendingInvite.StartTime, session.PendingInvite.EndTime,
 			session.PendingInvite.Activity))
+	}
+
+	// ========== 待确认的删除操作 ==========
+	if session.HasPendingDeletion() {
+		pd := session.PendingDeletion
+		if pd.Type == "schedule" {
+			sb.WriteString(fmt.Sprintf("【⚠️待确认删除】将删除%d个安排", len(pd.DeletedItems)))
+			for _, item := range pd.DeletedItems {
+				sb.WriteString(fmt.Sprintf(" | %s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
+			}
+			sb.WriteString(fmt.Sprintf(" (日期:%s)", pd.Date))
+			sb.WriteString("\n用户确认后调用 confirm 执行删除，说'算了/不删了'则不操作\n\n")
+		} else if pd.Type == "friend" {
+			sb.WriteString(fmt.Sprintf("【⚠️待确认删除好友】将删除好友 %s (ID: %s)\n用户确认后调用 confirm 执行删除\n\n",
+				pd.FriendName, pd.FriendID))
+		}
 	}
 
 	if session.LastQueriedFriend != nil {
@@ -1072,6 +1426,114 @@ func (s *V4EvalService) buildEvalSystemPrompt(session *model.V4Session) string {
 	}
 
 	return sb.String()
+}
+
+// syncMockSessionState 在多轮 eval 中同步 mock 工具调用的 session 副作用
+// 模拟生产代码 executeTool 后的状态更新，使条件加载工具在后续轮次正确生效
+func (s *V4EvalService) syncMockSessionState(session *model.V4Session, toolName, rawArgs, mockResult string) {
+	var result map[string]interface{}
+	json.Unmarshal([]byte(mockResult), &result)
+
+	var args map[string]interface{}
+	json.Unmarshal([]byte(rawArgs), &args)
+
+	switch toolName {
+	case "find_friends":
+		// 从 mock 结果中提取第一个好友作为 LastQueriedFriend
+		if friends, ok := result["friends"].([]interface{}); ok && len(friends) > 0 {
+			if f, ok := friends[0].(map[string]interface{}); ok {
+				session.LastQueriedFriend = &model.V4FriendInfo{
+					ID:   fmt.Sprintf("%v", f["id"]),
+					Name: fmt.Sprintf("%v", f["name"]),
+				}
+			}
+		}
+
+	case "plan_activities":
+		// awaiting_approval=true 时设置 PendingSchedule
+		if awaiting, ok := result["awaiting_approval"].(bool); ok && awaiting {
+			if session.PendingSchedule == nil {
+				session.PendingSchedule = []model.ScheduleItem{
+					{StartTime: "15:00", EndTime: "16:00", Emoji: "💼", Status: "安排"},
+				}
+				session.PendingDate = time.Now()
+			}
+		}
+
+	case "delete_schedule":
+		// 设置 PendingDeletion (type=schedule)
+		if _, ok := result["awaiting_approval"]; ok {
+			target := ""
+			if t, ok := args["target"].(string); ok {
+				target = t
+			}
+			session.PendingDeletion = &model.V4PendingDeletion{
+				Type:   "schedule",
+				Date:   time.Now().Format("2006-01-02"),
+				Target: target,
+				DeletedItems: []model.ScheduleItem{
+					{StartTime: "14:00", EndTime: "16:00", Emoji: "💼", Status: "安排"},
+				},
+			}
+		}
+
+	case "remove_friend":
+		// 设置 PendingDeletion (type=friend)
+		friendID := ""
+		friendName := ""
+		if id, ok := args["friend_id"].(string); ok {
+			friendID = id
+		}
+		if name, ok := args["friend_name"].(string); ok {
+			friendName = name
+		}
+		session.PendingDeletion = &model.V4PendingDeletion{
+			Type:       "friend",
+			FriendID:   friendID,
+			FriendName: friendName,
+		}
+
+	case "draft_message":
+		// 设置 PendingMessage
+		friendID, _ := args["friend_id"].(string)
+		friendName, _ := args["friend_name"].(string)
+		message, _ := args["message"].(string)
+		session.PendingMessage = &model.V4PendingMessage{
+			FriendID:   friendID,
+			FriendName: friendName,
+			Message:    message,
+		}
+
+	case "draft_invite":
+		// 设置 PendingInvite
+		session.PendingInvite = &model.V4PendingInvite{
+			FriendID:   fmt.Sprintf("%v", args["friend_id"]),
+			FriendName: fmt.Sprintf("%v", args["friend_name"]),
+			Date:       fmt.Sprintf("%v", args["date"]),
+			StartTime:  fmt.Sprintf("%v", args["start_time"]),
+			Activity:   fmt.Sprintf("%v", args["activity"]),
+		}
+
+	case "confirm":
+		// 清除所有 pending 状态
+		session.ClearAllPending()
+
+	case "view_schedule":
+		// 从 mock 结果中更新 CurrentSchedule
+		if items, ok := result["items"].([]interface{}); ok {
+			session.CurrentSchedule = nil
+			for _, item := range items {
+				if m, ok := item.(map[string]interface{}); ok {
+					session.CurrentSchedule = append(session.CurrentSchedule, model.ScheduleItem{
+						StartTime: fmt.Sprintf("%v", m["start_time"]),
+						EndTime:   fmt.Sprintf("%v", m["end_time"]),
+						Emoji:     fmt.Sprintf("%v", m["emoji"]),
+						Status:    fmt.Sprintf("%v", m["status"]),
+					})
+				}
+			}
+		}
+	}
 }
 
 // findScenarioByID 根据 ID 查找场景
@@ -1114,4 +1576,630 @@ func gapLabel(actual, target float64) string {
 		return "⚠️ 有差距"
 	}
 	return "❌ 大差距"
+}
+
+// ========== 稳定性测试 ==========
+
+// StabilityReport 稳定性评估报告
+type StabilityReport struct {
+	K               int              `json:"k"`
+	Trials          []StabilityTrial `json:"trials"`
+	OverallPassAtK  float64          `json:"overall_pass_at_k"`  // 至少 1 次通过的比例
+	OverallPassAllK float64          `json:"overall_pass_all_k"` // 全部 k 次通过的比例
+	FlakyScenarios  []int            `json:"flaky_scenarios"`    // 不稳定场景 ID
+	TotalDurationMs int64            `json:"total_duration_ms"`
+}
+
+// StabilityTrial 单场景的多次试验
+type StabilityTrial struct {
+	ScenarioID  int                `json:"scenario_id"`
+	Input       string             `json:"input"`
+	Category    EvalCategory       `json:"category"`
+	Description string             `json:"description"`
+	Results     []*SingleTurnResult `json:"results"`
+	PassCount   int                `json:"pass_count"`
+	PassAtK     bool               `json:"pass_at_k"`  // 至少 1 次通过
+	PassAllK    bool               `json:"pass_all_k"` // 全部通过
+}
+
+// CalcMetrics 计算试验指标
+func (t *StabilityTrial) CalcMetrics() {
+	t.PassCount = 0
+	for _, r := range t.Results {
+		if r.AutoEval != nil && r.AutoEval.ToolCorrect {
+			t.PassCount++
+		}
+	}
+	t.PassAtK = t.PassCount > 0
+	t.PassAllK = t.PassCount == len(t.Results)
+}
+
+// RunStabilityEval 稳定性评估（每个场景跑 k 次）
+func (s *V4EvalService) RunStabilityEval(ctx context.Context, k int) (*StabilityReport, error) {
+	if s.llmAdapter == nil {
+		return nil, fmt.Errorf("LLM adapter 未配置")
+	}
+
+	scenarios := s.GetAllScenarios()
+	report := &StabilityReport{K: k}
+
+	totalStart := time.Now()
+
+	for i, sc := range scenarios {
+		trial := StabilityTrial{
+			ScenarioID:  sc.ID,
+			Input:       sc.Input,
+			Category:    sc.Category,
+			Description: sc.Description,
+		}
+
+		fmt.Printf("[%d/%d] #%d %s (k=%d): %s\n", i+1, len(scenarios), sc.ID, sc.Category, k, sc.Input)
+
+		for run := 0; run < k; run++ {
+			result, err := s.RunSingleScenario(ctx, sc)
+			if err != nil {
+				result = &SingleTurnResult{
+					ScenarioID: sc.ID,
+					Input:      sc.Input,
+					Error:      err.Error(),
+				}
+			}
+			trial.Results = append(trial.Results, result)
+			time.Sleep(200 * time.Millisecond) // 避免速率限制
+		}
+
+		trial.CalcMetrics()
+		report.Trials = append(report.Trials, trial)
+
+		status := "✅"
+		if !trial.PassAllK {
+			if trial.PassAtK {
+				status = "⚠️"
+			} else {
+				status = "❌"
+			}
+		}
+		fmt.Printf("  %s 通过 %d/%d\n", status, trial.PassCount, k)
+
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	report.TotalDurationMs = time.Since(totalStart).Milliseconds()
+
+	// 聚合
+	passAtKCount := 0
+	passAllKCount := 0
+	for _, t := range report.Trials {
+		if t.PassAtK {
+			passAtKCount++
+		}
+		if t.PassAllK {
+			passAllKCount++
+		}
+		if t.PassAtK && !t.PassAllK {
+			report.FlakyScenarios = append(report.FlakyScenarios, t.ScenarioID)
+		}
+	}
+	if len(report.Trials) > 0 {
+		report.OverallPassAtK = float64(passAtKCount) / float64(len(report.Trials)) * 100
+		report.OverallPassAllK = float64(passAllKCount) / float64(len(report.Trials)) * 100
+	}
+
+	return report, nil
+}
+
+// GenerateStabilityReport 生成稳定性报告 Markdown
+func (s *V4EvalService) GenerateStabilityReport(report *StabilityReport) string {
+	var sb strings.Builder
+
+	sb.WriteString("# V4 稳定性测试报告\n\n")
+	sb.WriteString(fmt.Sprintf("> 每个场景运行 %d 次 | 总场景数: %d | 总耗时: %.1f 秒\n\n",
+		report.K, len(report.Trials), float64(report.TotalDurationMs)/1000))
+
+	// 总体指标
+	sb.WriteString("## 1. 总体指标\n\n")
+	sb.WriteString("| 指标 | 值 |\n|------|----|\n")
+	sb.WriteString(fmt.Sprintf("| pass@%d（至少1次通过） | **%.1f%%** |\n", report.K, report.OverallPassAtK))
+	sb.WriteString(fmt.Sprintf("| pass^%d（全部通过） | **%.1f%%** |\n", report.K, report.OverallPassAllK))
+	sb.WriteString(fmt.Sprintf("| Flaky 场景数 | %d |\n", len(report.FlakyScenarios)))
+	sb.WriteString("\n")
+
+	// Flaky 场景详情
+	if len(report.FlakyScenarios) > 0 {
+		sb.WriteString("## 2. Flaky 场景（不稳定）\n\n")
+		sb.WriteString("| # | 分类 | 输入 | 描述 | 通过次数 |\n")
+		sb.WriteString("|---|------|------|------|----------|\n")
+		for _, t := range report.Trials {
+			if t.PassAtK && !t.PassAllK {
+				sb.WriteString(fmt.Sprintf("| #%d | %s | %s | %s | %d/%d |\n",
+					t.ScenarioID, t.Category, truncate(t.Input, 30), t.Description, t.PassCount, report.K))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// 全部失败的场景
+	sb.WriteString("## 3. 全部失败的场景\n\n")
+	failCount := 0
+	for _, t := range report.Trials {
+		if !t.PassAtK {
+			if failCount == 0 {
+				sb.WriteString("| # | 分类 | 输入 | 描述 |\n")
+				sb.WriteString("|---|------|------|------|\n")
+			}
+			sb.WriteString(fmt.Sprintf("| #%d | %s | %s | %s |\n",
+				t.ScenarioID, t.Category, truncate(t.Input, 30), t.Description))
+			failCount++
+		}
+	}
+	if failCount == 0 {
+		sb.WriteString("无全部失败的场景\n")
+	}
+	sb.WriteString("\n")
+
+	// 分类统计
+	sb.WriteString("## 4. 分类稳定性\n\n")
+	catStats := make(map[EvalCategory]struct{ atK, allK, total int })
+	for _, t := range report.Trials {
+		s := catStats[t.Category]
+		s.total++
+		if t.PassAtK {
+			s.atK++
+		}
+		if t.PassAllK {
+			s.allK++
+		}
+		catStats[t.Category] = s
+	}
+	sb.WriteString(fmt.Sprintf("| 分类 | 场景数 | pass@%d | pass^%d |\n", report.K, report.K))
+	sb.WriteString("|------|--------|--------|--------|\n")
+	for _, cat := range []EvalCategory{CatScheduleCreate, CatScheduleQuery, CatScheduleModify,
+		CatStatusUpdate, CatFriendSocial, CatMultiTurn, CatChatBoundary, CatRobustSecurity} {
+		if s, ok := catStats[cat]; ok {
+			sb.WriteString(fmt.Sprintf("| %s | %d | %.1f%% | %.1f%% |\n",
+				cat, s.total,
+				float64(s.atK)/float64(s.total)*100,
+				float64(s.allK)/float64(s.total)*100))
+		}
+	}
+	sb.WriteString("\n")
+
+	sb.WriteString("---\n")
+	sb.WriteString("*报告由 V4EvalService.RunStabilityEval 自动生成*\n")
+
+	return sb.String()
+}
+
+// ========== 时间理解深度测试 ==========
+
+// TimeSubCat 时间测试子维度
+type TimeSubCat struct {
+	Key  string // "T0", "T1", ...
+	Name string // 中文名称
+}
+
+// 7+1 个时间子维度
+var timeSubCategories = []TimeSubCat{
+	{Key: "T0", Name: "冲突感知"},
+	{Key: "T1", Name: "时段口语映射"},
+	{Key: "T2", Name: "餐食锚定"},
+	{Key: "T3", Name: "生活节奏"},
+	{Key: "T4", Name: "持续时间推理"},
+	{Key: "T5", Name: "复合时间表达"},
+	{Key: "T6", Name: "过去时间处理"},
+	{Key: "T7", Name: "时间边界"},
+}
+
+// TimeTestItem 时间测试条目
+type TimeTestItem struct {
+	SubCatKey string
+	Scenario  EvalScenario
+	Result    *SingleTurnResult
+}
+
+// TimeReport 时间理解深度测试报告
+type TimeReport struct {
+	TestTime   time.Time
+	ModelName  string
+	TotalMs    int64
+	Items      []TimeTestItem
+	CatSummary map[string]*TimeCatSummary // key -> summary
+}
+
+// TimeCatSummary 子维度汇总
+type TimeCatSummary struct {
+	Total        int
+	ToolCorrect  int
+	ParamTotal   int
+	ParamCorrect int
+}
+
+// classifyC9Scenario 将现有 C9 场景映射到时间子维度
+func classifyC9Scenario(sc EvalScenario) string {
+	desc := sc.Description
+	switch {
+	case strings.Contains(desc, "时间冲突"):
+		return "T0"
+	case strings.Contains(desc, "晚饭后"):
+		return "T2"
+	case strings.Contains(desc, "等会"):
+		return "T4"
+	case strings.Contains(desc, "相对时间"), strings.Contains(desc, "连续活动"):
+		return "T4"
+	case strings.Contains(desc, "明日安排"):
+		return "T5"
+	case strings.Contains(desc, "口语化"), strings.Contains(desc, "早晨时段"), strings.Contains(desc, "极简时间"):
+		return "T1"
+	default:
+		return "T1"
+	}
+}
+
+// classifyDeepScenario 从 Description 中提取 [Tx:...] 标签
+func classifyDeepScenario(desc string) string {
+	if len(desc) > 3 && desc[0] == '[' && desc[1] == 'T' {
+		idx := strings.Index(desc, ":")
+		if idx > 0 {
+			return desc[1:idx]
+		}
+	}
+	return "T1"
+}
+
+// RunTimeReport 运行时间理解深度测试
+func (s *V4EvalService) RunTimeReport(ctx context.Context) (*TimeReport, error) {
+	if s.llmAdapter == nil {
+		return nil, fmt.Errorf("LLM adapter 未配置")
+	}
+
+	report := &TimeReport{
+		TestTime:   time.Now(),
+		ModelName:  s.modelName,
+		CatSummary: make(map[string]*TimeCatSummary),
+	}
+
+	for _, sc := range timeSubCategories {
+		report.CatSummary[sc.Key] = &TimeCatSummary{}
+	}
+
+	// 1. 收集所有时间测试场景
+	var items []TimeTestItem
+
+	// C9 基线场景
+	allScenarios := AllSingleTurnScenarios()
+	c9Count := 0
+	for _, sc := range allScenarios {
+		if sc.Category == CatTimeAwareness {
+			items = append(items, TimeTestItem{
+				SubCatKey: classifyC9Scenario(sc),
+				Scenario:  sc,
+			})
+			c9Count++
+		}
+	}
+
+	// 深度时间场景
+	deepScenarios := scenariosTimeDeep()
+	for i, sc := range deepScenarios {
+		sc.ID = 2001 + i
+		items = append(items, TimeTestItem{
+			SubCatKey: classifyDeepScenario(sc.Description),
+			Scenario:  sc,
+		})
+	}
+
+	totalStart := time.Now()
+
+	// 2. 批量运行
+	fmt.Printf("\n========== 时间理解深度测试 ==========\n")
+	fmt.Printf("总场景: %d（C9基线 %d + 深度 %d）\n\n", len(items), c9Count, len(deepScenarios))
+
+	sem := make(chan struct{}, s.concurrency)
+	var wg sync.WaitGroup
+
+	for i := range items {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			item := &items[idx]
+			sc := item.Scenario
+			fmt.Printf("[%d/%d] #%d [%s] %s\n", idx+1, len(items), sc.ID, item.SubCatKey, sc.Input)
+
+			result, err := s.RunSingleScenario(ctx, sc)
+			if err != nil {
+				result = &SingleTurnResult{
+					ScenarioID: sc.ID,
+					Input:      sc.Input,
+					Error:      err.Error(),
+				}
+				fmt.Printf("  ❌ 错误: %v\n", err)
+			} else if result.AutoEval != nil && result.AutoEval.ToolCorrect {
+				paramInfo := ""
+				if len(result.ToolCallDetails) > 0 {
+					argsJSON, _ := json.Marshal(result.ToolCallDetails[0].Arguments)
+					paramInfo = fmt.Sprintf(" | 参数: %s", truncate(string(argsJSON), 60))
+				}
+				fmt.Printf("  ✅ %v%s\n", result.ToolCalls, paramInfo)
+			} else {
+				fmt.Printf("  ❌ 实际: %v, 期望: %v\n", result.ToolCalls, sc.ExpectedTools)
+			}
+
+			item.Result = result
+			time.Sleep(300 * time.Millisecond)
+		}(i)
+	}
+
+	wg.Wait()
+	report.TotalMs = time.Since(totalStart).Milliseconds()
+	report.Items = items
+
+	// 3. 聚合统计
+	for i := range items {
+		item := &items[i]
+		cs := report.CatSummary[item.SubCatKey]
+		if cs == nil {
+			cs = &TimeCatSummary{}
+			report.CatSummary[item.SubCatKey] = cs
+		}
+		cs.Total++
+
+		if item.Result != nil && item.Result.AutoEval != nil {
+			if item.Result.AutoEval.ToolCorrect {
+				cs.ToolCorrect++
+			}
+			if len(item.Scenario.ParamAssertions) > 0 {
+				// 检查 LLM 选择的工具是否与参数断言的目标工具一致
+				assertionToolName := item.Scenario.ParamAssertions[0].ToolName
+				actualToolMatches := false
+				for _, tc := range item.Result.ToolCallDetails {
+					if tc.Name == assertionToolName {
+						actualToolMatches = true
+						break
+					}
+				}
+				if actualToolMatches {
+					cs.ParamTotal++
+					if item.Result.AutoEval.ParamScore >= 100 {
+						cs.ParamCorrect++
+					}
+				}
+				// 不匹配时跳过，不计入 ParamTotal（避免虚假失败）
+			}
+		}
+	}
+
+	return report, nil
+}
+
+// GenerateTimeReport 生成时间理解深度测试 Markdown 报告
+func (s *V4EvalService) GenerateTimeReport(report *TimeReport) string {
+	var sb strings.Builder
+
+	sb.WriteString("# V4 时间理解深度测试报告\n\n")
+	sb.WriteString(fmt.Sprintf("> 测试时间: %s | 模型: %s | 总耗时: %.1f 秒\n\n",
+		report.TestTime.Format("2006-01-02 15:04:05"), report.ModelName,
+		float64(report.TotalMs)/1000))
+
+	// 1. 总览
+	totalItems := len(report.Items)
+	totalCorrect := 0
+	totalParamTotal := 0
+	totalParamCorrect := 0
+	for _, cs := range report.CatSummary {
+		totalCorrect += cs.ToolCorrect
+		totalParamTotal += cs.ParamTotal
+		totalParamCorrect += cs.ParamCorrect
+	}
+
+	sb.WriteString("## 1. 总览\n\n")
+	sb.WriteString("| 指标 | 值 |\n|------|----|\n")
+	sb.WriteString(fmt.Sprintf("| 总场景数 | %d |\n", totalItems))
+	sb.WriteString(fmt.Sprintf("| 工具选择通过 | %d/%d (**%.1f%%**) |\n",
+		totalCorrect, totalItems, float64(totalCorrect)/float64(totalItems)*100))
+	if totalParamTotal > 0 {
+		sb.WriteString(fmt.Sprintf("| 参数准确通过 | %d/%d (**%.1f%%**) |\n",
+			totalParamCorrect, totalParamTotal, float64(totalParamCorrect)/float64(totalParamTotal)*100))
+	}
+	sb.WriteString("\n")
+
+	// 2. 能力矩阵
+	sb.WriteString("## 2. 时间理解能力矩阵\n\n")
+	sb.WriteString("| 维度 | 名称 | 场景 | 工具正确 | 参数正确 | 评级 |\n")
+	sb.WriteString("|------|------|------|----------|----------|------|\n")
+	for _, tc := range timeSubCategories {
+		cs := report.CatSummary[tc.Key]
+		if cs == nil || cs.Total == 0 {
+			continue
+		}
+		toolPct := float64(cs.ToolCorrect) / float64(cs.Total) * 100
+		paramStr := "-"
+		if cs.ParamTotal > 0 {
+			paramStr = fmt.Sprintf("%d/%d (%.0f%%)", cs.ParamCorrect, cs.ParamTotal,
+				float64(cs.ParamCorrect)/float64(cs.ParamTotal)*100)
+		}
+		rating := timeRating(toolPct)
+		sb.WriteString(fmt.Sprintf("| %s | %s | %d | %d/%d (%.0f%%) | %s | %s |\n",
+			tc.Key, tc.Name, cs.Total, cs.ToolCorrect, cs.Total, toolPct, paramStr, rating))
+	}
+	sb.WriteString("\n")
+
+	// 3. 分维度详情
+	sb.WriteString("## 3. 分维度详情\n\n")
+	for _, tc := range timeSubCategories {
+		cs := report.CatSummary[tc.Key]
+		if cs == nil || cs.Total == 0 {
+			continue
+		}
+		toolPct := float64(cs.ToolCorrect) / float64(cs.Total) * 100
+		sb.WriteString(fmt.Sprintf("### %s: %s (%d/%d = %.0f%%)\n\n",
+			tc.Key, tc.Name, cs.ToolCorrect, cs.Total, toolPct))
+		sb.WriteString("| # | 输入 | 期望工具 | 实际工具 | 参数 | 结果 |\n")
+		sb.WriteString("|---|------|----------|----------|------|------|\n")
+
+		for _, item := range report.Items {
+			if item.SubCatKey != tc.Key || item.Result == nil {
+				continue
+			}
+			r := item.Result
+
+			expected := strings.Join(item.Scenario.ExpectedTools, "/")
+			actual := strings.Join(r.ToolCalls, ",")
+			if actual == "" {
+				actual = "无"
+			}
+
+			paramInfo := "-"
+			if len(r.ToolCallDetails) > 0 {
+				td := r.ToolCallDetails[0]
+				parts := []string{}
+				if st, ok := extractNestedParam(td.Arguments, "activities[0].start_time"); ok {
+					parts = append(parts, fmt.Sprintf("start=%s", st))
+				} else if st, ok := extractNestedParam(td.Arguments, "start_time"); ok {
+					parts = append(parts, fmt.Sprintf("start=%s", st))
+				}
+				if et, ok := extractNestedParam(td.Arguments, "activities[0].end_time"); ok {
+					parts = append(parts, fmt.Sprintf("end=%s", et))
+				}
+				if d, ok := td.Arguments["date"]; ok {
+					parts = append(parts, fmt.Sprintf("date=%v", d))
+				}
+				if len(parts) > 0 {
+					paramInfo = strings.Join(parts, ", ")
+				}
+				if r.AutoEval != nil && len(item.Scenario.ParamAssertions) > 0 {
+					if r.AutoEval.ParamScore >= 100 {
+						paramInfo += " ✓"
+					} else {
+						paramInfo += fmt.Sprintf(" ✗(%.0f%%)", r.AutoEval.ParamScore)
+					}
+				}
+			}
+
+			status := "✅"
+			if r.AutoEval == nil || !r.AutoEval.ToolCorrect {
+				status = "❌"
+			}
+
+			sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %s | %s |\n",
+				item.Scenario.ID, truncate(item.Scenario.Input, 20),
+				expected, actual, paramInfo, status))
+		}
+		sb.WriteString("\n")
+	}
+
+	// 4. 失败场景分析
+	sb.WriteString("## 4. 失败场景分析\n\n")
+	failCount := 0
+	for _, item := range report.Items {
+		r := item.Result
+		if r == nil || (r.AutoEval != nil && r.AutoEval.ToolCorrect) {
+			continue
+		}
+		failCount++
+		sb.WriteString(fmt.Sprintf("### ❌ #%d: %s\n\n", item.Scenario.ID, item.Scenario.Input))
+		sb.WriteString(fmt.Sprintf("- **维度**: %s\n", item.SubCatKey))
+		sb.WriteString(fmt.Sprintf("- **描述**: %s\n", item.Scenario.Description))
+		sb.WriteString(fmt.Sprintf("- **期望工具**: %v\n", item.Scenario.ExpectedTools))
+		sb.WriteString(fmt.Sprintf("- **实际工具**: %v\n", r.ToolCalls))
+		if r.Response != "" {
+			sb.WriteString(fmt.Sprintf("- **回复**: %s\n", truncate(r.Response, 100)))
+		}
+		if r.AutoEval != nil && r.AutoEval.Details != "" {
+			sb.WriteString(fmt.Sprintf("- **详情**: %s\n", r.AutoEval.Details))
+		}
+		sb.WriteString("\n")
+	}
+	if failCount == 0 {
+		sb.WriteString("所有场景均通过！\n\n")
+	}
+
+	// 5. 结论
+	sb.WriteString("## 5. 结论\n\n")
+	overallPct := float64(totalCorrect) / float64(totalItems) * 100
+	sb.WriteString(fmt.Sprintf("- **总体工具选择准确率**: %.1f%% (%d/%d)\n", overallPct, totalCorrect, totalItems))
+	if totalParamTotal > 0 {
+		paramPct := float64(totalParamCorrect) / float64(totalParamTotal) * 100
+		sb.WriteString(fmt.Sprintf("- **参数时间映射准确率**: %.1f%% (%d/%d)\n", paramPct, totalParamCorrect, totalParamTotal))
+	}
+
+	sb.WriteString("\n**薄弱环节**:\n")
+	weakFound := false
+	for _, tc := range timeSubCategories {
+		cs := report.CatSummary[tc.Key]
+		if cs == nil || cs.Total == 0 {
+			continue
+		}
+		pct := float64(cs.ToolCorrect) / float64(cs.Total) * 100
+		if pct < 90 {
+			weakFound = true
+			sb.WriteString(fmt.Sprintf("- %s（%s）: %.0f%% — 需重点改进\n", tc.Key, tc.Name, pct))
+		}
+	}
+	if !weakFound {
+		sb.WriteString("- 所有维度均达到 90% 以上\n")
+	}
+	sb.WriteString("\n---\n*报告由 V4EvalService.RunTimeReport 自动生成*\n")
+
+	return sb.String()
+}
+
+// extractNestedParam 从工具参数中提取嵌套参数值
+func extractNestedParam(args map[string]interface{}, path string) (string, bool) {
+	parts := strings.Split(path, ".")
+	var current interface{} = args
+
+	for _, part := range parts {
+		if idx := strings.Index(part, "["); idx >= 0 {
+			arrName := part[:idx]
+			idxStr := part[idx+1 : len(part)-1]
+			m, ok := current.(map[string]interface{})
+			if !ok {
+				return "", false
+			}
+			arr, ok := m[arrName]
+			if !ok {
+				return "", false
+			}
+			slice, ok := arr.([]interface{})
+			if !ok {
+				return "", false
+			}
+			var arrIdx int
+			fmt.Sscanf(idxStr, "%d", &arrIdx)
+			if arrIdx >= len(slice) {
+				return "", false
+			}
+			current = slice[arrIdx]
+		} else {
+			m, ok := current.(map[string]interface{})
+			if !ok {
+				return "", false
+			}
+			val, ok := m[part]
+			if !ok {
+				return "", false
+			}
+			current = val
+		}
+	}
+	return fmt.Sprintf("%v", current), true
+}
+
+// timeRating 根据准确率返回评级
+func timeRating(pct float64) string {
+	switch {
+	case pct >= 100:
+		return "★★★★★"
+	case pct >= 90:
+		return "★★★★☆"
+	case pct >= 75:
+		return "★★★☆☆"
+	case pct >= 50:
+		return "★★☆☆☆"
+	default:
+		return "★☆☆☆☆"
+	}
 }

@@ -10,8 +10,9 @@ type EvalPersona struct {
 	TestFocus   string // 测试重点
 
 	// 模拟上下文（注入到 session 中）
-	CurrentScheduleItems []EvalScheduleItem // 当前时刻表
-	Summary              string             // 历史摘要（模拟已有对话上下文）
+	CurrentScheduleItems  []EvalScheduleItem // 当前时刻表
+	TomorrowScheduleItems []EvalScheduleItem // 明日时刻表
+	Summary               string             // 历史摘要（模拟已有对话上下文）
 }
 
 // EvalScheduleItem 评估用的时刻表条目

@@ -105,6 +105,15 @@ func (s *StatusScheduler) run() {
 
 // processSchedule 处理单个时刻表（今天的）
 func (s *StatusScheduler) processSchedule(ctx context.Context, schedule *model.StatusSchedule, currentTime string) {
+	// 检查推断锁：一键推断成功后 10 分钟内不覆盖
+	if s.redisClient != nil {
+		lockKey := fmt.Sprintf("infer:lock:%s", schedule.UserID)
+		locked, err := s.redisClient.Get(ctx, lockKey)
+		if err == nil && locked != "" {
+			return // 跳过此用户，推断锁生效中
+		}
+	}
+
 	// 检查每个未执行的条目
 	for i, item := range schedule.Items {
 		if item.Executed {
@@ -118,21 +127,17 @@ func (s *StatusScheduler) processSchedule(ctx context.Context, schedule *model.S
 			continue
 		}
 
-		// 对于跨午夜时段，只在"今天部分"（start 到 23:59）触发
+		// 对于跨午夜时段，只在"今天部分"（start 到 23:59）触发状态更新
+		// 不标记 executed（item 要到第二天 endTime 之后才算结束）
 		// "第二天部分"由 processScheduleForCrossMidnight 处理
 		if item.EndTime < item.StartTime {
-			// 跨午夜时段：只匹配 start 到 23:59
+			// 跨午夜时段：触发状态更新但不标记完成
 			if currentTime >= item.StartTime {
-				fmt.Printf("[StatusScheduler] 触发状态更新(跨午夜-今天部分) user=%s index=%d status=%s time=%s-%s\n",
+				fmt.Printf("[StatusScheduler] 触发状态更新(跨午夜-今天部分,不标记完成) user=%s index=%d status=%s time=%s-%s\n",
 					schedule.UserID, i, item.Status, item.StartTime, item.EndTime)
 
 				if err := s.updateUserStatus(ctx, schedule.UserID, &item); err != nil {
 					fmt.Printf("[StatusScheduler] 更新状态失败: %v\n", err)
-					continue
-				}
-
-				if err := s.scheduleRepo.MarkItemExecuted(ctx, schedule.ID, i); err != nil {
-					fmt.Printf("[StatusScheduler] 标记已执行失败: %v\n", err)
 				}
 				break
 			}
@@ -177,17 +182,19 @@ func (s *StatusScheduler) processScheduleForCrossMidnight(ctx context.Context, s
 			fmt.Printf("[StatusScheduler] 触发状态更新(跨午夜-第二天) user=%s index=%d status=%s time=%s-%s current=%s\n",
 				schedule.UserID, i, item.Status, item.StartTime, item.EndTime, currentTime)
 
-			// 更新用户状态
+			// 更新用户状态（仍在时段内）
 			if err := s.updateUserStatus(ctx, schedule.UserID, &item); err != nil {
 				fmt.Printf("[StatusScheduler] 更新状态失败: %v\n", err)
 				continue
 			}
-
-			// 注意：跨午夜时段可能在昨天已经标记为已执行（进入 start 时），
-			// 但我们仍然需要更新状态，因为用户可能仍在这个时段内
-			// 不需要再次标记为已执行
-
 			break
+		} else if !item.Executed {
+			// 跨午夜时段已结束（currentTime >= endTime），标记为已执行
+			fmt.Printf("[StatusScheduler] 跨午夜时段已结束 user=%s index=%d time=%s-%s current=%s\n",
+				schedule.UserID, i, item.StartTime, item.EndTime, currentTime)
+			if err := s.scheduleRepo.MarkItemExecuted(ctx, schedule.ID, i); err != nil {
+				fmt.Printf("[StatusScheduler] 标记已执行失败: %v\n", err)
+			}
 		}
 	}
 }
@@ -217,6 +224,9 @@ func (s *StatusScheduler) updateUserStatus(ctx context.Context, userID string, i
 			Emoji:       item.Emoji,
 			Label:       item.Status,
 			Description: item.Status,
+			GifURL:      item.GifURL,
+			GiphyQuery:  item.GiphyQuery,
+			UseGif:      item.GifURL != "",
 		},
 		UpdatedAt: time.Now(),
 		IsAIGuess: item.IsAIGuess, // 保留原始的 AI 推测标记
