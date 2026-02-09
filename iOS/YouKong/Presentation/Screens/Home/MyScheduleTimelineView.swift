@@ -260,6 +260,19 @@ struct ScheduleGroupView: View {
 
     // MARK: - Date Separator
 
+    /// 是否为今天的分组
+    private var isToday: Bool {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return group.date == formatter.string(from: Date())
+    }
+
+    /// 今天的分组中是否有正在进行的条目
+    private var hasActiveItem: Bool {
+        guard isToday else { return false }
+        return group.items.contains { isItemActive($0) }
+    }
+
     private var dateSeparator: some View {
         HStack {
             Text("──")
@@ -267,7 +280,7 @@ struct ScheduleGroupView: View {
             Text(group.displayDate)
                 .font(.cliBodySmall)
                 .foregroundColor(group.isCurrentOrFuture ? CLIColors.green : CLIColors.textSecondary)
-            if group.status == "active" {
+            if hasActiveItem {
                 Text("(进行中)")
                     .font(.cliCaptionSmall)
                     .foregroundColor(CLIColors.yellow)
@@ -301,8 +314,14 @@ struct ScheduleItemView: View {
     let isActive: Bool
     var onToggleHighlight: (() -> Void)?
 
+    private var isBooking: Bool {
+        item.bookingId != nil
+    }
+
     private var borderColor: Color {
-        if isActive {
+        if isBooking {
+            return .cyan
+        } else if isActive {
             return CLIColors.green
         } else if isExecuted {
             return CLIColors.textWeak
@@ -340,15 +359,28 @@ struct ScheduleItemView: View {
                         .font(.system(size: 20))
                 }
 
-                Text(item.isAIGuess == true ? "\(item.status) (AI 推测)" : item.status)
-                    .font(.cliBodySmall)
-                    .foregroundColor(textColor)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(item.isAIGuess == true ? "\(item.status) (AI 推测)" : item.status)
+                        .font(.cliBodySmall)
+                        .foregroundColor(textColor)
+                        .lineLimit(1)
+
+                    if isBooking, let withUsers = item.withUsers, !withUsers.isEmpty {
+                        Text("👥 \(withUsers)")
+                            .font(.cliCaptionSmall)
+                            .foregroundColor(.cyan)
+                            .lineLimit(1)
+                    }
+                }
 
                 Spacer()
 
-                // Highlight toggle (有空/没空)
-                if let onToggle = onToggleHighlight {
+                // Booking tag or highlight toggle
+                if isBooking {
+                    Text("[约]")
+                        .font(.cliCaptionSmall)
+                        .foregroundColor(.cyan)
+                } else if let onToggle = onToggleHighlight {
                     Text(item.highlight == true ? "[有空]" : "[没空]")
                         .font(.cliCaptionSmall)
                         .foregroundColor(item.highlight == true ? CLIColors.green : CLIColors.textWeak)
@@ -412,9 +444,9 @@ struct ScheduleEditSheet: View {
                 } label: {
                     Text(viewModel.isSavingEdit ? "[...]" : "[保存]")
                         .font(.cliBodySmall)
-                        .foregroundColor(viewModel.editEmoji.isEmpty || viewModel.editStatus.isEmpty ? CLIColors.textWeak : CLIColors.green)
+                        .foregroundColor(viewModel.editEmoji.isEmpty || viewModel.editStatus.isEmpty || !viewModel.editConflictItems.isEmpty ? CLIColors.textWeak : CLIColors.green)
                 }
-                .disabled(viewModel.editEmoji.isEmpty || viewModel.editStatus.isEmpty || viewModel.isSavingEdit)
+                .disabled(viewModel.editEmoji.isEmpty || viewModel.editStatus.isEmpty || viewModel.isSavingEdit || !viewModel.editConflictItems.isEmpty)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -425,16 +457,84 @@ struct ScheduleEditSheet: View {
 
             // Edit form
             VStack(spacing: 20) {
-                if let item = viewModel.editingItem {
-                    // Time display (read-only)
+                // Time adjustment
+                VStack(spacing: 12) {
+                    // Start time
                     HStack {
-                        Text("> 时段:")
+                        Text("> 开始:")
                             .font(.cliBodySmall)
                             .foregroundColor(CLIColors.textSecondary)
-                        Text("\(item.startTime) - \(item.endTime)")
+                        Spacer()
+                        Button {
+                            viewModel.adjustStartTime(byMinutes: -30)
+                        } label: {
+                            Text("◀")
+                                .font(.cliBody)
+                                .foregroundColor(CLIColors.green)
+                                .frame(width: 36, height: 36)
+                                .background(CLIColors.backgroundSecondary)
+                                .cornerRadius(4)
+                        }
+                        Text(viewModel.editStartTime)
                             .font(.cliBody)
                             .foregroundColor(CLIColors.textPrimary)
+                            .frame(width: 60, alignment: .center)
+                        Button {
+                            viewModel.adjustStartTime(byMinutes: 30)
+                        } label: {
+                            Text("▶")
+                                .font(.cliBody)
+                                .foregroundColor(CLIColors.green)
+                                .frame(width: 36, height: 36)
+                                .background(CLIColors.backgroundSecondary)
+                                .cornerRadius(4)
+                        }
+                    }
+
+                    // End time
+                    HStack {
+                        Text("> 结束:")
+                            .font(.cliBodySmall)
+                            .foregroundColor(CLIColors.textSecondary)
                         Spacer()
+                        Button {
+                            viewModel.adjustEndTime(byMinutes: -30)
+                        } label: {
+                            Text("◀")
+                                .font(.cliBody)
+                                .foregroundColor(CLIColors.green)
+                                .frame(width: 36, height: 36)
+                                .background(CLIColors.backgroundSecondary)
+                                .cornerRadius(4)
+                        }
+                        Text(viewModel.editEndTime)
+                            .font(.cliBody)
+                            .foregroundColor(CLIColors.textPrimary)
+                            .frame(width: 60, alignment: .center)
+                        Button {
+                            viewModel.adjustEndTime(byMinutes: 30)
+                        } label: {
+                            Text("▶")
+                                .font(.cliBody)
+                                .foregroundColor(CLIColors.green)
+                                .frame(width: 36, height: 36)
+                                .background(CLIColors.backgroundSecondary)
+                                .cornerRadius(4)
+                        }
+                    }
+                }
+
+                // Conflict warning
+                if !viewModel.editConflictItems.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("⚠ 与以下时段冲突：")
+                            .font(.cliBodySmall)
+                            .foregroundColor(.red)
+                        ForEach(viewModel.editConflictItems, id: \.id) { item in
+                            Text("  \(item.startTime)-\(item.endTime) \(item.status)")
+                                .font(.cliCaptionSmall)
+                                .foregroundColor(.red)
+                        }
                     }
                 }
 
@@ -558,7 +658,7 @@ struct EmojiGridPicker: View {
     @Binding var selected: String
     @State private var currentPage = 0
 
-    private static let maxSelection = 3
+    private static let maxSelection = 2
 
     private let pages: [(String, [[String]])] = [
         ("日常", [

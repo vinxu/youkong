@@ -4,14 +4,15 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.youkong.core.network.api.ScheduleApi
-import com.youkong.core.network.api.UserApi
 import com.youkong.core.network.model.ScheduleGroup
 import com.youkong.core.network.model.ScheduleItem
-import com.youkong.core.network.model.UserSettingsRequest
+import com.youkong.core.network.model.UpdateScheduleItemRequest
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -20,10 +21,19 @@ import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 
+/** 时刻表变更事件通知（跨 ViewModel 通信） */
+object ScheduleChangeNotifier {
+    private val _events = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val events: SharedFlow<Unit> = _events.asSharedFlow()
+    fun notifyChange() {
+        android.util.Log.d("ScheduleChange", "🔔 发送时刻表变更事件")
+        _events.tryEmit(Unit)
+    }
+}
+
 @HiltViewModel
 class ScheduleTimelineViewModel @Inject constructor(
-    private val scheduleApi: ScheduleApi,
-    private val userApi: UserApi
+    private val scheduleApi: ScheduleApi
 ) : ViewModel() {
 
     companion object {
@@ -43,13 +53,7 @@ class ScheduleTimelineViewModel @Inject constructor(
             _uiState.update { it.copy(isLoading = true, error = null) }
 
             try {
-                // 并行加载时刻表和用户设置
-                val historyDeferred = async { scheduleApi.getMyScheduleHistory(limit = PAGE_SIZE) }
-                val settingsDeferred = async { userApi.getUserSettings() }
-
-                val response = historyDeferred.await()
-                val settingsResponse = settingsDeferred.await()
-
+                val response = scheduleApi.getMyScheduleHistory(limit = PAGE_SIZE)
                 val data = response.data
 
                 if (data != null) {
@@ -60,17 +64,15 @@ class ScheduleTimelineViewModel @Inject constructor(
                             hasMore = data.hasMore,
                             oldestDate = data.oldestDate,
                             isEmpty = groups.isEmpty(),
-                            isLoading = false,
-                            isAutoPredictEnabled = settingsResponse.data?.autoPredictEnabled ?: false
+                            isLoading = false
                         )
                     }
-                    Log.d(TAG, "加载完成: ${groups.size} 组, hasMore: ${data.hasMore}, autoPredict: ${settingsResponse.data?.autoPredictEnabled}")
+                    Log.d(TAG, "加载完成: ${groups.size} 组, hasMore: ${data.hasMore}")
                 } else {
                     _uiState.update {
                         it.copy(
                             isEmpty = true,
-                            isLoading = false,
-                            isAutoPredictEnabled = settingsResponse.data?.autoPredictEnabled ?: false
+                            isLoading = false
                         )
                     }
                 }
@@ -82,39 +84,6 @@ class ScheduleTimelineViewModel @Inject constructor(
                         isLoading = false
                     )
                 }
-            }
-        }
-    }
-
-    // MARK: - Toggle Auto Predict
-
-    fun toggleAutoPredict() {
-        if (_uiState.value.isUpdatingSettings) return
-
-        val newValue = !_uiState.value.isAutoPredictEnabled
-
-        viewModelScope.launch {
-            _uiState.update { it.copy(isUpdatingSettings = true) }
-
-            try {
-                val response = userApi.updateUserSettings(
-                    UserSettingsRequest(autoPredictEnabled = newValue)
-                )
-                val data = response.data
-                if (data != null) {
-                    _uiState.update {
-                        it.copy(
-                            isAutoPredictEnabled = data.autoPredictEnabled,
-                            isUpdatingSettings = false
-                        )
-                    }
-                    Log.d(TAG, "更新设置成功: autoPredict = ${data.autoPredictEnabled}")
-                } else {
-                    _uiState.update { it.copy(isUpdatingSettings = false) }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "更新设置失败: ${e.message}")
-                _uiState.update { it.copy(isUpdatingSettings = false) }
             }
         }
     }
@@ -195,17 +164,28 @@ class ScheduleTimelineViewModel @Inject constructor(
      * 检查时刻表条目是否已执行（已过时间）
      */
     fun isItemExecuted(item: ScheduleItem, group: ScheduleGroup): Boolean {
-        // 如果有明确的 executed 标记，直接使用
-        item.executed?.let { return it }
-
         // 过去的日期全部视为已执行
         if (!group.isCurrentOrFuture) {
             return true
         }
 
-        // 今天的检查结束时间是否已过
+        // 未来的日期：没有任何条目已执行
+        val todayStr = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+        if (group.date != todayStr) {
+            return false
+        }
+
+        // 今天：比较当前时间和条目结束时间
         return try {
-            val endTime = LocalTime.parse(item.endTime, DateTimeFormatter.ofPattern("HH:mm"))
+            val fmt = DateTimeFormatter.ofPattern("HH:mm")
+            val startTime = LocalTime.parse(item.startTime, fmt)
+            val endTime = LocalTime.parse(item.endTime, fmt)
+
+            // 跨午夜时段（如 23:00-00:30）：今天不算完成，它在明天才结束
+            if (endTime.isBefore(startTime)) {
+                return false
+            }
+
             val now = LocalTime.now()
             now.isAfter(endTime)
         } catch (e: Exception) {
@@ -224,12 +204,257 @@ class ScheduleTimelineViewModel @Inject constructor(
         if (group.date != todayStr) return false
 
         return try {
-            val startTime = LocalTime.parse(item.startTime, DateTimeFormatter.ofPattern("HH:mm"))
-            val endTime = LocalTime.parse(item.endTime, DateTimeFormatter.ofPattern("HH:mm"))
+            val fmt = DateTimeFormatter.ofPattern("HH:mm")
+            val startTime = LocalTime.parse(item.startTime, fmt)
+            val endTime = LocalTime.parse(item.endTime, fmt)
             val now = LocalTime.now()
+
+            // 跨午夜时段（如 23:00-00:30）：从 start 到午夜都算 active
+            if (endTime.isBefore(startTime)) {
+                return !now.isBefore(startTime)
+            }
+
             !now.isBefore(startTime) && now.isBefore(endTime)
         } catch (e: Exception) {
             false
+        }
+    }
+
+    // MARK: - Edit
+
+    fun startEditing(item: ScheduleItem, group: ScheduleGroup) {
+        _uiState.update {
+            it.copy(
+                editingItem = item,
+                editingGroupDate = group.date,
+                editEmoji = item.emoji,
+                editStatus = item.status,
+                editHighlight = item.highlight ?: false,
+                editStartTime = item.startTime,
+                editEndTime = item.endTime,
+                editConflictItems = emptyList(),
+                showEditSheet = true,
+                isSavingEdit = false,
+            )
+        }
+    }
+
+    fun adjustStartTime(byMinutes: Int) {
+        _uiState.update {
+            it.copy(editStartTime = adjustTime(it.editStartTime, byMinutes))
+        }
+        checkConflicts()
+    }
+
+    fun adjustEndTime(byMinutes: Int) {
+        _uiState.update {
+            it.copy(editEndTime = adjustTime(it.editEndTime, byMinutes))
+        }
+        checkConflicts()
+    }
+
+    private fun adjustTime(timeStr: String, byMinutes: Int): String {
+        val parts = timeStr.split(":")
+        if (parts.size != 2) return timeStr
+        val hour = parts[0].toIntOrNull() ?: return timeStr
+        val minute = parts[1].toIntOrNull() ?: return timeStr
+        var totalMinutes = hour * 60 + minute + byMinutes
+        if (totalMinutes < 0) totalMinutes += 24 * 60
+        totalMinutes %= (24 * 60)
+        return String.format("%02d:%02d", totalMinutes / 60, totalMinutes % 60)
+    }
+
+    private fun checkConflicts() {
+        val state = _uiState.value
+        val editingItem = state.editingItem ?: run {
+            _uiState.update { it.copy(editConflictItems = emptyList()) }
+            return
+        }
+        val date = state.editingGroupDate ?: run {
+            _uiState.update { it.copy(editConflictItems = emptyList()) }
+            return
+        }
+        val group = state.scheduleGroups.firstOrNull { it.date == date } ?: run {
+            _uiState.update { it.copy(editConflictItems = emptyList()) }
+            return
+        }
+        val otherItems = group.items.filter {
+            it.startTime != editingItem.startTime || it.endTime != editingItem.endTime
+        }
+        val conflicts = otherItems.filter { other ->
+            timesOverlap(state.editStartTime, state.editEndTime, other.startTime, other.endTime)
+        }
+        _uiState.update { it.copy(editConflictItems = conflicts) }
+    }
+
+    private fun timesOverlap(s1: String, e1: String, s2: String, e2: String): Boolean {
+        val s1m = timeToMinutes(s1)
+        val e1m = timeToMinutes(e1)
+        val s2m = timeToMinutes(s2)
+        val e2m = timeToMinutes(e2)
+
+        val ranges1 = if (e1m <= s1m) listOf(s1m to 24 * 60, 0 to e1m) else listOf(s1m to e1m)
+        val ranges2 = if (e2m <= s2m) listOf(s2m to 24 * 60, 0 to e2m) else listOf(s2m to e2m)
+
+        for (r1 in ranges1) {
+            for (r2 in ranges2) {
+                if (r1.first < r2.second && r2.first < r1.second) return true
+            }
+        }
+        return false
+    }
+
+    private fun timeToMinutes(time: String): Int {
+        val parts = time.split(":")
+        if (parts.size != 2) return 0
+        return (parts[0].toIntOrNull() ?: 0) * 60 + (parts[1].toIntOrNull() ?: 0)
+    }
+
+    fun dismissEdit() {
+        _uiState.update {
+            it.copy(showEditSheet = false, editingItem = null)
+        }
+    }
+
+    fun updateEditEmoji(emoji: String) {
+        _uiState.update { it.copy(editEmoji = emoji) }
+    }
+
+    fun updateEditStatus(status: String) {
+        _uiState.update { it.copy(editStatus = status) }
+    }
+
+    fun updateEditHighlight(highlight: Boolean) {
+        _uiState.update { it.copy(editHighlight = highlight) }
+    }
+
+    fun saveEdit() {
+        val state = _uiState.value
+        val item = state.editingItem ?: return
+        val date = state.editingGroupDate ?: return
+        if (state.editEmoji.isEmpty() || state.editStatus.isEmpty()) return
+        if (state.editConflictItems.isNotEmpty()) return
+        if (state.isSavingEdit) return
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSavingEdit = true) }
+
+            try {
+                scheduleApi.updateScheduleItem(
+                    date = date,
+                    request = UpdateScheduleItemRequest(
+                        oldStartTime = item.startTime,
+                        oldEndTime = item.endTime,
+                        newStartTime = state.editStartTime,
+                        newEndTime = state.editEndTime,
+                        emoji = state.editEmoji,
+                        status = state.editStatus,
+                        highlight = state.editHighlight,
+                    )
+                )
+                _uiState.update {
+                    it.copy(showEditSheet = false, editingItem = null, isSavingEdit = false)
+                }
+                ScheduleChangeNotifier.notifyChange()
+                refresh()
+            } catch (e: Exception) {
+                Log.e(TAG, "保存编辑失败: ${e.message}")
+                _uiState.update { it.copy(isSavingEdit = false) }
+            }
+        }
+    }
+
+    // MARK: - Delete
+
+    fun confirmDelete(item: ScheduleItem, group: ScheduleGroup) {
+        _uiState.update {
+            it.copy(
+                deletingItem = item,
+                deletingGroupDate = group.date,
+                showDeleteConfirm = true
+            )
+        }
+    }
+
+    fun dismissDeleteConfirm() {
+        _uiState.update {
+            it.copy(showDeleteConfirm = false, deletingItem = null, deletingGroupDate = null)
+        }
+    }
+
+    fun deleteItem() {
+        val state = _uiState.value
+        val item = state.deletingItem ?: return
+        val date = state.deletingGroupDate ?: return
+
+        // 乐观删除：先从本地移除
+        _uiState.update { s ->
+            val newGroups = s.scheduleGroups.mapNotNull { g ->
+                if (g.date == date) {
+                    val newItems = g.items.filter { it.startTime != item.startTime || it.endTime != item.endTime }
+                    if (newItems.isEmpty()) null else g.copy(items = newItems)
+                } else g
+            }
+            s.copy(
+                scheduleGroups = newGroups,
+                isEmpty = newGroups.isEmpty(),
+                showDeleteConfirm = false,
+                deletingItem = null,
+                deletingGroupDate = null
+            )
+        }
+
+        viewModelScope.launch {
+            try {
+                scheduleApi.deleteScheduleItem(
+                    date = date,
+                    startTime = item.startTime,
+                    endTime = item.endTime
+                )
+                ScheduleChangeNotifier.notifyChange()
+            } catch (e: Exception) {
+                Log.e(TAG, "删除失败: ${e.message}")
+                // 删除失败，刷新恢复
+                refresh()
+            }
+        }
+    }
+
+    fun toggleHighlight(item: ScheduleItem, group: ScheduleGroup) {
+        val newHighlight = !(item.highlight ?: false)
+
+        viewModelScope.launch {
+            try {
+                scheduleApi.updateScheduleItem(
+                    date = group.date,
+                    request = UpdateScheduleItemRequest(
+                        oldStartTime = item.startTime,
+                        oldEndTime = item.endTime,
+                        newStartTime = item.startTime,
+                        newEndTime = item.endTime,
+                        emoji = item.emoji,
+                        status = item.status,
+                        highlight = newHighlight,
+                    )
+                )
+                // 乐观更新：直接修改本地数据避免闪烁
+                _uiState.update { state ->
+                    state.copy(
+                        scheduleGroups = state.scheduleGroups.map { g ->
+                            if (g.date == group.date) {
+                                g.copy(items = g.items.map { i ->
+                                    if (i.startTime == item.startTime && i.endTime == item.endTime) {
+                                        i.copy(highlight = newHighlight)
+                                    } else i
+                                })
+                            } else g
+                        }
+                    )
+                }
+                ScheduleChangeNotifier.notifyChange()
+            } catch (e: Exception) {
+                Log.e(TAG, "切换高亮失败: ${e.message}")
+            }
         }
     }
 }
@@ -246,7 +471,19 @@ data class ScheduleTimelineUiState(
     val oldestDate: String? = null,
     val isEmpty: Boolean = false,
     val error: String? = null,
-    // 用户设置
-    val isAutoPredictEnabled: Boolean = false,
-    val isUpdatingSettings: Boolean = false
+    // 编辑状态
+    val editingItem: ScheduleItem? = null,
+    val editingGroupDate: String? = null,
+    val showEditSheet: Boolean = false,
+    val editEmoji: String = "",
+    val editStatus: String = "",
+    val editHighlight: Boolean = false,
+    val editStartTime: String = "",
+    val editEndTime: String = "",
+    val editConflictItems: List<ScheduleItem> = emptyList(),
+    val isSavingEdit: Boolean = false,
+    // 删除确认状态
+    val deletingItem: ScheduleItem? = null,
+    val deletingGroupDate: String? = null,
+    val showDeleteConfirm: Boolean = false,
 )

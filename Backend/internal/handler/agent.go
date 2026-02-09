@@ -34,6 +34,7 @@ type AgentHandler struct {
 	scheduleRepo           ScheduleRepositoryInterface
 	friendshipRepo         FriendshipChecker              // 好友关系检查
 	inferenceAgent         *service.StatusInferenceAgent // V2 推断 Agent
+	bookingService         *service.BookingService       // 预约服务（可见性过滤）
 	// STS 配置
 	stsSecretID  string
 	stsSecretKey string
@@ -75,6 +76,11 @@ func (h *AgentHandler) SetInferenceAgent(agent *service.StatusInferenceAgent) {
 	h.inferenceAgent = agent
 }
 
+// SetBookingService 设置预约服务（用于时刻表可见性过滤）
+func (h *AgentHandler) SetBookingService(bs *service.BookingService) {
+	h.bookingService = bs
+}
+
 // SetSTSConfig 设置 STS 配置
 func (h *AgentHandler) SetSTSConfig(secretID, secretKey, bucket, region string) {
 	h.stsSecretID = secretID
@@ -113,8 +119,28 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 	fmt.Printf("[上报] 推断完成 user=%s emoji=%s activity=%s confidence=%s\n",
 		userID, inference.Emoji, inference.Activity, inference.Confidence)
 
+	// 持久化城市信息到 Redis（agent:status key）和 MySQL（users.city）
+	if h.agentService != nil {
+		h.agentService.PersistCityFromExtendedReport(c.Request.Context(), userID, &req)
+	}
+
 	// 转换为 AnalysisResult 格式（兼容现有前端）
 	analysisResult := inferenceToAnalysisResult(inference)
+
+	// 保留用户手动设置的 GIF 显示模式
+	// 自动推断只更新 emoji/status，不覆盖用户的 GIF 选择
+	if h.memoryService != nil {
+		existingMap, _ := h.memoryService.GetCachedAnalysisByUserIDs(c.Request.Context(), []string{userID})
+		if existing := existingMap[userID]; existing != nil && !existing.IsAIGuess && existing.LifeStatus.UseGif {
+			analysisResult.LifeStatus.UseGif = true
+			if analysisResult.LifeStatus.GifURL == "" {
+				analysisResult.LifeStatus.GifURL = existing.LifeStatus.GifURL
+			}
+			if analysisResult.LifeStatus.GiphyQuery == "" {
+				analysisResult.LifeStatus.GiphyQuery = existing.LifeStatus.GiphyQuery
+			}
+		}
+	}
 
 	// 缓存分析结果
 	if h.memoryService != nil {
@@ -1491,6 +1517,15 @@ func (h *AgentHandler) GetUserSchedule(c *gin.Context) {
 		}
 	}
 
+	// 可见性过滤：Booking 条目根据查看者身份过滤
+	if h.bookingService != nil && viewerID != targetUserID {
+		for _, s := range filtered {
+			s.Items = model.ScheduleItems(
+				h.bookingService.FilterScheduleForViewer(c.Request.Context(), []model.ScheduleItem(s.Items), viewerID),
+			)
+		}
+	}
+
 	// 格式化响应
 	daySchedules := formatSchedulesByDate(filtered)
 
@@ -1554,6 +1589,7 @@ func (h *AgentHandler) UpdateScheduleItem(c *gin.Context) {
 
 	// 查找并更新条目
 	found := false
+	foundIdx := -1
 	for i, item := range schedule.Items {
 		if item.StartTime == req.OldStartTime && item.EndTime == req.OldEndTime {
 			highlight := item.Highlight // 默认保留原值
@@ -1572,6 +1608,7 @@ func (h *AgentHandler) UpdateScheduleItem(c *gin.Context) {
 				Highlight: highlight,
 			}
 			found = true
+			foundIdx = i
 			break
 		}
 	}
@@ -1579,6 +1616,17 @@ func (h *AgentHandler) UpdateScheduleItem(c *gin.Context) {
 	if !found {
 		response.NotFound(c, "未找到该时段")
 		return
+	}
+
+	// 检测时间冲突（排除当前编辑的 item，即已被替换的那个 index）
+	for j, other := range schedule.Items {
+		if j == foundIdx {
+			continue
+		}
+		if timesOverlap(req.NewStartTime, req.NewEndTime, other.StartTime, other.EndTime) {
+			response.ParamError(c, fmt.Sprintf("与 %s-%s %s 时间冲突", other.StartTime, other.EndTime, other.Status))
+			return
+		}
 	}
 
 	// 保存更新
@@ -1670,6 +1718,46 @@ func (h *AgentHandler) DeleteScheduleItem(c *gin.Context) {
 		"success": true,
 		"message": "删除成功",
 	})
+}
+
+// timesOverlap 检测两个时段是否重叠（支持跨午夜）
+func timesOverlap(s1, e1, s2, e2 string) bool {
+	s1m := parseTimeMinutes(s1)
+	e1m := parseTimeMinutes(e1)
+	s2m := parseTimeMinutes(s2)
+	e2m := parseTimeMinutes(e2)
+
+	// 拆分为子区间（处理跨午夜）
+	type interval struct{ start, end int }
+	var ranges1, ranges2 []interval
+
+	if e1m <= s1m {
+		ranges1 = []interval{{s1m, 24 * 60}, {0, e1m}}
+	} else {
+		ranges1 = []interval{{s1m, e1m}}
+	}
+
+	if e2m <= s2m {
+		ranges2 = []interval{{s2m, 24 * 60}, {0, e2m}}
+	} else {
+		ranges2 = []interval{{s2m, e2m}}
+	}
+
+	for _, r1 := range ranges1 {
+		for _, r2 := range ranges2 {
+			if r1.start < r2.end && r2.start < r1.end {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// parseTimeMinutes 将 HH:MM 格式转换为分钟数
+func parseTimeMinutes(t string) int {
+	var h, m int
+	fmt.Sscanf(t, "%d:%d", &h, &m)
+	return h*60 + m
 }
 
 // DayScheduleResponse 按日期分组的时刻表响应
@@ -2157,6 +2245,7 @@ func (h *AgentHandler) InferStatusV2(c *gin.Context) {
 				GifURL:               inferResp.Result.GifURL,
 				GiphyQuery:           inferResp.Result.GiphyQuery,
 			}
+			h.agentService.MergeExistingGifInfo(c.Request.Context(), userID, feedbackReq)
 			if err := h.agentService.SaveStatusFeedback(c.Request.Context(), userID, feedbackReq); err != nil {
 				fmt.Printf("[InferStatusV3] 更新首页状态失败 user=%s error=%v\n", userID, err)
 			}
@@ -2245,6 +2334,7 @@ func (h *AgentHandler) InferStatusV2Stream(c *gin.Context) {
 				GifURL:               result.GifURL,
 				GiphyQuery:           result.GiphyQuery,
 			}
+			h.agentService.MergeExistingGifInfo(ctx, userID, feedbackReq)
 			h.agentService.SaveStatusFeedback(ctx, userID, feedbackReq)
 		}()
 	}
@@ -2286,7 +2376,7 @@ func (h *AgentHandler) InferStatusRespond(c *gin.Context) {
 		return
 	}
 
-	// 更新首页状态
+	// 更新首页状态（保留用户手动设置的 GIF）
 	if h.agentService != nil && result != nil {
 		feedbackReq := &model.StatusFeedbackRequest{
 			CorrectedEmoji:       result.Emoji,
@@ -2296,6 +2386,7 @@ func (h *AgentHandler) InferStatusRespond(c *gin.Context) {
 			GifURL:               result.GifURL,
 			GiphyQuery:           result.GiphyQuery,
 		}
+		h.agentService.MergeExistingGifInfo(c.Request.Context(), userID, feedbackReq)
 		if err := h.agentService.SaveStatusFeedback(c.Request.Context(), userID, feedbackReq); err != nil {
 			fmt.Printf("[InferStatusRespond] 更新首页状态失败 user=%s error=%v\n", userID, err)
 		}
