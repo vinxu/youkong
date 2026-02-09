@@ -42,20 +42,31 @@ func V4DeleteScheduleTool() *Tool { return v4DeleteScheduleTool() }
 func v4ViewScheduleTool() *Tool {
 	return &Tool{
 		Name: "view_schedule",
-		Description: `查看指定日期的时刻表安排，返回所有时段的时间、活动、emoji。
+		Description: `查看指定日期的时刻表安排和空闲时段。返回已安排的时段(items)、空闲时段(free_slots)和推荐时段(recommended_slots)。
+可指定 friend_ids 对比多人空闲，返回共同空闲时段(mutual_free_slots)和推荐时段。
 
 Use this tool when:
-- 用户想查看某天安排（"看看明天有什么"、"今天下午有空吗"）
+- 用户想查看某天安排（"看看明天有什么"）
+- 查询空闲时段（"下午什么时候有空"、"有空吗"）
+- 查询与好友的共同空闲（"我和小明什么时候都有空"、"我们三个人都什么时候有空"）
 - 需要获取最新时刻表数据
 
 Do NOT use when:
-- 用户描述新活动 → 直接用 plan_activities，不需要先查`,
+- 用户描述新活动 → 直接用 plan_activities，不需要先查
+
+IMPORTANT: 查共同空闲时需要 friend_ids，用 find_friends 先获取。可传多个好友ID计算N人共同空闲。
+返回的 free_slots/mutual_free_slots 是确定性计算的空闲区间，recommended_slots 按时长和时段偏好排序，直接引用即可。`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
 				"date": {
 					Type:        "string",
 					Description: "日期，YYYY-MM-DD 格式。",
+				},
+				"friend_ids": {
+					Type:        "array",
+					Description: "好友ID数组（可选）。指定后对比多人时刻表，返回共同空闲时段 mutual_free_slots。需先通过 find_friends 获取。支持 1-N 个好友。",
+					Items:       &ToolParam{Type: "string"},
 				},
 			},
 			Required: []string{"date"},
@@ -74,34 +85,44 @@ Use this tool when:
   如："下午3点开会"、"晚上去撸串"、"出去吃个火锅"、"明天跑步"
 - 修改或删除已有安排（"不用XX了"、"改到4点"）
 - 修改时只传变更条目，operation="modify"
-- 用户说"约人吃饭/撸串"等包含具体活动时，优先用此工具规划活动
 
 Do NOT use when:
+- 用户要「约/邀请」某个好友做某事 → draft_invite（"约月亮吃饭"、"约小红喝咖啡"、"邀请XX一起运动"）
 - 用户描述情绪/感受，无具体活动 → set_status（"好累"、"心情不好"）
 - 用户描述当前位置/场景 → set_status（"到公司了"、"在家"）
 - 用户用"在/正在"描述正在做的事 → set_status（"在开会"、"在打游戏"）
 - 用户提到已完成的事 → set_status（"刚吃完饭"、"跑完步了"）
 
-IMPORTANT: 当用户提到"有空"时，设置 available=true。如果只说活动不提有空，不要设 available。`,
+IMPORTANT: 当用户说"约XX吃饭/喝咖啡"且XX是好友名字或代词（他/她/他们/那个人）时，必须用 draft_invite 而非此工具。此工具仅规划自己的行程，不发送邀请。
+
+IMPORTANT: 当用户提到"有空"/"标记有空"时，设置 available=true。"标记有空"是设置可约状态，不是删除安排。如果只说活动不提有空，不要设 available。
+
+IMPORTANT: 有时间冲突时系统会自动保留非冲突部分（如15:00-16:00开会插入14:00-17:00自习→拆分为14:00-15:00自习+16:00-17:00自习），notices中会说明调整详情。向用户确认时需说明冲突和调整。
+
+IMPORTANT: 用户要修改特定条目时（"把开会改到4点"、"工作延长到凌晨2点"），设置 target_item 精确匹配。target_item 用原条目的 start_time+end_time 定位，activities 传修改后的内容。这比 modify+拆分更精确，不会产生碎片。`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
 				"activities": {
 					Type:        "array",
-					Description: "时刻表条目数组。每个元素：{start_time: HH:MM, end_time: HH:MM, emoji: 表情, status: 状态描述, available: 是否有空(可选bool)}",
+					Description: "时刻表条目数组。每个元素：{start_time: HH:MM, end_time: HH:MM, emoji: 表情, status: 状态描述, available: 是否有空(可选bool), remind_before: 提前提醒分钟数(可选int)}",
 					Items: &ToolParam{
 						Type:        "object",
-						Description: "时刻表条目对象",
+						Description: "时刻表条目对象。remind_before: 提前提醒分钟数，0=不提醒(默认)，常用值: 5, 10, 15, 30, 60。仅在用户明确要求提醒时设置。",
 					},
 				},
 				"date": {
 					Type:        "string",
-					Description: "目标日期，YYYY-MM-DD 格式。不填则使用今天。",
+					Description: "目标日期，YYYY-MM-DD 格式。多日删除用逗号分隔（如 2026-02-10,2026-02-11）。不填默认今天。",
 				},
 				"operation": {
 					Type:        "string",
-					Description: "操作类型：create（新建）、modify（修改现有）、replace（替换全部）",
+					Description: "操作类型：create（新增条目到现有日程）、modify（修改某些现有条目）、replace（清空该日全部安排并用 activities 重建，适用于'重新来过/全部换成/重新安排'）",
 					Enum:        []string{"create", "modify", "replace"},
+				},
+				"target_item": {
+					Type:        "object",
+					Description: "要精确修改的目标条目（仅 operation=modify 时可用）。用 start_time 和 end_time 匹配现有条目，然后用 activities[0] 直接替换。如：用户说\"把22:00-22:30的工作延长到凌晨2点\"→ target_item={start_time:\"22:00\",end_time:\"22:30\"}, activities=[{start_time:\"22:00\",end_time:\"02:00\",...}]",
 				},
 			},
 			Required: []string{"activities"},
@@ -120,22 +141,32 @@ Use this tool when:
 - 用户要清空全部安排（"今天安排全部取消"、"清空时刻表"）
 
 IMPORTANT:
+- 根据用户描述，从时刻表上下文中找到对应条目的 start_time 和 end_time，精确定位
+- 清空全部时设 clear_all=true，不需要填 start_time/end_time
 - "取消XX/删掉XX/不要XX了" → 此工具
 - 修改时间或内容 → plan_activities（"改到3点"、"换成自习"）
 - 有⚠️待确认内容时，用户说"取消/算了"通常是拒绝预览，不要用此工具`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{
-				"target": {
+				"start_time": {
 					Type:        "string",
-					Description: `要删除的活动关键词（如"开会"、"午饭"），或 "all" 清空全部。`,
+					Description: "要删除条目的开始时间，HH:MM 格式。从时刻表上下文中精确获取。",
+				},
+				"end_time": {
+					Type:        "string",
+					Description: "要删除条目的结束时间，HH:MM 格式。从时刻表上下文中精确获取。",
+				},
+				"clear_all": {
+					Type:        "boolean",
+					Description: "设为 true 清空该日全部安排。设置时不需要 start_time/end_time。",
 				},
 				"date": {
 					Type:        "string",
-					Description: "目标日期，YYYY-MM-DD 格式。不填则使用今天。",
+					Description: "目标日期，YYYY-MM-DD 格式。多日删除用逗号分隔（如 2026-02-10,2026-02-11）。不填默认今天。",
 				},
 			},
-			Required: []string{"target"},
+			Required: []string{},
 		},
 	}
 }
@@ -285,6 +316,14 @@ func ParseScheduleItems(args map[string]interface{}) ([]ScheduleItemInfo, error)
 				item.Available = &b
 			}
 		}
+		if rb, ok := itemMap["remind_before"]; ok {
+			switch v := rb.(type) {
+			case float64:
+				item.RemindBefore = int(v)
+			case int:
+				item.RemindBefore = v
+			}
+		}
 
 		// 验证必填字段
 		if item.StartTime != "" && item.EndTime != "" && item.Status != "" {
@@ -384,10 +423,11 @@ func ValidateScheduleParams(items []ScheduleItemInfo, now time.Time, isToday boo
 			continue
 		}
 
-		// 规则 2: start < end（跨午夜除外：start≥20:00 且 end≤08:00）
+		// 规则 2: start < end（跨午夜除外）
+		// 跨午夜判断：start > end 且 end <= 08:00（如 22:00→02:00、18:00→01:00）
+		// 不合理的跨午夜（如 14:00→13:00 = 23h）会被规则3的时长上限拦截
 		if item.StartTime >= item.EndTime {
-			// 检查跨午夜场景
-			isCrossMidnight := item.StartTime >= "20:00" && item.EndTime <= "08:00"
+			isCrossMidnight := item.EndTime <= "08:00" && item.StartTime != item.EndTime
 			if !isCrossMidnight {
 				errors = append(errors, fmt.Sprintf("%s 的 start_time(%s) ≥ end_time(%s)", item.Status, item.StartTime, item.EndTime))
 			}
@@ -403,8 +443,9 @@ func ValidateScheduleParams(items []ScheduleItemInfo, now time.Time, isToday boo
 			}
 		}
 
-		// 规则 4: 过去时间（仅警告）
-		if isToday && item.EndTime < currentTime {
+		// 规则 4: 过去时间（仅警告，跨午夜除外）
+		isCrossMidnightItem := item.StartTime > item.EndTime && item.EndTime <= "08:00"
+		if isToday && item.EndTime < currentTime && !isCrossMidnightItem {
 			warnings = append(warnings, fmt.Sprintf("%s(%s-%s) 已过去（当前%s）", item.Status, item.StartTime, item.EndTime, currentTime))
 		}
 	}

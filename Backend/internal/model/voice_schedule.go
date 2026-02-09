@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync/atomic"
 	"time"
 )
@@ -20,15 +21,18 @@ const (
 
 // ScheduleItem 时刻表条目
 type ScheduleItem struct {
-	StartTime  string `json:"start_time"`             // HH:MM 格式
-	EndTime    string `json:"end_time"`               // HH:MM 格式
-	Emoji      string `json:"emoji"`
-	Status     string `json:"status"`
-	Executed   bool   `json:"executed"`
-	IsAIGuess  bool   `json:"is_ai_guess,omitempty"`  // 是否为 AI 推测的状态
-	GifURL     string `json:"gif_url,omitempty"`      // GIF 动图 URL
-	GiphyQuery string `json:"giphy_query,omitempty"`  // Giphy 搜索词
-	Highlight  bool   `json:"highlight,omitempty"`    // 高亮状态（有空）
+	StartTime    string `json:"start_time"`               // HH:MM 格式
+	EndTime      string `json:"end_time"`                 // HH:MM 格式
+	Emoji        string `json:"emoji"`
+	Status       string `json:"status"`
+	Executed     bool   `json:"executed"`
+	IsAIGuess    bool   `json:"is_ai_guess,omitempty"`    // 是否为 AI 推测的状态
+	GifURL       string `json:"gif_url,omitempty"`        // GIF 动图 URL
+	GiphyQuery   string `json:"giphy_query,omitempty"`    // Giphy 搜索词
+	Highlight    bool   `json:"highlight,omitempty"`      // 高亮状态（有空）
+	RemindBefore int    `json:"remind_before,omitempty"`  // 提前提醒分钟数，0=不提醒
+	BookingID    string `json:"booking_id,omitempty"`     // 关联的预约 ID
+	WithUsers    string `json:"with_users,omitempty"`     // 一起的用户名（预约场景）
 }
 
 // ScheduleItems JSON 数组类型（用于数据库存储）
@@ -651,9 +655,9 @@ type V4Session struct {
 	// 历史对话摘要（上下文压缩后保留的语义信息）
 	Summary string `json:"summary,omitempty"`
 
-	// 待确认的时刻表（调用 update_schedule 后保存，等待用户确认）
-	PendingSchedule []ScheduleItem `json:"pending_schedule,omitempty"`
-	PendingDate     time.Time      `json:"pending_date,omitempty"`
+	// 待确认的时刻表（调用 plan_activities 后保存，等待用户确认）
+	// key: "YYYY-MM-DD"，支持一次确认多天
+	PendingSchedules map[string][]ScheduleItem `json:"pending_schedules,omitempty"`
 
 	// 目标日期（从用户输入中解析）
 	TargetDate time.Time `json:"target_date,omitempty"`
@@ -689,6 +693,9 @@ type V4Session struct {
 
 	// 传感器数据（一键生成时传入，不持久化到 Redis，仅本次请求使用）
 	SensorData *ExtendedStatusReportRequest `json:"-"`
+
+	// V3 近期推断状态（不持久化，仅本次请求使用，格式如 "😴准备睡觉"）
+	RecentInference string `json:"-"`
 
 	// 时间预处理注解（Layer 1 解析结果，不持久化，仅本次请求使用）
 	TemporalAnnotation string `json:"-"`
@@ -769,15 +776,29 @@ type V4PendingInvite struct {
 	Message    string `json:"message,omitempty"`
 }
 
+// V4DeletionEntry 单日删除条目（用于多日删除聚合）
+type V4DeletionEntry struct {
+	Date           string         `json:"date"`
+	DeletedItems   []ScheduleItem `json:"deleted_items"`
+	RemainingItems []ScheduleItem `json:"remaining_items"`
+}
+
 // V4PendingDeletion 待确认的删除操作
 type V4PendingDeletion struct {
-	Type           string         `json:"type"`                        // "schedule" | "friend"
-	Date           string         `json:"date,omitempty"`              // 日期（schedule 类型）
-	Target         string         `json:"target,omitempty"`            // 删除目标关键词或 "all"
-	DeletedItems   []ScheduleItem `json:"deleted_items,omitempty"`     // 将被删除的条目
-	RemainingItems []ScheduleItem `json:"remaining_items,omitempty"`   // 删除后剩余的条目
-	FriendID       string         `json:"friend_id,omitempty"`         // 好友 ID（friend 类型）
-	FriendName     string         `json:"friend_name,omitempty"`       // 好友名字（friend 类型）
+	Type    string             `json:"type"`              // "schedule" | "friend"
+	Entries []V4DeletionEntry  `json:"entries,omitempty"` // 多日删除条目（schedule 类型）
+	// 好友删除字段
+	FriendID   string `json:"friend_id,omitempty"`
+	FriendName string `json:"friend_name,omitempty"`
+}
+
+// TotalDeletedCount 返回所有日期的总删除条目数
+func (pd *V4PendingDeletion) TotalDeletedCount() int {
+	total := 0
+	for _, e := range pd.Entries {
+		total += len(e.DeletedItems)
+	}
+	return total
 }
 
 // V4FriendInfo 好友信息（用于工具返回和上下文）
@@ -841,13 +862,29 @@ func (s *V4Session) GetRecentMessages(maxTurns int) []V4Message {
 
 // HasPendingSchedule 是否有待确认的时刻表
 func (s *V4Session) HasPendingSchedule() bool {
-	return len(s.PendingSchedule) > 0
+	for _, items := range s.PendingSchedules {
+		if len(items) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ClearPendingSchedule 清除待确认的时刻表
 func (s *V4Session) ClearPendingSchedule() {
-	s.PendingSchedule = nil
-	s.PendingDate = time.Time{}
+	s.PendingSchedules = nil
+}
+
+// PendingScheduleDates 返回待确认时刻表的日期列表（排序）
+func (s *V4Session) PendingScheduleDates() []string {
+	dates := make([]string, 0, len(s.PendingSchedules))
+	for d, items := range s.PendingSchedules {
+		if len(items) > 0 {
+			dates = append(dates, d)
+		}
+	}
+	sort.Strings(dates)
+	return dates
 }
 
 // HasPendingMessage 是否有待发送的消息

@@ -44,6 +44,12 @@ type VoiceScheduleServiceV4 struct {
 
 	// ========== 扩展功能依赖 ==========
 	contactService *ContactService
+	bookingService *BookingService
+}
+
+// SetBookingService 设置预约服务（延迟注入，避免循环依赖）
+func (s *VoiceScheduleServiceV4) SetBookingService(bs *BookingService) {
+	s.bookingService = bs
 }
 
 // NewVoiceScheduleServiceV4 创建 V4 版本语音时刻表服务
@@ -150,6 +156,17 @@ func (s *VoiceScheduleServiceV4) processTextInputInternal(
 	// 注入传感器数据（一键生成场景）
 	if sensorData != nil {
 		session.SensorData = sensorData
+	}
+
+	// 加载 V3 近期推断状态（让 LLM 感知冲突）
+	if s.redisClient != nil {
+		prevKey := fmt.Sprintf("infer:prev:%s", userID)
+		if prevData, err := s.redisClient.Get(ctx, prevKey); err == nil && prevData != "" {
+			var prevInfer model.CurrentStatusInference
+			if json.Unmarshal([]byte(prevData), &prevInfer) == nil && prevInfer.Activity != "" {
+				session.RecentInference = fmt.Sprintf("%s%s", prevInfer.Emoji, prevInfer.Activity)
+			}
+		}
 	}
 
 	// 发送会话开始事件
@@ -457,6 +474,10 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 
 时间参考：
 - "等会/一会儿"≈当前时间+30min，"中午"≈12:00，"下午"≈14:00，"晚上"≈19:00
+- 跨午夜活动：用 start_time > end_time 表示（如 22:00→02:00 = 当晚到次日凌晨），保持同一天日期
+- 跨午夜后的后续活动：如果用户描述了凌晨之后的安排（如"工作到凌晨2点，然后睡到8点"），把后续活动也放在同一个 plan_activities 中，用正常时间表示（如 02:00→08:00）。系统会自动将其归入次日
+- 关键：不要因为涉及凌晨就丢弃任何活动。完整列出用户提到的每一个活动段
+- 凌晨时段（"凌晨0点到2点"）：start_time="00:00" end_time="02:00"，这是正常时段不是跨午夜
 
 有空标记：
 - "有空/我有空/标记有空" = 设置时段的有空状态 → plan_activities(available=true) 或 set_status(available=true)
@@ -536,15 +557,18 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 
 	// ========== 待确认的时刻表 ==========
 	if session.HasPendingSchedule() {
-		sb.WriteString("【⚠️待确认时刻表】")
-		for i, item := range session.PendingSchedule {
-			if i > 0 {
-				sb.WriteString(" | ")
+		for _, dateStr := range session.PendingScheduleDates() {
+			items := session.PendingSchedules[dateStr]
+			sb.WriteString(fmt.Sprintf("【⚠️待确认时刻表 %s】", dateStr))
+			for i, item := range items {
+				if i > 0 {
+					sb.WriteString(" | ")
+				}
+				sb.WriteString(fmt.Sprintf("%s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
 			}
-			sb.WriteString(fmt.Sprintf("%s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
+			sb.WriteString("\n")
 		}
-		sb.WriteString(" (日期:" + session.PendingDate.Format("01-02") + ")")
-		sb.WriteString("\n用户确认后调用 confirm 保存，要修改则调用 plan_activities 重新生成\n\n")
+		sb.WriteString("用户确认后调用 confirm 保存，要修改则调用 plan_activities 重新生成\n\n")
 	}
 
 	// ========== 待确认的消息/邀请 ==========
@@ -563,17 +587,25 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 	// ========== 待确认的删除操作 ==========
 	if session.HasPendingDeletion() {
 		pd := session.PendingDeletion
-		if pd.Type == "schedule" {
-			sb.WriteString(fmt.Sprintf("【⚠️待确认删除】将删除%d个安排", len(pd.DeletedItems)))
-			for _, item := range pd.DeletedItems {
-				sb.WriteString(fmt.Sprintf(" | %s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
+		if pd.Type == "schedule" && len(pd.Entries) > 0 {
+			sb.WriteString(fmt.Sprintf("【⚠️待确认删除】共%d个安排待删除：\n", pd.TotalDeletedCount()))
+			for _, entry := range pd.Entries {
+				sb.WriteString(fmt.Sprintf("  %s:", entry.Date))
+				for _, item := range entry.DeletedItems {
+					sb.WriteString(fmt.Sprintf(" %s-%s %s%s |", item.StartTime, item.EndTime, item.Emoji, item.Status))
+				}
+				sb.WriteString("\n")
 			}
-			sb.WriteString(fmt.Sprintf(" (日期:%s)", pd.Date))
-			sb.WriteString("\n用户确认后调用 confirm 执行删除，说'算了/不删了'则不操作\n\n")
+			sb.WriteString("用户确认后调用 confirm 执行删除，说'算了/不删了'则不操作\n\n")
 		} else if pd.Type == "friend" {
 			sb.WriteString(fmt.Sprintf("【⚠️待确认删除好友】将删除好友 %s (ID: %s)\n用户确认后调用 confirm 执行删除\n\n",
 				pd.FriendName, pd.FriendID))
 		}
+	}
+
+	// ========== AI 推断状态（V3 近期结果）==========
+	if session.RecentInference != "" {
+		sb.WriteString(fmt.Sprintf("【当前 AI 推断状态】%s（用户可能想修改）\n\n", session.RecentInference))
 	}
 
 	// ========== 传感器数据（一键生成时注入）==========
@@ -1030,33 +1062,70 @@ func (s *VoiceScheduleServiceV4) executeUpdateSchedule(
 			len(existingItems), len(newItems), len(finalItems))
 	}
 
+	// 检测跨午夜后的次日溢出条目
+	todayFinalItems, nextDayItems := s.detectNextDaySpillover(finalItems)
+
 	// 按时间排序
-	finalItems = s.sortScheduleItems(finalItems)
+	todayFinalItems = s.sortScheduleItems(todayFinalItems)
 
 	// 时间分析：生成时间注解（Phase 7: 工具层时间感知）
-	notices := s.analyzeTimeContext(finalItems, newItems, existingItems, date)
+	notices := s.analyzeTimeContext(todayFinalItems, newItems, existingItems, date)
 
 	// Layer 3: 将验证警告附加到 notices
 	for _, w := range valWarnings {
 		notices = append(notices, model.TimeNotice{Type: "warning", Detail: w, ItemIdx: -1})
 	}
 
-	// 保存到 session 的 PendingSchedule
-	session.PendingSchedule = finalItems
-	session.PendingDate = date
+	// 保存到 session 的 PendingSchedules（支持多日累积）
+	dateStr := date.Format("2006-01-02")
+	if session.PendingSchedules == nil {
+		session.PendingSchedules = make(map[string][]model.ScheduleItem)
+	}
+	session.PendingSchedules[dateStr] = todayFinalItems
+
+	// 处理次日溢出条目
+	if len(nextDayItems) > 0 {
+		nextDay := date.AddDate(0, 0, 1)
+		nextDayItems = s.sortScheduleItems(nextDayItems)
+
+		// 获取次日现有时刻表并合并
+		nextDayDate := time.Date(nextDay.Year(), nextDay.Month(), nextDay.Day(), 0, 0, 0, 0, nextDay.Location())
+		existingNextDay, _ := s.scheduleRepo.GetLatestByUserAndDate(ctx, session.UserID, nextDayDate)
+		if existingNextDay != nil && len(existingNextDay.Items) > 0 {
+			nextDayItems = s.mergeScheduleItems(existingNextDay.Items, nextDayItems, true)
+			nextDayItems = s.sortScheduleItems(nextDayItems)
+		}
+
+		nextDayStr := nextDay.Format("2006-01-02")
+		session.PendingSchedules[nextDayStr] = nextDayItems
+
+		fmt.Printf("[V4] 检测到跨午夜次日溢出: %d 条 → %s\n", len(nextDayItems), nextDay.Format("01-02"))
+	}
 
 	// 发送预览事件
 	callback(&model.V4Event{
 		Type:    model.V4EventTypeSchedulePreview,
-		Items:   finalItems,
+		Items:   todayFinalItems,
 		Date:    date.Format("2006-01-02"),
 		Message: fmt.Sprintf("已生成 %s 的时刻表预览", date.Format("01月02日")),
 	})
 
+	// 如果有次日条目，也发送次日预览
+	if len(nextDayItems) > 0 {
+		nextDay := date.AddDate(0, 0, 1)
+		callback(&model.V4Event{
+			Type:    model.V4EventTypeSchedulePreview,
+			Items:   nextDayItems,
+			Date:    nextDay.Format("2006-01-02"),
+			Message: fmt.Sprintf("已生成 %s 的时刻表预览（跨午夜后续）", nextDay.Format("01月02日")),
+		})
+	}
+
+	totalItems := len(todayFinalItems) + len(nextDayItems)
 	return map[string]interface{}{
 		"message":           "时刻表预览已生成，等待用户确认",
 		"date":              date.Format("2006-01-02"),
-		"items_count":       len(finalItems),
+		"items_count":       totalItems,
 		"operation":         operation,
 		"awaiting_approval": true,
 		"notices":           notices,
@@ -1173,6 +1242,42 @@ func (s *VoiceScheduleServiceV4) sortScheduleItems(items []model.ScheduleItem) [
 	return items
 }
 
+// detectNextDaySpillover 检测跨午夜后的次日溢出条目
+// 当 LLM 在同一个 plan_activities 中返回了跨午夜活动和凌晨后续活动时，
+// 自动将后续活动拆分到次日。
+// 例：[{09:00-18:00 上班}, {22:00-02:00 加班}, {02:00-08:00 睡觉}]
+// → todayItems=[{09:00-18:00 上班}, {22:00-02:00 加班}], nextDayItems=[{02:00-08:00 睡觉}]
+func (s *VoiceScheduleServiceV4) detectNextDaySpillover(items []model.ScheduleItem) (todayItems, nextDayItems []model.ScheduleItem) {
+	isCrossMN := func(start, end string) bool { return start > end }
+
+	// 找到第一个跨午夜条目
+	crossMidnightIdx := -1
+	for i, item := range items {
+		if isCrossMN(item.StartTime, item.EndTime) {
+			crossMidnightIdx = i
+			break
+		}
+	}
+
+	if crossMidnightIdx < 0 {
+		return items, nil // 无跨午夜，全部留在当天
+	}
+
+	// 跨午夜条目及之前的条目留在当天
+	todayItems = append(todayItems, items[:crossMidnightIdx+1]...)
+
+	// 跨午夜之后的条目：start_time < 12:00 且非跨午夜的视为次日
+	for _, item := range items[crossMidnightIdx+1:] {
+		if !isCrossMN(item.StartTime, item.EndTime) && item.StartTime < "12:00" {
+			nextDayItems = append(nextDayItems, item)
+		} else {
+			todayItems = append(todayItems, item)
+		}
+	}
+
+	return todayItems, nextDayItems
+}
+
 // executeUpdateCurrentStatus 执行更新当前状态
 func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 	ctx context.Context,
@@ -1186,6 +1291,24 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 
 	if emoji == "" || status == "" {
 		return map[string]string{"error": "emoji 和 status 不能为空"}, false
+	}
+
+	// 检查 V3 推断锁：用户主动设置时覆盖 AI 推断
+	var prevInferEmoji, prevInferActivity string
+	if s.redisClient != nil {
+		prevKey := fmt.Sprintf("infer:prev:%s", session.UserID)
+		if prevData, err := s.redisClient.Get(ctx, prevKey); err == nil && prevData != "" {
+			var prevInfer model.CurrentStatusInference
+			if json.Unmarshal([]byte(prevData), &prevInfer) == nil {
+				prevInferEmoji = prevInfer.Emoji
+				prevInferActivity = prevInfer.Activity
+				fmt.Printf("[V4] 检测到 V3 推断: %s%s，用户覆盖为: %s%s\n",
+					prevInferEmoji, prevInferActivity, emoji, status)
+			}
+		}
+		// 清除推断锁，用户主动设置优先
+		lockKey := fmt.Sprintf("infer:lock:%s", session.UserID)
+		s.redisClient.Del(ctx, lockKey)
 	}
 
 	// 更新当前状态到时刻表（当前时段）
@@ -1263,16 +1386,23 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 		fmt.Printf("[V4] 更新分析缓存失败: %v\n", cacheErr)
 	}
 
+	// 构造消息（若覆盖了 V3 推断，告知用户）
+	msg := "当前状态已更新"
+	if prevInferActivity != "" {
+		msg = fmt.Sprintf("已将状态从 AI 推断的「%s%s」更新为「%s%s」",
+			prevInferEmoji, prevInferActivity, emoji, status)
+	}
+
 	// 发送状态更新事件
 	callback(&model.V4Event{
 		Type:    model.V4EventTypeStatusUpdated,
 		Emoji:   emoji,
 		Status:  status,
-		Message: "当前状态已更新",
+		Message: msg,
 	})
 
 	return map[string]interface{}{
-		"message": "当前状态已更新",
+		"message": msg,
 		"emoji":   emoji,
 		"status":  status,
 	}, true // 结束循环
@@ -1296,124 +1426,183 @@ func (s *VoiceScheduleServiceV4) executeSaveSchedule(
 		visibility = model.ScheduleVisibility(v)
 	}
 
-	// 保存时刻表
-	date := session.PendingDate
-	if date.IsZero() {
-		date = time.Now()
-	}
-	today := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
-
-	schedule := &model.StatusSchedule{
-		UserID:       session.UserID,
-		ScheduleDate: today,
-		Items:        model.ScheduleItems(session.PendingSchedule),
-		Status:       model.ScheduleStatusActive,
-		Visibility:   visibility,
-	}
-
-	// 检查是否已存在（包含 completed 的也可以复用）
-	existing, _ := s.scheduleRepo.GetLatestByUserAndDate(ctx, session.UserID, today)
-	if existing != nil {
-		schedule.ID = existing.ID
-		if err := s.scheduleRepo.Update(ctx, schedule); err != nil {
-			return map[string]string{"error": "保存失败: " + err.Error()}, false
+	// 遍历所有待确认日期，逐个保存
+	savedDates := session.PendingScheduleDates()
+	for _, dateStr := range savedDates {
+		items := session.PendingSchedules[dateStr]
+		if len(items) == 0 {
+			continue
 		}
-	} else {
-		if err := s.scheduleRepo.Create(ctx, schedule); err != nil {
-			return map[string]string{"error": "保存失败: " + err.Error()}, false
+
+		date, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			fmt.Printf("[V4] 跳过无效日期 %s: %v\n", dateStr, err)
+			continue
 		}
+		dayDate := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
+
+		schedule := &model.StatusSchedule{
+			UserID:       session.UserID,
+			ScheduleDate: dayDate,
+			Items:        model.ScheduleItems(items),
+			Status:       model.ScheduleStatusActive,
+			Visibility:   visibility,
+		}
+
+		existing, _ := s.scheduleRepo.GetLatestByUserAndDate(ctx, session.UserID, dayDate)
+		if existing != nil {
+			schedule.ID = existing.ID
+			if err := s.scheduleRepo.Update(ctx, schedule); err != nil {
+				return map[string]string{"error": fmt.Sprintf("保存 %s 失败: %s", dateStr, err.Error())}, false
+			}
+		} else {
+			if err := s.scheduleRepo.Create(ctx, schedule); err != nil {
+				return map[string]string{"error": fmt.Sprintf("保存 %s 失败: %s", dateStr, err.Error())}, false
+			}
+		}
+
+		callback(&model.V4Event{
+			Type:    model.V4EventTypeScheduleSaved,
+			Items:   items,
+			Date:    dateStr,
+			Message: fmt.Sprintf("%s 的时刻表已保存", dateStr),
+		})
+		fmt.Printf("[V4] 保存时刻表 %s: %d 条\n", dateStr, len(items))
 	}
 
-	// 发送保存成功事件
-	callback(&model.V4Event{
-		Type:    model.V4EventTypeScheduleSaved,
-		Items:   session.PendingSchedule,
-		Date:    today.Format("2006-01-02"),
-		Message: "时刻表已保存",
-	})
-
-	// 更新会话状态
-	session.CurrentSchedule = session.PendingSchedule
+	// 更新会话状态（CurrentSchedule 保留最后一天的）
+	if len(savedDates) > 0 {
+		lastDate := savedDates[len(savedDates)-1]
+		session.CurrentSchedule = session.PendingSchedules[lastDate]
+	}
 	session.ClearPendingSchedule()
 
 	return map[string]interface{}{
-		"message": "时刻表已保存",
-		"date":    today.Format("2006-01-02"),
+		"message":     "时刻表已保存",
+		"date":        time.Now().Format("2006-01-02"),
+		"saved_dates": savedDates,
 	}, true // 结束循环
 }
 
 // executeDeleteSchedule 执行删除日程条目（生成删除预览）
+// 参数对齐工具定义：clear_all(bool), start_time/end_time(string), date(string, 支持逗号分隔多日)
 func (s *VoiceScheduleServiceV4) executeDeleteSchedule(
 	ctx context.Context,
 	session *model.V4Session,
 	args map[string]interface{},
 	callback func(event *model.V4Event),
 ) (interface{}, bool) {
-	// 解析参数
-	target, _ := args["target"].(string)
-	if target == "" {
-		return map[string]string{"error": "target 参数不能为空"}, false
-	}
+	clearAll, _ := args["clear_all"].(bool)
+	startTime, _ := args["start_time"].(string)
+	endTime, _ := args["end_time"].(string)
 
-	// 解析日期
-	date, err := agent.ParseDate(args)
-	if err != nil {
-		date = time.Now()
-	}
-	dateStr := date.Format("2006-01-02")
-	todayDate := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
-
-	// 获取当前时刻表
-	schedule, err := s.scheduleRepo.GetLatestByUserAndDate(ctx, session.UserID, todayDate)
-	if err != nil || schedule == nil || len(schedule.Items) == 0 {
-		return map[string]interface{}{
-			"message": fmt.Sprintf("%s 没有安排可以删除", dateStr),
-		}, false
-	}
-
-	// 分离：要删除的 vs 剩余的
-	var deletedItems, remainingItems []model.ScheduleItem
-	if target == "all" {
-		deletedItems = schedule.Items
-		remainingItems = nil
+	// 解析日期（支持逗号分隔多日）
+	dateStr, _ := args["date"].(string)
+	var dates []time.Time
+	if dateStr == "" {
+		now := time.Now()
+		dates = append(dates, time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()))
 	} else {
-		for _, item := range schedule.Items {
-			if agent.ContainsKeyword(item.Status, target) || agent.ContainsKeyword(item.Emoji, target) {
-				deletedItems = append(deletedItems, item)
-			} else {
-				remainingItems = append(remainingItems, item)
+		for _, ds := range strings.Split(dateStr, ",") {
+			ds = strings.TrimSpace(ds)
+			if ds == "" {
+				continue
 			}
+			t, err := time.Parse("2006-01-02", ds)
+			if err != nil {
+				continue
+			}
+			dates = append(dates, t)
+		}
+		if len(dates) == 0 {
+			now := time.Now()
+			dates = append(dates, time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()))
 		}
 	}
 
-	if len(deletedItems) == 0 {
+	// 对每个日期生成删除条目
+	var entries []model.V4DeletionEntry
+	for _, date := range dates {
+		ds := date.Format("2006-01-02")
+		schedule, err := s.scheduleRepo.GetLatestByUserAndDate(ctx, session.UserID, date)
+		if err != nil || schedule == nil || len(schedule.Items) == 0 {
+			fmt.Printf("[V4] delete_schedule: %s 没有安排\n", ds)
+			continue
+		}
+
+		var deletedItems, remainingItems []model.ScheduleItem
+		if clearAll {
+			deletedItems = schedule.Items
+		} else if startTime != "" && endTime != "" {
+			// 精确时间匹配
+			for _, item := range schedule.Items {
+				if item.StartTime == startTime && item.EndTime == endTime {
+					deletedItems = append(deletedItems, item)
+				} else {
+					remainingItems = append(remainingItems, item)
+				}
+			}
+		} else if startTime != "" {
+			// 只匹配 start_time
+			for _, item := range schedule.Items {
+				if item.StartTime == startTime {
+					deletedItems = append(deletedItems, item)
+				} else {
+					remainingItems = append(remainingItems, item)
+				}
+			}
+		} else {
+			// 无具体条件 → 视为清空
+			deletedItems = schedule.Items
+		}
+
+		if len(deletedItems) > 0 {
+			entries = append(entries, model.V4DeletionEntry{
+				Date:           ds,
+				DeletedItems:   deletedItems,
+				RemainingItems: remainingItems,
+			})
+		}
+	}
+
+	if len(entries) == 0 {
 		return map[string]interface{}{
-			"message": fmt.Sprintf("没有找到包含「%s」的安排", target),
-			"date":    dateStr,
+			"message": "没有找到可删除的安排",
 		}, false
 	}
 
-	// 保存到 PendingDeletion
+	// 保存到 PendingDeletion（每次全新，逗号分隔 date 已包含所有目标日期）
 	session.PendingDeletion = &model.V4PendingDeletion{
-		Type:           "schedule",
-		Date:           dateStr,
-		Target:         target,
-		DeletedItems:   deletedItems,
-		RemainingItems: remainingItems,
+		Type:    "schedule",
+		Entries: entries,
+	}
+
+	totalDeleted := session.PendingDeletion.TotalDeletedCount()
+
+	// 构建预览消息
+	var previewMsg string
+	if len(session.PendingDeletion.Entries) == 1 {
+		e := session.PendingDeletion.Entries[0]
+		previewMsg = fmt.Sprintf("将删除 %s 的%d个安排，等待确认", e.Date, len(e.DeletedItems))
+	} else {
+		parts := make([]string, 0, len(session.PendingDeletion.Entries))
+		for _, e := range session.PendingDeletion.Entries {
+			parts = append(parts, fmt.Sprintf("%s %d个", e.Date, len(e.DeletedItems)))
+		}
+		previewMsg = fmt.Sprintf("将删除 %s 安排（共%d个），等待确认", strings.Join(parts, "、"), totalDeleted)
 	}
 
 	// 发送删除预览事件
 	callback(&model.V4Event{
 		Type:            model.V4EventTypeDeletePreview,
 		PendingDeletion: session.PendingDeletion,
-		Date:            dateStr,
-		Message:         fmt.Sprintf("将删除%d个安排，等待确认", len(deletedItems)),
+		Message:         previewMsg,
 	})
 
 	return map[string]interface{}{
-		"message":           fmt.Sprintf("将删除%d个安排，等待用户确认", len(deletedItems)),
-		"deleted_items":     len(deletedItems),
-		"remaining_items":   len(remainingItems),
+		"message":           previewMsg,
+		"total_deleted":     totalDeleted,
+		"dates":             len(session.PendingDeletion.Entries),
 		"awaiting_approval": true,
 	}, true // breakLoop: 停止循环，等待用户确认
 }
@@ -1475,58 +1664,86 @@ func (s *VoiceScheduleServiceV4) executeConfirmDeletion(
 	}
 }
 
-// confirmScheduleDeletion 确认删除日程条目
+// confirmScheduleDeletion 确认删除日程条目（支持多日）
 func (s *VoiceScheduleServiceV4) confirmScheduleDeletion(
 	ctx context.Context,
 	session *model.V4Session,
 	callback func(event *model.V4Event),
 ) (interface{}, bool) {
 	pd := session.PendingDeletion
-	dateStr := pd.Date
-	date, err := time.Parse("2006-01-02", dateStr)
-	if err != nil {
+	if len(pd.Entries) == 0 {
 		session.ClearPendingDeletion()
-		return map[string]string{"error": "日期解析失败"}, false
+		return map[string]string{"error": "没有待删除的条目"}, false
 	}
-	todayDate := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
 
-	deletedCount := len(pd.DeletedItems)
+	totalDeleted := 0
+	todayStr := time.Now().Format("2006-01-02")
+	tomorrowStr := time.Now().AddDate(0, 0, 1).Format("2006-01-02")
 
-	if len(pd.RemainingItems) == 0 {
-		// 全部删除 → 取消整个时刻表
-		if err := s.scheduleRepo.CancelUserSchedulesByDate(ctx, session.UserID, todayDate); err != nil {
-			return map[string]string{"error": "删除失败: " + err.Error()}, false
+	for _, entry := range pd.Entries {
+		date, err := time.Parse("2006-01-02", entry.Date)
+		if err != nil {
+			fmt.Printf("[V4] confirmScheduleDeletion: 日期解析失败 %s\n", entry.Date)
+			continue
 		}
-		session.CurrentSchedule = nil
+		dateTime := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
+
+		if len(entry.RemainingItems) == 0 {
+			// 全部删除 → 取消整个时刻表
+			if err := s.scheduleRepo.CancelUserSchedulesByDate(ctx, session.UserID, dateTime); err != nil {
+				fmt.Printf("[V4] confirmScheduleDeletion: 删除 %s 失败: %v\n", entry.Date, err)
+				continue
+			}
+			fmt.Printf("[V4] confirmScheduleDeletion: 已清空 %s 全部安排\n", entry.Date)
+		} else {
+			// 部分删除 → 用 RemainingItems 覆盖
+			schedule, err := s.scheduleRepo.GetLatestByUserAndDate(ctx, session.UserID, dateTime)
+			if err != nil || schedule == nil {
+				fmt.Printf("[V4] confirmScheduleDeletion: 获取 %s 时刻表失败\n", entry.Date)
+				continue
+			}
+			schedule.Items = model.ScheduleItems(entry.RemainingItems)
+			if err := s.scheduleRepo.Update(ctx, schedule); err != nil {
+				fmt.Printf("[V4] confirmScheduleDeletion: 更新 %s 时刻表失败: %v\n", entry.Date, err)
+				continue
+			}
+			fmt.Printf("[V4] confirmScheduleDeletion: 已删除 %s 的%d个安排，剩余%d个\n", entry.Date, len(entry.DeletedItems), len(entry.RemainingItems))
+		}
+
+		totalDeleted += len(entry.DeletedItems)
+
+		// 更新 session 缓存
+		if entry.Date == todayStr {
+			session.CurrentSchedule = entry.RemainingItems
+		} else if entry.Date == tomorrowStr {
+			session.TomorrowSchedule = entry.RemainingItems
+		}
+	}
+
+	// 发送一个聚合删除成功事件（客户端只处理一个事件）
+	var msg string
+	if len(pd.Entries) == 1 {
+		msg = fmt.Sprintf("已删除 %s 的%d个安排", pd.Entries[0].Date, totalDeleted)
 	} else {
-		// 部分删除 → 用 RemainingItems 覆盖
-		schedule, err := s.scheduleRepo.GetLatestByUserAndDate(ctx, session.UserID, todayDate)
-		if err != nil || schedule == nil {
-			session.ClearPendingDeletion()
-			return map[string]string{"error": "获取时刻表失败"}, false
+		parts := make([]string, 0, len(pd.Entries))
+		for _, e := range pd.Entries {
+			parts = append(parts, fmt.Sprintf("%s %d个", e.Date, len(e.DeletedItems)))
 		}
-		schedule.Items = model.ScheduleItems(pd.RemainingItems)
-		if err := s.scheduleRepo.Update(ctx, schedule); err != nil {
-			return map[string]string{"error": "更新时刻表失败: " + err.Error()}, false
-		}
-		session.CurrentSchedule = pd.RemainingItems
+		msg = fmt.Sprintf("已删除 %s 安排（共%d个）", strings.Join(parts, "、"), totalDeleted)
 	}
 
-	// 发送删除成功事件
 	callback(&model.V4Event{
 		Type:         model.V4EventTypeScheduleDeleted,
-		Date:         dateStr,
-		DeletedCount: deletedCount,
-		Items:        pd.RemainingItems,
-		Message:      fmt.Sprintf("已删除%d个安排", deletedCount),
+		DeletedCount: totalDeleted,
+		Message:      msg,
 	})
 
 	session.ClearPendingDeletion()
 
 	return map[string]interface{}{
-		"message":      fmt.Sprintf("已成功删除%d个安排", deletedCount),
-		"date":         dateStr,
-		"deleted_count": deletedCount,
+		"message":       msg,
+		"deleted_count": totalDeleted,
+		"dates":         len(pd.Entries),
 	}, true // 结束循环
 }
 

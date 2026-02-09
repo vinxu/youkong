@@ -34,11 +34,12 @@ type ParamRule struct {
 type CheckType string
 
 const (
-	CheckExists   CheckType = "exists"   // 参数存在
-	CheckEquals   CheckType = "equals"   // 精确匹配
-	CheckContains CheckType = "contains" // 包含子串
-	CheckMatches  CheckType = "matches"  // 正则匹配
-	CheckFormat   CheckType = "format"   // 格式验证（date=YYYY-MM-DD, time=HH:MM, emoji=单个emoji）
+	CheckExists        CheckType = "exists"         // 参数存在
+	CheckEquals        CheckType = "equals"         // 精确匹配
+	CheckContains      CheckType = "contains"       // 包含子串
+	CheckMatches       CheckType = "matches"        // 正则匹配
+	CheckFormat        CheckType = "format"         // 格式验证（date=YYYY-MM-DD, time=HH:MM, emoji=单个emoji）
+	CheckArrayContains CheckType = "array_contains" // 数组包含指定值
 )
 
 // ParamValidationResult 参数验证结果
@@ -243,6 +244,45 @@ func validateRule(rule ParamRule, args map[string]interface{}, toolName string, 
 			return false
 		}
 		return true
+
+	case CheckArrayContains:
+		if !exists {
+			result.Failures = append(result.Failures, ParamRuleFailure{
+				ToolName:  toolName,
+				ParamPath: rule.ParamPath,
+				Check:     rule.Check,
+				Expected:  fmt.Sprintf("数组包含 %q", rule.Value),
+				Actual:    "(不存在)",
+				Message:   fmt.Sprintf("参数 %s 不存在", rule.ParamPath),
+			})
+			return false
+		}
+		arr, ok := val.([]interface{})
+		if !ok {
+			result.Failures = append(result.Failures, ParamRuleFailure{
+				ToolName:  toolName,
+				ParamPath: rule.ParamPath,
+				Check:     rule.Check,
+				Expected:  fmt.Sprintf("数组包含 %q", rule.Value),
+				Actual:    fmt.Sprintf("%v (非数组)", val),
+				Message:   fmt.Sprintf("参数 %s 不是数组", rule.ParamPath),
+			})
+			return false
+		}
+		for _, elem := range arr {
+			if fmt.Sprintf("%v", elem) == rule.Value {
+				return true
+			}
+		}
+		result.Failures = append(result.Failures, ParamRuleFailure{
+			ToolName:  toolName,
+			ParamPath: rule.ParamPath,
+			Check:     rule.Check,
+			Expected:  fmt.Sprintf("数组包含 %q", rule.Value),
+			Actual:    fmt.Sprintf("%v", arr),
+			Message:   fmt.Sprintf("数组不包含 %q", rule.Value),
+		})
+		return false
 	}
 
 	return true
@@ -347,6 +387,8 @@ func ruleExpected(rule ParamRule) string {
 		return fmt.Sprintf("匹配 %s", rule.Pattern)
 	case CheckFormat:
 		return fmt.Sprintf("格式: %s", rule.Value)
+	case CheckArrayContains:
+		return fmt.Sprintf("数组包含 %q", rule.Value)
 	default:
 		return ""
 	}

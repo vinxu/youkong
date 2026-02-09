@@ -61,20 +61,11 @@ type InjectContext struct {
 	}
 	// 待确认的删除操作（用于 C10 确认/拒绝场景）
 	PendingDeletion *struct {
-		Type         string
-		Date         string
-		Target       string
-		DeletedItems []struct {
-			StartTime string
-			EndTime   string
-			Emoji     string
-			Status    string
-		}
-		RemainingItems []struct {
-			StartTime string
-			EndTime   string
-			Emoji     string
-			Status    string
+		Type    string
+		Entries []struct {
+			Date         string
+			DeletedItems []struct{ StartTime, EndTime, Emoji, Status string }
+			RemainingItems []struct{ StartTime, EndTime, Emoji, Status string }
 		}
 		FriendID   string
 		FriendName string
@@ -2248,22 +2239,30 @@ func scenariosC10() []EvalScenario {
 			ExpectedTools: []string{"confirm"},
 			InjectPending: &InjectContext{
 				PendingDeletion: &struct {
-					Type         string
-					Date         string
-					Target       string
-					DeletedItems []struct{ StartTime, EndTime, Emoji, Status string }
-					RemainingItems []struct{ StartTime, EndTime, Emoji, Status string }
+					Type    string
+					Entries []struct {
+						Date           string
+						DeletedItems   []struct{ StartTime, EndTime, Emoji, Status string }
+						RemainingItems []struct{ StartTime, EndTime, Emoji, Status string }
+					}
 					FriendID   string
 					FriendName string
 				}{
-					Type:   "schedule",
-					Date:   "2026-02-08",
-					Target: "开会",
-					DeletedItems: []struct{ StartTime, EndTime, Emoji, Status string }{
-						{"14:00", "16:00", "💼", "开会"},
-					},
-					RemainingItems: []struct{ StartTime, EndTime, Emoji, Status string }{
-						{"09:00", "10:00", "💼", "晨会"},
+					Type: "schedule",
+					Entries: []struct {
+						Date           string
+						DeletedItems   []struct{ StartTime, EndTime, Emoji, Status string }
+						RemainingItems []struct{ StartTime, EndTime, Emoji, Status string }
+					}{
+						{
+							Date: "2026-02-08",
+							DeletedItems: []struct{ StartTime, EndTime, Emoji, Status string }{
+								{"14:00", "16:00", "💼", "开会"},
+							},
+							RemainingItems: []struct{ StartTime, EndTime, Emoji, Status string }{
+								{"09:00", "10:00", "💼", "晨会"},
+							},
+						},
 					},
 				},
 			}},
@@ -2272,19 +2271,27 @@ func scenariosC10() []EvalScenario {
 			ExpectedNoTool: true,
 			InjectPending: &InjectContext{
 				PendingDeletion: &struct {
-					Type         string
-					Date         string
-					Target       string
-					DeletedItems []struct{ StartTime, EndTime, Emoji, Status string }
-					RemainingItems []struct{ StartTime, EndTime, Emoji, Status string }
+					Type    string
+					Entries []struct {
+						Date           string
+						DeletedItems   []struct{ StartTime, EndTime, Emoji, Status string }
+						RemainingItems []struct{ StartTime, EndTime, Emoji, Status string }
+					}
 					FriendID   string
 					FriendName string
 				}{
-					Type:   "schedule",
-					Date:   "2026-02-08",
-					Target: "开会",
-					DeletedItems: []struct{ StartTime, EndTime, Emoji, Status string }{
-						{"14:00", "16:00", "💼", "开会"},
+					Type: "schedule",
+					Entries: []struct {
+						Date           string
+						DeletedItems   []struct{ StartTime, EndTime, Emoji, Status string }
+						RemainingItems []struct{ StartTime, EndTime, Emoji, Status string }
+					}{
+						{
+							Date: "2026-02-08",
+							DeletedItems: []struct{ StartTime, EndTime, Emoji, Status string }{
+								{"14:00", "16:00", "💼", "开会"},
+							},
+						},
 					},
 				},
 			}},

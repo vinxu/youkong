@@ -135,23 +135,22 @@ func (s *V4EvalService) RunSingleScenario(ctx context.Context, scenario EvalScen
 	// 注入 InjectPending 上下文（用于确认场景需要 pending 状态）
 	if scenario.InjectPending != nil {
 		ic := scenario.InjectPending
-		// 注入 PendingSchedule
+		// 注入 PendingSchedules
 		if len(ic.PendingSchedule) > 0 {
+			dateStr := ic.PendingDate
+			if dateStr == "" {
+				dateStr = time.Now().Format("2006-01-02")
+			}
+			if session.PendingSchedules == nil {
+				session.PendingSchedules = make(map[string][]model.ScheduleItem)
+			}
 			for _, ps := range ic.PendingSchedule {
-				session.PendingSchedule = append(session.PendingSchedule, model.ScheduleItem{
+				session.PendingSchedules[dateStr] = append(session.PendingSchedules[dateStr], model.ScheduleItem{
 					StartTime: ps.StartTime,
 					EndTime:   ps.EndTime,
 					Emoji:     ps.Emoji,
 					Status:    ps.Status,
 				})
-			}
-			if ic.PendingDate != "" {
-				t, err := time.Parse("2006-01-02", ic.PendingDate)
-				if err == nil {
-					session.PendingDate = t
-				}
-			} else {
-				session.PendingDate = time.Now()
 			}
 		}
 		// 注入 PendingMessage
@@ -185,26 +184,24 @@ func (s *V4EvalService) RunSingleScenario(ctx context.Context, scenario EvalScen
 			pd := ic.PendingDeletion
 			deletion := &model.V4PendingDeletion{
 				Type:       pd.Type,
-				Date:       pd.Date,
-				Target:     pd.Target,
 				FriendID:   pd.FriendID,
 				FriendName: pd.FriendName,
 			}
-			for _, item := range pd.DeletedItems {
-				deletion.DeletedItems = append(deletion.DeletedItems, model.ScheduleItem{
-					StartTime: item.StartTime,
-					EndTime:   item.EndTime,
-					Emoji:     item.Emoji,
-					Status:    item.Status,
-				})
-			}
-			for _, item := range pd.RemainingItems {
-				deletion.RemainingItems = append(deletion.RemainingItems, model.ScheduleItem{
-					StartTime: item.StartTime,
-					EndTime:   item.EndTime,
-					Emoji:     item.Emoji,
-					Status:    item.Status,
-				})
+			for _, entry := range pd.Entries {
+				e := model.V4DeletionEntry{Date: entry.Date}
+				for _, item := range entry.DeletedItems {
+					e.DeletedItems = append(e.DeletedItems, model.ScheduleItem{
+						StartTime: item.StartTime, EndTime: item.EndTime,
+						Emoji: item.Emoji, Status: item.Status,
+					})
+				}
+				for _, item := range entry.RemainingItems {
+					e.RemainingItems = append(e.RemainingItems, model.ScheduleItem{
+						StartTime: item.StartTime, EndTime: item.EndTime,
+						Emoji: item.Emoji, Status: item.Status,
+					})
+				}
+				deletion.Entries = append(deletion.Entries, e)
 			}
 			session.PendingDeletion = deletion
 		}
@@ -1381,15 +1378,18 @@ func (s *V4EvalService) buildEvalSystemPrompt(session *model.V4Session) string {
 	}
 
 	if session.HasPendingSchedule() {
-		sb.WriteString("【⚠️待确认时刻表】")
-		for i, item := range session.PendingSchedule {
-			if i > 0 {
-				sb.WriteString(" | ")
+		for _, dateStr := range session.PendingScheduleDates() {
+			items := session.PendingSchedules[dateStr]
+			sb.WriteString(fmt.Sprintf("【⚠️待确认时刻表 %s】", dateStr))
+			for i, item := range items {
+				if i > 0 {
+					sb.WriteString(" | ")
+				}
+				sb.WriteString(fmt.Sprintf("%s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
 			}
-			sb.WriteString(fmt.Sprintf("%s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
+			sb.WriteString("\n")
 		}
-		sb.WriteString(" (日期:" + session.PendingDate.Format("01-02") + ")")
-		sb.WriteString("\n用户确认后调用 confirm 保存，要修改则调用 plan_activities 重新生成\n\n")
+		sb.WriteString("用户确认后调用 confirm 保存，要修改则调用 plan_activities 重新生成\n\n")
 	}
 
 	if session.HasPendingMessage() {
@@ -1408,11 +1408,14 @@ func (s *V4EvalService) buildEvalSystemPrompt(session *model.V4Session) string {
 	if session.HasPendingDeletion() {
 		pd := session.PendingDeletion
 		if pd.Type == "schedule" {
-			sb.WriteString(fmt.Sprintf("【⚠️待确认删除】将删除%d个安排", len(pd.DeletedItems)))
-			for _, item := range pd.DeletedItems {
-				sb.WriteString(fmt.Sprintf(" | %s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
+			totalDeleted := pd.TotalDeletedCount()
+			sb.WriteString(fmt.Sprintf("【⚠️待确认删除】将删除%d个安排", totalDeleted))
+			for _, entry := range pd.Entries {
+				for _, item := range entry.DeletedItems {
+					sb.WriteString(fmt.Sprintf(" | %s-%s %s%s", item.StartTime, item.EndTime, item.Emoji, item.Status))
+				}
+				sb.WriteString(fmt.Sprintf(" (日期:%s)", entry.Date))
 			}
-			sb.WriteString(fmt.Sprintf(" (日期:%s)", pd.Date))
 			sb.WriteString("\n用户确认后调用 confirm 执行删除，说'算了/不删了'则不操作\n\n")
 		} else if pd.Type == "friend" {
 			sb.WriteString(fmt.Sprintf("【⚠️待确认删除好友】将删除好友 %s (ID: %s)\n用户确认后调用 confirm 执行删除\n\n",
@@ -1450,30 +1453,33 @@ func (s *V4EvalService) syncMockSessionState(session *model.V4Session, toolName,
 		}
 
 	case "plan_activities":
-		// awaiting_approval=true 时设置 PendingSchedule
+		// awaiting_approval=true 时设置 PendingSchedules
 		if awaiting, ok := result["awaiting_approval"].(bool); ok && awaiting {
-			if session.PendingSchedule == nil {
-				session.PendingSchedule = []model.ScheduleItem{
+			if !session.HasPendingSchedule() {
+				dateStr := time.Now().Format("2006-01-02")
+				if d, ok := result["date"].(string); ok && d != "" {
+					dateStr = d
+				}
+				if session.PendingSchedules == nil {
+					session.PendingSchedules = make(map[string][]model.ScheduleItem)
+				}
+				session.PendingSchedules[dateStr] = []model.ScheduleItem{
 					{StartTime: "15:00", EndTime: "16:00", Emoji: "💼", Status: "安排"},
 				}
-				session.PendingDate = time.Now()
 			}
 		}
 
 	case "delete_schedule":
 		// 设置 PendingDeletion (type=schedule)
 		if _, ok := result["awaiting_approval"]; ok {
-			target := ""
-			if t, ok := args["target"].(string); ok {
-				target = t
-			}
 			session.PendingDeletion = &model.V4PendingDeletion{
-				Type:   "schedule",
-				Date:   time.Now().Format("2006-01-02"),
-				Target: target,
-				DeletedItems: []model.ScheduleItem{
-					{StartTime: "14:00", EndTime: "16:00", Emoji: "💼", Status: "安排"},
-				},
+				Type: "schedule",
+				Entries: []model.V4DeletionEntry{{
+					Date: time.Now().Format("2006-01-02"),
+					DeletedItems: []model.ScheduleItem{
+						{StartTime: "14:00", EndTime: "16:00", Emoji: "💼", Status: "安排"},
+					},
+				}},
 			}
 		}
 
