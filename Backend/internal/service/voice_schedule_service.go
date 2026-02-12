@@ -3197,7 +3197,7 @@ func (s *VoiceScheduleService) buildActivityMapping(session *model.VoiceSchedule
 	return sb.String()
 }
 
-// saveToMemory 保存时刻表到状态记忆
+// saveToMemory 保存时刻表到状态记忆（语音输入确认 → user_confirmed）
 func (s *VoiceScheduleService) saveToMemory(ctx context.Context, session *model.VoiceScheduleSession) {
 	if s.memoryRepo == nil {
 		return
@@ -3208,13 +3208,14 @@ func (s *VoiceScheduleService) saveToMemory(ctx context.Context, session *model.
 			UserID:    session.UserID,
 			Emoji:     item.Emoji,
 			Status:    item.Status,
+			Source:    model.InferenceSourceUserConfirmed,
 			CreatedAt: time.Now(),
 		}
 		_ = s.memoryRepo.SaveUserStatusMemory(ctx, memory)
 	}
 }
 
-// saveStatusGuessToMemory 保存状态猜测到记忆
+// saveStatusGuessToMemory 保存状态猜测到记忆（语音推测 → ai_oneclick）
 func (s *VoiceScheduleService) saveStatusGuessToMemory(ctx context.Context, session *model.VoiceScheduleSession) {
 	if s.memoryRepo == nil || session.CurrentStatusGuess == nil {
 		return
@@ -3224,6 +3225,7 @@ func (s *VoiceScheduleService) saveStatusGuessToMemory(ctx context.Context, sess
 		UserID:    session.UserID,
 		Emoji:     session.CurrentStatusGuess.Emoji,
 		Status:    session.CurrentStatusGuess.Status,
+		Source:    model.InferenceSourceAIOneclick,
 		CreatedAt: time.Now(),
 	}
 	_ = s.memoryRepo.SaveUserStatusMemory(ctx, memory)

@@ -327,12 +327,17 @@ func (s *StatusScheduler) updateUserStatus(ctx context.Context, userID string, i
 		return err
 	}
 
-	// 同时保存到状态记忆
+	// 同时保存到状态记忆（根据 IsAIGuess 设置来源）
 	if s.memoryRepo != nil {
+		source := model.InferenceSourceUserConfirmed
+		if item.IsAIGuess {
+			source = model.InferenceSourceAIAuto
+		}
 		memory := &model.UserStatusMemory{
 			UserID:    userID,
 			Emoji:     item.Emoji,
 			Status:    item.Status,
+			Source:    source,
 			CreatedAt: time.Now(),
 		}
 		_ = s.memoryRepo.SaveUserStatusMemory(ctx, memory)

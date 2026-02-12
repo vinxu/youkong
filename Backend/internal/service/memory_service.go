@@ -496,12 +496,13 @@ func (s *MemoryService) SelectStatus(ctx context.Context, userID string, req *mo
 		}
 	}
 
-	// 2. 保存到状态记忆表
+	// 2. 保存到状态记忆表（用户手动选状态 → user_confirmed）
 	memory := &model.UserStatusMemory{
 		UserID:  userID,
 		Emoji:   req.Emoji,
 		Status:  req.Status,
 		Context: contextJSON,
+		Source:  model.InferenceSourceUserConfirmed,
 	}
 	if err := s.memoryRepo.SaveUserStatusMemory(ctx, memory); err != nil {
 		return fmt.Errorf("save status memory: %w", err)

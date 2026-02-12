@@ -768,13 +768,18 @@ func (r *MemoryRepository) GetTimeSlotStats(ctx context.Context, userID string, 
 
 // SaveUserStatusMemory 保存用户选择的状态记忆
 func (r *MemoryRepository) SaveUserStatusMemory(ctx context.Context, memory *model.UserStatusMemory) error {
-	query := `INSERT INTO user_status_memory (user_id, emoji, status, context, created_at)
-              VALUES (?, ?, ?, ?, ?)`
+	source := memory.Source
+	if source == "" {
+		source = "unknown"
+	}
+	query := `INSERT INTO user_status_memory (user_id, emoji, status, context, source, created_at)
+              VALUES (?, ?, ?, ?, ?, ?)`
 	_, err := r.db.ExecContext(ctx, query,
 		memory.UserID,
 		memory.Emoji,
 		memory.Status,
 		memory.Context,
+		source,
 		time.Now(),
 	)
 	return err
@@ -783,7 +788,7 @@ func (r *MemoryRepository) SaveUserStatusMemory(ctx context.Context, memory *mod
 // GetRecentUserStatusMemory 获取用户最近的状态记忆
 func (r *MemoryRepository) GetRecentUserStatusMemory(ctx context.Context, userID string, limit int) ([]*model.UserStatusMemory, error) {
 	var memories []*model.UserStatusMemory
-	query := `SELECT id, user_id, emoji, status, context, created_at
+	query := `SELECT id, user_id, emoji, status, context, source, created_at
               FROM user_status_memory
               WHERE user_id = ?
               ORDER BY created_at DESC

@@ -133,6 +133,10 @@ func (s *InferencePersonaService) computeTimePatternStats(ctx context.Context, u
 				if item.Status == "" {
 					continue
 				}
+				// 排除 AI 推测数据，仅用用户确认的数据生成 persona
+				if item.IsAIGuess {
+					continue
+				}
 				startHour := parseHour(item.StartTime)
 				endHour := parseHour(item.EndTime)
 				if startHour < 0 {

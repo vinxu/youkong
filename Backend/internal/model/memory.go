@@ -496,5 +496,6 @@ type UserStatusMemory struct {
 	Emoji     string    `json:"emoji" db:"emoji"`
 	Status    string    `json:"status" db:"status"`
 	Context   string    `json:"context" db:"context"` // JSON 格式的设备上下文
+	Source    string    `json:"source" db:"source"`   // 来源: user_confirmed | ai_auto | ai_oneclick | unknown
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 }

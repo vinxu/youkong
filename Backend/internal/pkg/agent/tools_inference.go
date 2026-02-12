@@ -250,14 +250,13 @@ func PreGatherContext(ctx context.Context, deps *InferenceToolDeps) *model.V3Inf
 }
 
 // FormatContextForPrompt 将预聚合的上下文格式化为 prompt 注入文本
-// 数据段按推断优先级排列：实时信号 → 修正/偏好 → 时刻表 → 画像 → 历史参考
+// 数据段按三级可信度排列：实时信号(高) → 用户主动设置(最高) → AI推测(低)
 func FormatContextForPrompt(ic *model.V3InferenceContext) string {
 	var sb strings.Builder
 
-	// === 优先级 1: 实时设备信号（最重要）===
+	// === 高可信度: 实时设备信号 ===
 	if len(ic.DeviceSignals) > 0 {
 		sb.WriteString("# 实时设备信号（推断的主要依据）\n")
-		// 按固定顺序输出，避免 map 随机性
 		signalOrder := []string{"screen", "location", "movement", "calendar", "battery", "mode", "connection"}
 		for _, k := range signalOrder {
 			if v, ok := ic.DeviceSignals[k]; ok {
@@ -269,7 +268,7 @@ func FormatContextForPrompt(ic *model.V3InferenceContext) string {
 		sb.WriteString("# 实时设备信号\n无（数据未上报）\n")
 	}
 
-	// === 优先级 2: 用户修正历史 ===
+	// === 最高可信度: 用户修正历史 ===
 	if len(ic.Corrections) > 0 {
 		sb.WriteString("\n# 用户修正历史（绝对不能再犯）\n")
 		for _, c := range ic.Corrections {
@@ -291,15 +290,20 @@ func FormatContextForPrompt(ic *model.V3InferenceContext) string {
 		}
 	}
 
-	// === 优先级 3: 时刻表 ===
-	if len(ic.TodaySchedule) > 0 {
-		sb.WriteString("\n# 今日时刻表\n")
-		data, _ := json.Marshal(ic.TodaySchedule)
-		sb.WriteString(string(data))
-		sb.WriteString("\n")
+	// === 最高可信度: 用户主动设置的时刻表 ===
+	if len(ic.UserScheduleItems) > 0 {
+		sb.WriteString("\n# 用户主动设置的时刻表（高可信度）\n")
+		for _, item := range ic.UserScheduleItems {
+			marker := ""
+			if m, ok := item["current_marker"].(string); ok {
+				marker = " " + m
+			}
+			sb.WriteString(fmt.Sprintf("- %s %s (%s-%s)%s\n",
+				item["emoji"], item["status"], item["start_time"], item["end_time"], marker))
+		}
 	}
 
-	// === 优先级 4: 用户画像 ===
+	// === 用户画像 ===
 	if len(ic.Profile) > 0 {
 		sb.WriteString("\n# 用户画像\n")
 		for k, v := range ic.Profile {
@@ -307,26 +311,44 @@ func FormatContextForPrompt(ic *model.V3InferenceContext) string {
 		}
 	}
 
-	// === 优先级 5: 历史参考（仅供参考，不能替代实时信号） ===
+	// === 最近状态记录（按来源标注可信度）===
 	if len(ic.RecentStatuses) > 0 {
-		sb.WriteString("\n# 最近状态记录（仅供参考）\n")
-		// 最多显示 5 条
+		sb.WriteString("\n# 最近状态记录（按来源标注可信度）\n")
 		limit := len(ic.RecentStatuses)
 		if limit > 5 {
 			limit = 5
 		}
 		for _, s := range ic.RecentStatuses[:limit] {
-			sb.WriteString(fmt.Sprintf("- %s %s (%s)\n", s["emoji"], s["status"], s["created_at"]))
+			sourceLabel := sourceToLabel(s["source"])
+			sb.WriteString(fmt.Sprintf("- %s %s (%s) [%s]\n", s["emoji"], s["status"], s["created_at"], sourceLabel))
 		}
 	}
 
-	// 上次推断
+	// === 上次推断（标注来源）===
 	if ic.PrevInference != nil {
-		sb.WriteString("\n# 上次推断（时间连续性参考）\n")
+		sourceLabel := sourceToLabel(ic.PrevInference.Source)
+		sb.WriteString(fmt.Sprintf("\n# 上次推断（来源: %s）\n", sourceLabel))
+		if ic.PrevInference.Source == model.InferenceSourceAIAuto || ic.PrevInference.Source == model.InferenceSourceAIOneclick {
+			sb.WriteString("# ⚠️ 此条来自AI推测，可信度低\n")
+		}
 		sb.WriteString(fmt.Sprintf("- %s %s (置信度: %s)\n",
 			ic.PrevInference.Emoji, ic.PrevInference.Activity, ic.PrevInference.Confidence))
 		if ic.PrevInference.Place != "" {
 			sb.WriteString(fmt.Sprintf("- 地点: %s\n", ic.PrevInference.Place))
+		}
+	}
+
+	// === 低可信度: AI 自动推测的时刻表 ===
+	if len(ic.AIGuessScheduleItems) > 0 {
+		sb.WriteString("\n# AI 自动推测的时刻表（低可信度，仅弱参考）\n")
+		sb.WriteString("# ⚠️ 这些是 AI 之前的猜测，当实时信号矛盾时必须忽略\n")
+		for _, item := range ic.AIGuessScheduleItems {
+			marker := ""
+			if m, ok := item["current_marker"].(string); ok {
+				marker = " " + m
+			}
+			sb.WriteString(fmt.Sprintf("- %s %s (%s-%s)%s\n",
+				item["emoji"], item["status"], item["start_time"], item["end_time"], marker))
 		}
 	}
 
@@ -346,6 +368,20 @@ func FormatContextForPrompt(ic *model.V3InferenceContext) string {
 	}
 
 	return sb.String()
+}
+
+// sourceToLabel 将 source 转为中文标签
+func sourceToLabel(source string) string {
+	switch source {
+	case model.InferenceSourceUserConfirmed:
+		return "用户确认"
+	case model.InferenceSourceAIAuto:
+		return "AI推测"
+	case model.InferenceSourceAIOneclick:
+		return "一键推断"
+	default:
+		return "未知来源"
+	}
 }
 
 // ========== 数据收集子函数 ==========
@@ -426,7 +462,7 @@ func gatherHistoryData(ctx context.Context, deps *InferenceToolDeps, ic *model.V
 	now := time.Now()
 	currentTime := now.Format("15:04")
 
-	// 今日时刻表
+	// 今日时刻表：按 IsAIGuess 分组
 	if deps.ScheduleRepo != nil {
 		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		schedule, err := deps.ScheduleRepo.GetActiveByUserAndDate(ctx, deps.UserID, today)
@@ -452,6 +488,11 @@ func gatherHistoryData(ctx context.Context, deps *InferenceToolDeps, ic *model.V
 					inRange = currentTime >= item.StartTime && currentTime < item.EndTime
 				}
 				if inRange {
+					if item.IsAIGuess {
+						itemData["current_marker"] = "← 当前时段(AI猜测)"
+					} else {
+						itemData["current_marker"] = "← 当前时段"
+					}
 					scheduleData["current_item"] = itemData
 					if i+1 < len(schedule.Items) {
 						next := schedule.Items[i+1]
@@ -465,21 +506,33 @@ func gatherHistoryData(ctx context.Context, deps *InferenceToolDeps, ic *model.V
 				}
 
 				items = append(items, itemData)
+
+				// 按来源分组
+				if item.IsAIGuess {
+					ic.AIGuessScheduleItems = append(ic.AIGuessScheduleItems, itemData)
+				} else {
+					ic.UserScheduleItems = append(ic.UserScheduleItems, itemData)
+				}
 			}
 			scheduleData["items"] = items
 			ic.TodaySchedule = scheduleData
 		}
 	}
 
-	// 最近状态
+	// 最近状态：附带 source 标注
 	if deps.MemoryRepo != nil {
 		memories, err := deps.MemoryRepo.GetRecentUserStatusMemory(ctx, deps.UserID, 10)
 		if err == nil && len(memories) > 0 {
 			entries := make([]map[string]string, 0, len(memories))
 			for _, m := range memories {
+				source := m.Source
+				if source == "" {
+					source = "unknown"
+				}
 				entries = append(entries, map[string]string{
 					"emoji":      m.Emoji,
 					"status":     m.Status,
+					"source":     source,
 					"created_at": m.CreatedAt.Format("01-02 15:04"),
 				})
 			}

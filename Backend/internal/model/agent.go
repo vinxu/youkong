@@ -148,6 +148,13 @@ type GeoPoint struct {
 	Longitude float64 `json:"longitude"`
 }
 
+// 推断来源常量
+const (
+	InferenceSourceUserConfirmed = "user_confirmed" // 用户主动设置/确认
+	InferenceSourceAIAuto        = "ai_auto"        // AI 自动推测
+	InferenceSourceAIOneclick    = "ai_oneclick"    // 一键推断
+)
+
 // CurrentStatusInference 当下状态推理结果
 type CurrentStatusInference struct {
 	Emoji        string `json:"emoji"`                      // 1-3个emoji，如"🎮"或"🎮🎧"
@@ -162,6 +169,7 @@ type CurrentStatusInference struct {
 	GifSmallURL  string `json:"gif_small_url,omitempty"`    // 缩略版 GIF URL
 	GiphyQuery   string `json:"giphy_query,omitempty"`      // Giphy 搜索词（英文，供客户端直接搜索）
 	UseGif       bool   `json:"use_gif"`                    // 是否使用 GIF 显示模式
+	Source       string `json:"source,omitempty"`           // 来源: user_confirmed | ai_auto | ai_oneclick
 }
 
 // StatusFeedbackRequest 状态反馈请求（用户修正状态）
@@ -239,13 +247,15 @@ type InferenceResponse struct {
 
 // V3InferenceContext 预聚合的推断上下文（Go 代码收集，注入 system prompt）
 type V3InferenceContext struct {
-	DeviceSignals    map[string]interface{} `json:"device_signals,omitempty"`
-	TodaySchedule    map[string]interface{} `json:"today_schedule,omitempty"`
-	RecentStatuses   []map[string]string    `json:"recent_statuses,omitempty"`
-	Corrections      []map[string]string    `json:"corrections,omitempty"`
-	Conversation     string                 `json:"conversation,omitempty"`
-	Profile          map[string]interface{} `json:"profile,omitempty"`
-	CoreMemory       map[string]interface{} `json:"core_memory,omitempty"`
-	PrevInference    *CurrentStatusInference `json:"prev_inference,omitempty"`
-	Preferences      []string               `json:"preferences,omitempty"`
+	DeviceSignals        map[string]interface{}   `json:"device_signals,omitempty"`
+	TodaySchedule        map[string]interface{}   `json:"today_schedule,omitempty"`
+	UserScheduleItems    []map[string]interface{} `json:"user_schedule_items,omitempty"`    // 用户主动设置的时刻表条目
+	AIGuessScheduleItems []map[string]interface{} `json:"ai_guess_schedule_items,omitempty"` // AI 推测的时刻表条目
+	RecentStatuses       []map[string]string      `json:"recent_statuses,omitempty"`
+	Corrections          []map[string]string      `json:"corrections,omitempty"`
+	Conversation         string                   `json:"conversation,omitempty"`
+	Profile              map[string]interface{}   `json:"profile,omitempty"`
+	CoreMemory           map[string]interface{}   `json:"core_memory,omitempty"`
+	PrevInference        *CurrentStatusInference  `json:"prev_inference,omitempty"`
+	Preferences          []string                 `json:"preferences,omitempty"`
 }

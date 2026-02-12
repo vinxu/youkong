@@ -76,8 +76,13 @@ type InferenceStreamEvent struct {
 // InferenceStreamCallback 推断流式回调
 type InferenceStreamCallback func(event *InferenceStreamEvent)
 
+// inferenceSourceKey context key 类型
+type inferenceSourceKey struct{}
+
 // InferWithAgent V3 同步推断（返回统一 InferenceResponse）
 func (s *StatusInferenceAgent) InferWithAgent(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest) (*model.CurrentStatusInference, error) {
+	// 注入 source: ai_auto（自动推测入口）
+	ctx = context.WithValue(ctx, inferenceSourceKey{}, model.InferenceSourceAIAuto)
 	resp, err := s.doInfer(ctx, userID, sensorData, nil)
 	if err != nil {
 		return nil, err
@@ -96,6 +101,7 @@ func (s *StatusInferenceAgent) InferWithAgent(ctx context.Context, userID string
 			Confidence: "low",
 			Reasoning:  fmt.Sprintf("不确定时使用默认选项: %s", opt.Reason),
 			InferredAt: time.Now().UnixMilli(),
+			Source:     model.InferenceSourceAIAuto,
 		}
 		s.enrichWithGif(ctx, result)
 		s.setInferenceLock(ctx, userID)
@@ -108,6 +114,8 @@ func (s *StatusInferenceAgent) InferWithAgent(ctx context.Context, userID string
 
 // InferWithAgentV3 V3 推断（返回完整 InferenceResponse，支持 awaiting_choice）
 func (s *StatusInferenceAgent) InferWithAgentV3(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest) (*model.InferenceResponse, error) {
+	// 注入 source: ai_oneclick（一键推断入口）
+	ctx = context.WithValue(ctx, inferenceSourceKey{}, model.InferenceSourceAIOneclick)
 	return s.doInfer(ctx, userID, sensorData, nil)
 }
 
@@ -177,6 +185,7 @@ func (s *StatusInferenceAgent) HandleUserResponse(ctx context.Context, userID st
 		Confidence: "high", // 用户主动选择 → high
 		Reasoning:  fmt.Sprintf("用户选择: %s", opt.Activity),
 		InferredAt: time.Now().UnixMilli(),
+		Source:     model.InferenceSourceUserConfirmed,
 	}
 
 	// GIF 翻译
@@ -314,6 +323,11 @@ func (s *StatusInferenceAgent) handleFinalizeResult(ctx context.Context, userID 
 		return s.buildDefaultResponse(userID), nil
 	}
 
+	// 从 ctx 取 source 设置到推断结果
+	if source, ok := ctx.Value(inferenceSourceKey{}).(string); ok && source != "" {
+		inference.Source = source
+	}
+
 	// GIF 翻译
 	s.enrichWithGif(ctx, inference)
 
@@ -441,11 +455,28 @@ func (s *StatusInferenceAgent) buildInferenceSystemPrompt(contextText string) st
 
 %s
 
+# 数据可信度层级（严格遵守）
+
+## 最高可信度 — 用户主动设置
+- 用户语音/文字设置的时刻表、确认发布的状态
+- 标注为"用户确认"的条目可信度最高，是核心参考
+
+## 高可信度 — 实时设备信号
+- 位置、运动数据、日历、电量等
+- 此刻状态的直接物理证据
+- 当实时信号与任何历史数据矛盾时，以实时信号为准
+
+## 低可信度 — AI 自动推测
+- 标注为"AI推测"或"一键推断"的条目
+- ⚠️ 绝对不能因为 AI 之前猜测了某个状态就继续输出同样的状态
+- ⚠️ 当实时信号与 AI 推测矛盾时一律忽略 AI 推测
+
 # 推断方法
-1. 首先看实时设备信号（屏幕活动类型、位置、运动、日历），这是此刻状态的直接证据
-2. 结合时间（工作日/周末、上午/下午/深夜）判断最合理的活动
-3. 用户修正历史中纠正过的推断不能再犯
-4. 历史记录和时刻表仅作为辅助参考，不能覆盖实时信号的判断
+1. 首先看实时设备信号，这是直接证据
+2. 对照用户主动设置的时刻表（高可信度）
+3. 用户修正历史不能再犯
+4. AI 推测仅极弱参考，与实时信号矛盾时一律忽略
+5. 位置/运动已改变时，必须根据新信号重新推断，不能沿用旧状态
 
 # 位置判断
 - place_type 是客户端的粗略估计（可能错误），place_name 是逆地理编码的实际地点名称

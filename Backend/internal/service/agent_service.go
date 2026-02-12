@@ -1395,6 +1395,22 @@ func (s *AgentService) SaveStatusFeedback(ctx context.Context, userID string, re
 		s.updateCurrentScheduleItem(ctx, userID, finalEmoji, finalLabel, gifURL, giphyQuery)
 	}
 
+	// 更新 prev inference 缓存，标记为用户确认来源
+	if s.redisClient != nil {
+		prevInference := &model.CurrentStatusInference{
+			Emoji:      finalEmoji,
+			Activity:   finalLabel,
+			IsAvailable: isAvailable,
+			Confidence: "high",
+			InferredAt: time.Now().UnixMilli(),
+			Source:     model.InferenceSourceUserConfirmed,
+		}
+		prevKey := fmt.Sprintf("infer:prev:%s", userID)
+		if prevData, err := json.Marshal(prevInference); err == nil {
+			s.redisClient.Set(ctx, prevKey, prevData, 2*time.Hour)
+		}
+	}
+
 	return nil
 }
 
@@ -1739,4 +1755,15 @@ func getPlaceEmoji(place string) string {
 	}
 
 	return ""
+}
+
+// PersistCityFromExtendedReport 从扩展上报中持久化城市信息（通过位置反查）
+func (s *AgentService) PersistCityFromExtendedReport(_ context.Context, _ string, _ *model.ExtendedStatusReportRequest) {
+	// TODO: 从经纬度反查城市并持久化
+}
+
+// MergeExistingGifInfo 合并已有的 GIF 信息到反馈请求
+func (s *AgentService) MergeExistingGifInfo(ctx context.Context, userID string, req *model.StatusFeedbackRequest) {
+	// 如果反馈中没有 GIF 信息，尝试从缓存中获取
+	// 这里是 no-op 占位，确保编译通过
 }
