@@ -2,19 +2,65 @@ import SwiftUI
 
 // MARK: - Root View
 
+// MARK: - App Version Response
+
+private struct AppVersionInfo: Decodable {
+    let latestVersion: String
+    let minVersion: String
+    let updateUrl: String
+    let changelog: String
+    let forceUpdate: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case latestVersion = "latest_version"
+        case minVersion = "min_version"
+        case updateUrl = "update_url"
+        case changelog
+        case forceUpdate = "force_update"
+    }
+}
+
+// MARK: - Onboarding Wow Phase
+
+enum OnboardingWowPhase: Equatable {
+    case inference
+    case chat(emoji: String, activity: String)
+    case preview(emoji: String, status: String)
+}
+
+// MARK: - Root View
+
 struct RootView: View {
     @EnvironmentObject private var authManager: AuthManager
     @EnvironmentObject private var deepLinkManager: DeepLinkManager
     @EnvironmentObject private var notificationManager: NotificationManager
     @StateObject private var permissionManager = PermissionManager.shared
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+    @Environment(\.scenePhase) private var scenePhase
+
+    // 版本更新状态
+    @State private var showUpdateAlert = false
+    @State private var showForceUpdateAlert = false
+    @State private var versionInfo: AppVersionInfo?
+
+    // Onboarding Wow 链路（会话级，不持久化）
+    @State private var onboardingWowPhase: OnboardingWowPhase? = nil
 
     var body: some View {
         Group {
             if authManager.isAuthenticated {
-                if hasCompletedOnboarding {
+                if let phase = onboardingWowPhase {
+                    // 3-Phase Wow 链路
+                    wowPhaseView(phase: phase)
+                } else if hasCompletedOnboarding {
                     // 已完成引导，直接进入主页面
                     MainTabView()
+                        #if DEBUG
+                        .onLongPressGesture(minimumDuration: 3) {
+                            // 长按 3 秒触发 Wow 链路（调试用）
+                            onboardingWowPhase = .inference
+                        }
+                        #endif
                         .task {
                             // 🔔 请求通知权限
                             await notificationManager.requestPermissionIfNeeded()
@@ -29,20 +75,28 @@ struct RootView: View {
                             startDataCollection()
                             // 刷新未读消息 Badge
                             await notificationManager.refreshBadgeFromServer()
+                            // 检查版本更新
+                            await checkAppVersion()
                         }
                 } else if permissionManager.isChecking {
                     // 正在检查权限状态
                     ProgressView("检查权限...")
                 } else if permissionManager.status.allGranted {
-                    // 权限都已授权，直接进入主页面
-                    MainTabView()
-                        .task {
-                            hasCompletedOnboarding = true
-                            startDataCollection()
-                        }
+                    // 权限都已授权，启动数据收集并进入 Wow 链路
+                    Color.clear.task {
+                        hasCompletedOnboarding = true
+                        startDataCollection()
+                        onboardingWowPhase = .inference
+                    }
                 } else {
                     // 显示完整引导流程（4屏）
                     OnboardingView(isCompleted: $hasCompletedOnboarding)
+                        .onChange(of: hasCompletedOnboarding) { completed in
+                            if completed {
+                                startDataCollection()
+                                onboardingWowPhase = .inference
+                            }
+                        }
                 }
             } else {
                 LoginView()
@@ -61,6 +115,41 @@ struct RootView: View {
                 WebSocketManager.shared.disconnect()
             }
         }
+        .onChange(of: scenePhase) { newPhase in
+            guard authManager.isAuthenticated && hasCompletedOnboarding else { return }
+            switch newPhase {
+            case .active, .background:
+                // 前台/后台切换时自动上报状态（带 60s 冷却）
+                Task { await StatusReportManager.shared.reportIfNeeded() }
+            default:
+                break
+            }
+        }
+        .alert("发现新版本 v\(versionInfo?.latestVersion ?? "")", isPresented: $showUpdateAlert) {
+            Button("稍后再说", role: .cancel) {
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "lastUpdateAlertTime")
+            }
+            Button("去更新") {
+                if let urlString = versionInfo?.updateUrl, let url = URL(string: urlString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+        } message: {
+            Text(versionInfo?.changelog ?? "")
+        }
+        .alert("需要更新", isPresented: $showForceUpdateAlert) {
+            Button("去更新") {
+                if let urlString = versionInfo?.updateUrl, let url = URL(string: urlString) {
+                    UIApplication.shared.open(url)
+                }
+                // 重新弹出，不可关闭
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    showForceUpdateAlert = true
+                }
+            }
+        } message: {
+            Text("当前版本过低，请更新到最新版本后继续使用\n\n\(versionInfo?.changelog ?? "")")
+        }
         .sheet(isPresented: $deepLinkManager.showInvitationSheet) {
             if let code = deepLinkManager.pendingInvitationCode {
                 AcceptInvitationView(code: code) {
@@ -73,6 +162,50 @@ struct RootView: View {
         // .withDebugButton()
         // .shakeToDebug()
         // #endif
+    }
+
+    // MARK: - Wow Phase Views
+
+    @ViewBuilder
+    private func wowPhaseView(phase: OnboardingWowPhase) -> some View {
+        switch phase {
+        case .inference:
+            OnboardingInferenceView(
+                onConfirm: { emoji, activity in
+                    withAnimation {
+                        onboardingWowPhase = .chat(emoji: emoji, activity: activity)
+                    }
+                },
+                onSkip: {
+                    // 跳过到主页，不用动画（避免 MainTabView 被反复创建导致请求取消）
+                    onboardingWowPhase = nil
+                }
+            )
+        case .chat(let emoji, let activity):
+            OnboardingChatView(
+                inferredEmoji: emoji,
+                inferredActivity: activity,
+                onComplete: {
+                    withAnimation {
+                        onboardingWowPhase = .preview(emoji: emoji, status: activity)
+                    }
+                },
+                onSkip: {
+                    onboardingWowPhase = nil
+                }
+            )
+        case .preview(let emoji, let status):
+            OnboardingPreviewView(
+                emoji: emoji,
+                status: status,
+                onInvite: {
+                    // Share sheet is handled inside OnboardingPreviewView
+                },
+                onEnter: {
+                    onboardingWowPhase = nil
+                }
+            )
+        }
     }
 
     private func startDataCollection() {
@@ -133,7 +266,8 @@ struct RootView: View {
 
         let locationData = LocationRequestData(
             placeType: locationStatus.placeType.rawValue,
-            atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes
+            atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes,
+            city: nil
         )
 
         // 扩展位置数据（包含地点名称和坐标）
@@ -216,6 +350,33 @@ struct RootView: View {
             print("[STATUS] ✗ Report failed: \(error)")
         }
         print("=== [STATUS REPORT] Completed ===\n")
+    }
+
+    private func checkAppVersion() async {
+        let currentVersion = Bundle.main.shortVersion
+        do {
+            let info: AppVersionInfo = try await APIClient.shared.request(
+                .checkAppVersion(platform: "ios", currentVersion: currentVersion)
+            )
+            self.versionInfo = info
+
+            if info.forceUpdate {
+                showForceUpdateAlert = true
+                return
+            }
+
+            // 有新版本且非强制更新
+            if Bundle.compareVersions(currentVersion, info.latestVersion) == .orderedAscending {
+                // 24h 节流
+                let lastAlert = UserDefaults.standard.double(forKey: "lastUpdateAlertTime")
+                let elapsed = Date().timeIntervalSince1970 - lastAlert
+                if elapsed > 86400 {
+                    showUpdateAlert = true
+                }
+            }
+        } catch {
+            print("[VERSION CHECK] Failed: \(error)")
+        }
     }
 }
 

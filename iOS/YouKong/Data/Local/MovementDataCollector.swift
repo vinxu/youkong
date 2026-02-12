@@ -165,6 +165,7 @@ class MovementDataCollector: ObservableObject {
 
     /// 获取当前运动状态（同步版本，返回缓存的状态）
     func getCurrentStatus() -> MovementStatus {
+        checkAuthorization()
         guard isAuthorized else {
             print("[Movement] Not authorized, returning noPermission")
             return .noPermission

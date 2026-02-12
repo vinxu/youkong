@@ -9,12 +9,14 @@ final class ChatViewModel: ObservableObject {
     @Published var messageInput = ""
     @Published var isSending = false
     @Published private(set) var partnerName: String = "加载中..."
+    @Published var respondingBookingId: String? = nil
 
     var canSendMessage: Bool {
         !messageInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSending
     }
 
     @Injected(\.messageRepository) private var repository
+    @Injected(\.apiClient) private var apiClient
 
     private var partner: UserProfile?
     private var conversationId: String?
@@ -138,6 +140,19 @@ final class ChatViewModel: ObservableObject {
         }
 
         isSending = false
+    }
+
+    func respondToBooking(bookingId: String, action: String) async {
+        respondingBookingId = bookingId
+        defer { respondingBookingId = nil }
+
+        do {
+            let endpoint = APIEndpoint.respondToBooking(bookingId: bookingId, action: action)
+            let _: BookingRespondResponse = try await apiClient.request(endpoint)
+            await loadMessages()
+        } catch {
+            print("[ChatViewModel] Respond to booking error: \(error)")
+        }
     }
 
     private func createConversation() async {

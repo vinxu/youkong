@@ -110,6 +110,8 @@ struct ConversationRowView: View {
             return "[确认请求]"
         case .confirmResponse:
             return "[确认回复]"
+        case .scheduleInvite:
+            return "[日程邀约]"
         }
     }
 }

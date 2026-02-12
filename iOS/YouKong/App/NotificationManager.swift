@@ -212,6 +212,8 @@ final class NotificationManager: ObservableObject {
             return "向你发起了确认请求"
         case .confirmResponse:
             return "回复了你的确认请求"
+        case .scheduleInvite:
+            return "向你发起了日程邀约"
         }
     }
 

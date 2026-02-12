@@ -7,6 +7,7 @@ struct GridHomeView: View {
     @State private var showStatusAnalysis = false
     @State private var showAIInference = false
     @State private var selectedTab = 0
+    @Environment(\.scenePhase) private var scenePhase
 
     // 按住说话相关状态
     @State private var isPressingVoiceButton = false
@@ -14,8 +15,13 @@ struct GridHomeView: View {
     @State private var showCancelZone = false
     @State private var showPermissionAlert = false
 
+    // 输入模式：voice / text
+    @State private var inputMode: String = "voice"
+    @State private var textInput: String = ""
+    @State private var isTextFieldFocused: Bool = false
+
     // 引导气泡（关闭后持久记住）
-    @State private var showGuideBubble = !UserDefaults.standard.bool(forKey: "voice_guide_dismissed")
+    @State private var showGuideBubble = UserDefaults.standard.integer(forKey: "voice_guide_dismiss_count") < 3
 
     // 取消区域阈值
     private let cancelThreshold: CGFloat = -80
@@ -39,19 +45,9 @@ struct GridHomeView: View {
                             voiceVM.reset()
                         },
                         onCompleted: {
-                            // 立即刷新首页
-                            Task {
-                                await viewModel.loadGrid()
-                            }
-                            // 刷新我的状态表
-                            Task {
-                                await scheduleVM.refresh()
-                            }
-                            // 延迟关闭覆盖层
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                                voiceVM.showOverlay = false
-                                voiceVM.reset()
-                            }
+                            // 操作完成时立即刷新首页数据，不自动关闭覆盖层
+                            Task { await viewModel.loadGrid() }
+                            Task { await scheduleVM.refresh() }
                         }
                     )
                     .transition(.opacity)
@@ -71,6 +67,11 @@ struct GridHomeView: View {
             }
             .animation(.easeInOut(duration: 0.25), value: voiceVM.showOverlay)
             .animation(.easeInOut(duration: 0.15), value: isPressingVoiceButton)
+            .contentShape(Rectangle())
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in isTextFieldFocused = false }
+            )
 
             // 底部按钮 - 始终可见（不被覆盖层遮盖）
             bottomButtonsBar
@@ -92,8 +93,24 @@ struct GridHomeView: View {
             }
         }
         .onChange(of: selectedTab) { newTab in
-            // 切回好友 tab 时自动刷新数据
             if newTab == 0 {
+                // 切回好友 tab 时自动刷新数据
+                Task { await viewModel.loadGrid() }
+            } else if newTab == 1 {
+                // 切到"我的"tab 时刷新时刻表数据
+                Task { await scheduleVM.refresh() }
+            }
+        }
+        .onChange(of: scheduleVM.changeCount) { _ in
+            // 时刻表编辑/删除/切换有空后立即刷新首页
+            Task { await viewModel.loadGrid() }
+        }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .active {
+                // 回前台时刷新 AI 就绪状态（权限可能在系统设置中变更）
+                Task { await scheduleVM.loadSettings() }
+                // 刷新时刻表数据（后台可能有 AI 自动推测更新）
+                Task { await scheduleVM.refresh() }
                 Task { await viewModel.loadGrid() }
             }
         }
@@ -135,9 +152,11 @@ struct GridHomeView: View {
                     relativeTime: friend.relativeTime,
                     city: friend.city,
                     isAvailable: friend.isAvailable,
+                    isVisiting: friend.isVisiting,
                     gifUrl: friend.gifUrl,
                     giphyQuery: friend.giphyQuery,
-                    useGif: friend.useGif
+                    useGif: friend.useGif,
+                    needsSchedule: friend.needsSchedule
                 )
             })
         }
@@ -234,8 +253,11 @@ struct GridHomeView: View {
                     .tag(0)
 
                 // Tab 1: 我的状态表
-                MyScheduleTimelineContent(viewModel: scheduleVM)
-                    .tag(1)
+                VStack(spacing: 0) {
+                    AutoPredictToggleBar(viewModel: scheduleVM)
+                    MyScheduleTimelineContent(viewModel: scheduleVM)
+                }
+                .tag(1)
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
         }
@@ -255,7 +277,7 @@ struct GridHomeView: View {
                     HStack(spacing: 8) {
                         Text("⏳")
                         Text("加载中...")
-                            .foregroundColor(CLIColors.yellow)
+                            .foregroundColor(CLIColors.green)
                     }
                     .font(.cliBody)
                     Spacer()
@@ -293,6 +315,9 @@ struct GridHomeView: View {
                         friends: viewModel.friends,
                         getUnreadCount: { friendId in
                             viewModel.getUnreadCount(for: friendId)
+                        },
+                        onNeedsScheduleTap: {
+                            showAIInference = true
                         }
                     )
                     .padding(.horizontal, 16)
@@ -322,39 +347,30 @@ struct GridHomeView: View {
                 guideBubbleView
             }
 
-            GeometryReader { geometry in
-                HStack(spacing: 8) {
-                    // 一键生成按钮（左边 1/3）
-                    Button {
-                        showAIInference = true
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text("🤖")
-                            Text("一键生成")
-                        }
-                        .font(.cliBodySmall)
-                        .foregroundColor(CLIColors.cyan)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+            HStack(spacing: 8) {
+                // 🤖 一键生成按钮（icon only）
+                Button {
+                    showAIInference = true
+                } label: {
+                    Text("🤖")
+                        .font(.system(size: 18))
+                        .frame(width: 44, height: 44)
                         .overlay(
                             Rectangle()
-                                .stroke(CLIColors.cyan, lineWidth: 1)
+                                .stroke(CLIColors.border, lineWidth: 1)
                         )
-                    }
-                    .buttonStyle(.borderless)
-                    .frame(width: (geometry.size.width - 24) / 3)
+                }
+                .buttonStyle(.borderless)
 
-                    // 按住说话生成按钮（右边 2/3）
+                // 中间区域：语音 / 文本
+                if inputMode == "voice" {
                     voiceButtonContent
-                        .frame(width: (geometry.size.width - 24) * 2 / 3)
                         .gesture(
                             DragGesture(minimumDistance: 0)
                                 .onChanged { value in
-                                    // 如果不能录音（AI 正在处理），忽略触摸
                                     guard voiceVM.canRecord else { return }
 
                                     if !isPressingVoiceButton {
-                                        // 检查权限
                                         if voiceVM.permissionDenied {
                                             showPermissionAlert = true
                                             return
@@ -371,11 +387,9 @@ struct GridHomeView: View {
                                             }
                                             return
                                         }
-                                        // 开始按住
                                         isPressingVoiceButton = true
                                         voiceVM.startRecording()
                                     }
-                                    // 更新拖动偏移
                                     dragOffset = value.translation.height
                                     showCancelZone = dragOffset < cancelThreshold / 2
                                 }
@@ -389,10 +403,8 @@ struct GridHomeView: View {
                                     let shouldCancel = value.translation.height < cancelThreshold
 
                                     if shouldCancel {
-                                        // 取消录音
                                         voiceVM.cancelRecording()
                                     } else {
-                                        // 提交录音（覆盖层由 onChange 控制）
                                         Task {
                                             await voiceVM.submitRecording()
                                         }
@@ -401,10 +413,55 @@ struct GridHomeView: View {
                                     showCancelZone = false
                                 }
                         )
+                } else {
+                    // 文本输入框（UIKit wrapper，发送时键盘不收起）
+                    NonDismissingTextField(
+                        text: $textInput,
+                        placeholder: "输入大致的行程安排",
+                        placeholderColor: UIColor(CLIColors.textSecondary),
+                        textColor: UIColor(CLIColors.textPrimary),
+                        font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+                        isFocused: $isTextFieldFocused,
+                        onSend: { text in
+                            textInput = ""
+                            voiceVM.showOverlay = true
+                            Task {
+                                await voiceVM.submitText(text)
+                            }
+                        }
+                    )
+                    .padding(.horizontal, 12)
+                    .frame(height: 44)
+                    .background(CLIColors.backgroundSecondary)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(isTextFieldFocused ? CLIColors.green : CLIColors.border, lineWidth: 1)
+                    )
                 }
-                .padding(.horizontal, 16)
+
+                // ⌨️/🎤 切换按钮
+                Button {
+                    if inputMode == "voice" {
+                        inputMode = "text"
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            isTextFieldFocused = true
+                        }
+                    } else {
+                        isTextFieldFocused = false
+                        inputMode = "voice"
+                    }
+                } label: {
+                    Text(inputMode == "voice" ? "⌨️" : "🎤")
+                        .font(.system(size: 18))
+                        .frame(width: 44, height: 44)
+                        .overlay(
+                            Rectangle()
+                                .stroke(CLIColors.border, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.borderless)
             }
-            .frame(height: 44)
+            .padding(.horizontal, 12)
             .padding(.vertical, 12)
             .background(CLIColors.background)
         }
@@ -417,7 +474,9 @@ struct GridHomeView: View {
             Text("💡")
                 .font(.system(size: 14))
 
-            Text("按住说话，告诉我你在做什么或接下来的安排\n例：\"我在吃饭\" 或 \"明天上午开会，下午健身\"")
+            Text(inputMode == "voice"
+                ? "按住说话，告诉我你在做什么或接下来的安排\n例：\"我在吃饭\" 或 \"明天上午开会，下午健身\""
+                : "输入你的行程安排，我来帮你生成时间表\n例：\"明天上午开会，下午健身\" 或 \"周末想约朋友吃饭\"")
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(CLIColors.textSecondary)
                 .lineSpacing(4)
@@ -425,7 +484,8 @@ struct GridHomeView: View {
 
             Button {
                 showGuideBubble = false
-                UserDefaults.standard.set(true, forKey: "voice_guide_dismissed")
+                let count = UserDefaults.standard.integer(forKey: "voice_guide_dismiss_count") + 1
+                UserDefaults.standard.set(count, forKey: "voice_guide_dismiss_count")
             } label: {
                 Text("✕")
                     .font(.system(size: 12, design: .monospaced))
@@ -461,7 +521,7 @@ struct GridHomeView: View {
                 // 禁用状态：显示处理中
                 Text("处理中...")
             } else {
-                Text("按住说话生成")
+                Text("和AI说说你的行程")
             }
         }
         .font(.cliBody)
@@ -517,13 +577,13 @@ struct GridHomeView: View {
 struct FriendGrid: View {
     let friends: [FriendStatus]
     let getUnreadCount: (String) -> Int
+    var onNeedsScheduleTap: (() -> Void)? = nil
 
     private var gridSize: Int {
         let count = friends.count
         if count <= 1 { return 1 }
-        if count <= 4 { return 2 }
-        if count <= 9 { return 3 }
-        return 4
+        if count <= 2 { return 2 }
+        return 3
     }
 
     private var columns: [GridItem] {
@@ -533,13 +593,23 @@ struct FriendGrid: View {
     var body: some View {
         LazyVGrid(columns: columns, spacing: 8) {
             ForEach(friends) { friend in
-                NavigationLink(value: friend) {
+                if friend.needsSchedule {
                     FriendCard(
                         friend: friend,
                         unreadCount: getUnreadCount(friend.id)
                     )
+                    .onTapGesture {
+                        onNeedsScheduleTap?()
+                    }
+                } else {
+                    NavigationLink(value: friend) {
+                        FriendCard(
+                            friend: friend,
+                            unreadCount: getUnreadCount(friend.id)
+                        )
+                    }
+                    .buttonStyle(PlainButtonStyle())
                 }
-                .buttonStyle(PlainButtonStyle())
             }
         }
     }
@@ -554,7 +624,7 @@ struct FriendCard: View {
     // 优先级：有空 > 有未读消息 > 普通
     private var borderColor: Color {
         if friend.isAvailable {
-            return CLIColors.yellow  // 金色皇冠边框
+            return CLIColors.green  // 有空标识
         }
         return unreadCount > 0 ? CLIColors.green : CLIColors.border
     }
@@ -590,13 +660,23 @@ struct FriendCard: View {
 
             // 内容区域
             VStack(spacing: 4) {
-                if friend.useGif, let gifUrlStr = friend.gifUrl, let gifUrl = URL(string: gifUrlStr) {
+                if friend.needsSchedule {
+                    // 无状态：显示 +状态 按钮
+                    Text("➕")
+                        .font(.system(size: 28))
+                        .frame(width: 48, height: 48)
+                } else if friend.useGif, let gifUrlStr = friend.gifUrl, let gifUrl = URL(string: gifUrlStr) {
                     GifImageView(url: gifUrl)
-                        .frame(width: 40, height: 40)
+                        .frame(width: 48, height: 48)
                         .cornerRadius(6)
                 } else {
-                    Text(friend.emoji)
-                        .font(.system(size: 32))
+                    let emoji = String(friend.emoji.prefix(2))
+                    let size: CGFloat = emoji.count <= 1 ? 36 : 24
+                    Text(emoji)
+                        .font(.system(size: size))
+                        .minimumScaleFactor(0.5)
+                        .lineLimit(1)
+                        .frame(width: 48, height: 48)
                 }
 
                 Text(friend.nickname)
@@ -605,16 +685,27 @@ struct FriendCard: View {
                     .foregroundColor(CLIColors.textPrimary)
                     .lineLimit(1)
 
-                Text(friend.status)
-                    .font(.cliCaptionSmall)
-                    .foregroundColor(CLIColors.textSecondary)
-                    .lineLimit(1)
-
-                // 显示城市（如果有），否则不显示
-                if let city = friend.city, !city.isEmpty {
-                    Text(city)
+                if friend.needsSchedule {
+                    Text("+状态")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(CLIColors.green)
+                        .lineLimit(1)
+                } else {
+                    Text(friend.status)
                         .font(.cliCaptionSmall)
-                        .foregroundColor(CLIColors.textWeak)
+                        .foregroundColor(CLIColors.textSecondary)
+                        .lineLimit(1)
+                }
+
+                // 显示城市（如果有），无城市时用空占位保持等高
+                if let city = friend.city, !city.isEmpty {
+                    Text(friend.isVisiting ? "📍来访·\(city)" : city)
+                        .font(.cliCaptionSmall)
+                        .foregroundColor(friend.isVisiting ? CLIColors.yellow : CLIColors.textWeak)
+                        .lineLimit(1)
+                } else {
+                    Text(" ")
+                        .font(.cliCaptionSmall)
                 }
             }
             .padding(.vertical, 8)
@@ -630,13 +721,7 @@ struct FriendCard: View {
                 ? CLIColors.backgroundHighlight  // 有空时背景微亮
                 : CLIColors.backgroundSecondary
         )
-        // 有空时添加光晕效果
-        .shadow(
-            color: friend.isAvailable ? CLIColors.yellow.opacity(0.4) : .clear,
-            radius: friend.isAvailable ? 8 : 0,
-            x: 0,
-            y: 0
-        )
+        .cornerRadius(4)
     }
 }
 

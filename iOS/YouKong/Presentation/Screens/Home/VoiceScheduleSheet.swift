@@ -29,6 +29,17 @@ struct VoiceScheduleSheet: View {
 
                         // 消息列表
                         ForEach(viewModel.messages) { message in
+                            let confirmText: String = {
+                                if viewModel.pendingInvite != nil {
+                                    return "✓ 发送邀请"
+                                } else if viewModel.pendingMessage != nil {
+                                    return "✓ 发送消息"
+                                } else if viewModel.pendingDeletion != nil {
+                                    return "✓ 确认删除"
+                                } else {
+                                    return "✓ 确认保存"
+                                }
+                            }()
                             MessageBubble(
                                 message: message,
                                 onConfirm: {
@@ -37,30 +48,21 @@ struct VoiceScheduleSheet: View {
                                     }
                                 },
                                 onCancel: {
-                                    Task {
-                                        await viewModel.cancelSession()
-                                    }
-                                }
+                                    viewModel.cancelPending()
+                                },
+                                confirmButtonText: confirmText
                             )
                             .id(message.id)
                         }
 
-                        // 处理中状态 - 显示进度反馈
-                        // 只在首次对话（没有历史消息）时显示详细进度，后续只显示简单的处理中
-                        if viewModel.state == .processing || !viewModel.progressItems.isEmpty {
-                            if viewModel.messages.isEmpty {
-                                // 首次对话：显示详细进度步骤
-                                ProgressFeedbackView(
-                                    progressItems: viewModel.progressItems,
-                                    isProcessing: viewModel.state == .processing,
-                                    processingStatus: viewModel.processingStatus
-                                )
-                                .id("progressFeedback")
-                            } else {
-                                // 后续对话：只显示简单的处理中
-                                SimpleProcessingView(isProcessing: viewModel.state == .processing)
-                                    .id("progressFeedback")
-                            }
+                        // 处理中状态 - 始终显示详细进度反馈
+                        if viewModel.state == .processing || viewModel.state == .confirming || !viewModel.progressItems.isEmpty {
+                            ProgressFeedbackView(
+                                progressItems: viewModel.progressItems,
+                                isProcessing: viewModel.state == .processing || viewModel.state == .confirming,
+                                processingStatus: viewModel.processingStatus
+                            )
+                            .id("progressFeedback")
                         }
 
                         // 可见性选择
@@ -241,13 +243,23 @@ struct VoiceScheduleSheet: View {
 
     // MARK: - Approval Buttons
 
+    private var approvalButtonText: String {
+        if viewModel.pendingInvite != nil {
+            return "✓ 发送邀请"
+        } else if viewModel.pendingMessage != nil {
+            return "✓ 发送消息"
+        } else if viewModel.pendingDeletion != nil {
+            return "✓ 确认删除"
+        } else {
+            return "✓ 确认保存"
+        }
+    }
+
     private var approvalButtons: some View {
         HStack(spacing: 12) {
             // 取消按钮
             Button {
-                Task {
-                    await viewModel.cancelSession()
-                }
+                viewModel.cancelPending()
             } label: {
                 Text("取消")
                     .font(.cliBody)
@@ -267,7 +279,7 @@ struct VoiceScheduleSheet: View {
                     await viewModel.confirmSchedule()
                 }
             } label: {
-                Text("✓ 确认保存")
+                Text(approvalButtonText)
                     .font(.cliBody)
                     .foregroundColor(CLIColors.background)
                     .frame(maxWidth: .infinity)
@@ -285,9 +297,7 @@ struct VoiceScheduleSheet: View {
         HStack(spacing: 12) {
             // 取消按钮
             Button {
-                Task {
-                    await viewModel.cancelSession()
-                }
+                viewModel.cancelPending()
             } label: {
                 Text("取消")
                     .font(.cliBody)
@@ -346,6 +356,7 @@ struct ChatMessage: Identifiable, Equatable {
     var questions: [ClarifyQuestion]?
     var reasoning: [String]?
     var isQuery: Bool = false  // 是否为查询模式（查询已有时刻表不显示确认按钮）
+    var awaitingAction: Bool = false  // 是否需要内联确认按钮（邀请/消息/删除预览）
 
     enum MessageType {
         case user          // 用户语音转文字
@@ -365,8 +376,10 @@ struct ChatMessage: Identifiable, Equatable {
 
 struct MessageBubble: View {
     let message: ChatMessage
+    var voiceState: VoiceScheduleState = .idle
     var onConfirm: (() -> Void)? = nil
     var onCancel: (() -> Void)? = nil
+    var confirmButtonText: String = "✓ 确认保存"
 
     var body: some View {
         HStack {
@@ -401,14 +414,53 @@ struct MessageBubble: View {
                 .background(CLIColors.green)
 
         case .aiText, .aiThinking:
-            Text(message.content)
-                .font(.cliBody)
-                .foregroundColor(CLIColors.textPrimary)
-                .padding(12)
-                .background(CLIColors.backgroundSecondary)
-                .overlay(
+            VStack(alignment: .leading, spacing: 0) {
+                Text(message.content)
+                    .font(.cliBody)
+                    .foregroundColor(CLIColors.textPrimary)
+                    .padding(12)
+
+                // 内联确认按钮（邀请/消息/删除预览）
+                if message.awaitingAction && (onConfirm != nil || onCancel != nil) {
                     Rectangle()
-                        .stroke(CLIColors.border, lineWidth: 1)
+                        .fill(CLIColors.border)
+                        .frame(height: 1)
+
+                    HStack(spacing: 12) {
+                        Button {
+                            onCancel?()
+                        } label: {
+                            Text("取消")
+                                .font(.cliCaption)
+                                .foregroundColor(CLIColors.textSecondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .overlay(
+                                    Rectangle()
+                                        .stroke(CLIColors.border, lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            onConfirm?()
+                        } label: {
+                            Text(confirmButtonText)
+                                .font(.cliCaption)
+                                .foregroundColor(CLIColors.background)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(CLIColors.green)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(12)
+                }
+            }
+            .background(CLIColors.backgroundSecondary)
+            .overlay(
+                Rectangle()
+                    .stroke(CLIColors.border, lineWidth: 1)
                 )
 
         case .aiSchedule:
@@ -416,9 +468,11 @@ struct MessageBubble: View {
                 SchedulePreview(
                     schedule: schedule,
                     reasoning: message.reasoning ?? [],
-                    isQuery: message.isQuery,  // 传递查询模式标识
+                    isQuery: message.isQuery,
+                    voiceState: voiceState,
                     onConfirm: onConfirm,
-                    onCancel: onCancel
+                    onCancel: onCancel,
+                    confirmButtonText: confirmButtonText
                 )
             } else {
                 Text(message.content)
@@ -457,11 +511,17 @@ struct MessageBubble: View {
 struct SchedulePreview: View {
     let schedule: [ScheduleItem]
     var reasoning: [String] = []
-    var isQuery: Bool = false  // 是否为查询模式（查询已有时刻表不显示确认按钮）
+    var isQuery: Bool = false
+    var voiceState: VoiceScheduleState = .idle
     var onConfirm: (() -> Void)? = nil
     var onCancel: (() -> Void)? = nil
+    var confirmButtonText: String = "✓ 确认保存"
     @State private var showReasoning = false
-    @State private var showConfirmOptions = false
+    @State private var actionTaken: ActionType? = nil
+
+    enum ActionType {
+        case confirming, confirmed, cancelled
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -531,72 +591,76 @@ struct SchedulePreview: View {
             }
 
             // 操作区域（仅在非查询模式显示）
-            if !isQuery {
+            if !isQuery && (onConfirm != nil || onCancel != nil) {
                 Rectangle()
                     .fill(CLIColors.border)
                     .frame(height: 1)
                     .padding(.vertical, 4)
 
-                if showConfirmOptions {
-                    // 展开确认选项
-                    VStack(spacing: 8) {
-                        HStack(spacing: 12) {
-                            Button {
-                                onCancel?()
-                            } label: {
-                                Text("放弃")
-                                    .font(.cliCaption)
-                                    .foregroundColor(CLIColors.textSecondary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
-                                    .overlay(
-                                        Rectangle()
-                                            .stroke(CLIColors.border, lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-
-                            Button {
-                                onConfirm?()
-                            } label: {
-                                Text("✓ 确认执行")
-                                    .font(.cliCaption)
-                                    .foregroundColor(CLIColors.background)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
-                                    .background(CLIColors.green)
-                            }
-                            .buttonStyle(.plain)
-                        }
-
-                        Button {
-                            withAnimation { showConfirmOptions = false }
-                        } label: {
-                            Text("继续修改")
-                                .font(.cliCaption)
-                                .foregroundColor(CLIColors.textWeak)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-                } else {
-                    // 折叠状态：显示提示
-                    HStack {
-                        Text("继续说话修改")
+                if actionTaken == .confirmed || voiceState == .completed {
+                    // 已确认
+                    Text("✓ 已保存")
+                        .font(.cliCaption)
+                        .foregroundColor(CLIColors.green)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                } else if actionTaken == .confirming || voiceState == .confirming {
+                    // 确认中
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                            .tint(CLIColors.green)
+                        Text("确认中...")
                             .font(.cliCaption)
-                            .foregroundColor(CLIColors.textWeak)
-
-                        Spacer()
+                            .foregroundColor(CLIColors.textSecondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                } else if actionTaken == .cancelled {
+                    // 已放弃
+                    Text("已放弃")
+                        .font(.cliCaption)
+                        .foregroundColor(CLIColors.textWeak)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                } else {
+                    // 待操作
+                    HStack(spacing: 12) {
+                        Button {
+                            actionTaken = .cancelled
+                            onCancel?()
+                        } label: {
+                            Text("放弃")
+                                .font(.cliCaption)
+                                .foregroundColor(CLIColors.textSecondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .overlay(
+                                    Rectangle()
+                                        .stroke(CLIColors.border, lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
 
                         Button {
-                            withAnimation { showConfirmOptions = true }
+                            actionTaken = .confirming
+                            onConfirm?()
                         } label: {
-                            Text("[满意了？确认]")
+                            Text(confirmButtonText)
                                 .font(.cliCaption)
-                                .foregroundColor(CLIColors.green)
+                                .foregroundColor(CLIColors.background)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(CLIColors.green)
                         }
                         .buttonStyle(.plain)
                     }
+
+                    Text("继续按住首页按钮说话可修改")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(CLIColors.textWeak)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 4)
                 }
             }
         }

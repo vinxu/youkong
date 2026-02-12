@@ -229,7 +229,14 @@ struct PosterShareView: View {
             emoji: "💼",
             status: "在工作",
             updatedAt: "2026-02-01T10:00:00Z",
-            relativeTime: "1小时前"
+            relativeTime: "1小时前",
+            city: nil,
+            isAvailable: false,
+            isVisiting: false,
+            gifUrl: nil,
+            giphyQuery: nil,
+            useGif: false,
+            needsSchedule: false
         )
     ])
 }

@@ -1337,14 +1337,17 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 	// 计算当前时段
 	startTime, endTime := getCurrentTimeSlot(now)
 
-	// 添加或更新当前时段
+	// 添加或更新当前时段（匹配 startTime 相同或时间段重叠的 item）
 	found := false
 	for i, item := range schedule.Items {
-		if item.StartTime == startTime {
+		if item.StartTime == startTime || s.isTimeOverlap(item.StartTime, item.EndTime, startTime, endTime) {
+			schedule.Items[i].StartTime = startTime
+			schedule.Items[i].EndTime = endTime
 			schedule.Items[i].Emoji = emoji
 			schedule.Items[i].Status = status
 			schedule.Items[i].Highlight = highlight
 			schedule.Items[i].Executed = false // 重置 executed 状态
+			schedule.Items[i].IsAIGuess = false
 			found = true
 			break
 		}

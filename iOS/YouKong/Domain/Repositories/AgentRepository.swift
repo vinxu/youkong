@@ -24,11 +24,35 @@ protocol AgentRepositoryProtocol {
     /// 获取我的状态时刻表历史（分页）
     func getMyScheduleHistory(limit: Int, beforeDate: String?) async throws -> MyScheduleHistoryResponse
 
+    /// 更新时刻表条目（emoji + 状态文字 + 高亮）
+    func updateScheduleItem(date: String, oldStartTime: String, oldEndTime: String, newStartTime: String, newEndTime: String, emoji: String, status: String, highlight: Bool?, remindBefore: Int?) async throws
+
+    /// 删除时刻表条目
+    func deleteScheduleItem(date: String, startTime: String, endTime: String) async throws
+
     /// 获取用户设置
     func getUserSettings() async throws -> UserSettingsResponse
 
     /// 更新用户设置
     func updateUserSettings(request: UserSettingsRequest) async throws -> UserSettingsResponse
+
+    /// AI 推断当下状态（V1 同步版）
+    func inferStatus(sensorData: StatusReportRequest) async throws -> CurrentStatusInference
+
+    /// AI 推断当下状态（V2 同步版）
+    func inferStatusV2(sensorData: StatusReportRequest) async throws -> CurrentStatusInference
+
+    /// AI 推断 V3 用户选择
+    func inferStatusV3Respond(sessionId: String, selectedIndex: Int) async throws -> InferenceResponse
+
+    /// 提交状态反馈（用户修正）
+    func submitStatusFeedback(request: StatusFeedbackRequest) async throws
+
+    /// 获取 COS STS 临时上传凭证
+    func getSTSCredentials() async throws -> STSResponse
+
+    /// 获取好友的时刻表（只含当前和未来条目）
+    func getUserSchedule(userId: String) async throws -> MyScheduleHistoryResponse
 }
 
 // MARK: - Status Report Request (按 API 规范分组)
@@ -264,16 +288,28 @@ struct ScheduleItem: Codable, Identifiable, Equatable {
     let status: String
     var executed: Bool?
     var isAIGuess: Bool?
+    let gifUrl: String?
+    let giphyQuery: String?
+    var highlight: Bool?
+    var bookingId: String?
+    var withUsers: String?
+    var remindBefore: Int?
 
     var id: String { "\(startTime)_\(endTime)_\(emoji)" }
 
-    init(startTime: String, endTime: String, emoji: String, status: String, executed: Bool? = nil, isAIGuess: Bool? = nil) {
+    init(startTime: String, endTime: String, emoji: String, status: String, executed: Bool? = nil, isAIGuess: Bool? = nil, gifUrl: String? = nil, giphyQuery: String? = nil, highlight: Bool? = nil, bookingId: String? = nil, withUsers: String? = nil, remindBefore: Int? = nil) {
         self.startTime = startTime
         self.endTime = endTime
         self.emoji = emoji
         self.status = status
         self.executed = executed
         self.isAIGuess = isAIGuess
+        self.gifUrl = gifUrl
+        self.giphyQuery = giphyQuery
+        self.highlight = highlight
+        self.bookingId = bookingId
+        self.withUsers = withUsers
+        self.remindBefore = remindBefore
     }
 
     enum CodingKeys: String, CodingKey {
@@ -283,6 +319,12 @@ struct ScheduleItem: Codable, Identifiable, Equatable {
         case status
         case executed
         case isAIGuess = "is_ai_guess"
+        case gifUrl = "gif_url"
+        case giphyQuery = "giphy_query"
+        case highlight
+        case bookingId = "booking_id"
+        case withUsers = "with_users"
+        case remindBefore = "remind_before"
     }
 }
 
@@ -332,12 +374,120 @@ enum VoiceScheduleEventType: String, Codable {
     case confirmed
     case error
 
-    // ========== 多阶段对话状态机事件（新增）==========
-    case phaseChange = "phase_change"        // 阶段转换
-    case intentSummary = "intent_summary"    // 意图理解结果
-    case discussion = "discussion"           // 讨论消息
-    case draftPlan = "draft_plan"            // 计划草案（待审批）
-    case approvalPrompt = "approval_prompt"  // 审批提示
+    // ========== V4 Agent 架构事件 ==========
+    case phase                                       // 处理阶段（understanding, tool_calling, generating）
+    case toolStart = "tool_start"                    // 工具开始执行
+    case toolEnd = "tool_end"                        // 工具执行完成
+    case schedulePreview = "schedule_preview"        // 时刻表预览（待确认）
+    case scheduleSaved = "schedule_saved"            // 时刻表已保存
+    case statusUpdated = "status_updated"            // 当前状态已更新
+    case preferenceUpdated = "preference_updated"    // 偏好设置已更新
+    case chatStream = "chat_stream"                  // 流式文本片段
+    case chatStreamEnd = "chat_stream_end"           // 流式输出结束
+    case friendsResult = "friends_result"            // 好友查询结果
+    case messagePreview = "message_preview"          // 消息预览（待确认）
+    case messageSent = "message_sent"                // 消息已发送
+    case invitePreview = "invite_preview"            // 日程邀请预览（待确认）
+    case inviteSent = "invite_sent"                  // 日程邀请已发送
+    case deletePreview = "delete_preview"            // 删除预览（待确认）
+    case scheduleDeleted = "schedule_deleted"        // 日程已删除
+    case friendRemoved = "friend_removed"            // 好友已删除
+    case inviteResponded = "invite_responded"        // 收到的邀请已响应
+
+    // ========== Legacy 多阶段对话状态机事件 ==========
+    case phaseChange = "phase_change"
+    case intentSummary = "intent_summary"
+    case discussion = "discussion"
+    case draftPlan = "draft_plan"
+    case approvalPrompt = "approval_prompt"
+
+    // 未知类型容错
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+        self = VoiceScheduleEventType(rawValue: rawValue) ?? .unknown
+    }
+}
+
+// ========== V4 Agent 架构模型 ==========
+
+/// V4 好友信息
+struct V4FriendInfo: Codable, Identifiable {
+    let id: String
+    let name: String
+    let avatar: String?
+    let probability: Int           // 有空概率 0-100, -1 无数据
+    let status: String?            // 当前状态描述
+    let emoji: String?             // 状态 emoji
+    let city: String?              // 所在城市
+    let confidence: String         // high/medium/low
+    let availabilityStatus: String? // 有空/忙碌/可能有空
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, avatar, probability, status, emoji, city, confidence
+        case availabilityStatus = "availability_status"
+    }
+}
+
+/// V4 待发送消息
+struct V4PendingMessage: Codable {
+    let friendId: String
+    let friendName: String
+    let message: String
+
+    enum CodingKeys: String, CodingKey {
+        case friendId = "friend_id"
+        case friendName = "friend_name"
+        case message
+    }
+}
+
+/// V4 待发送日程邀请
+struct V4PendingInvite: Codable {
+    let friendId: String
+    let friendName: String
+    let date: String            // YYYY-MM-DD
+    let startTime: String       // HH:MM
+    let endTime: String         // HH:MM
+    let activity: String
+    let location: String?
+    let message: String?
+    let friendIds: [String]?
+    let friendNames: [String]?
+    let bookingId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case friendId = "friend_id"
+        case friendName = "friend_name"
+        case date
+        case startTime = "start_time"
+        case endTime = "end_time"
+        case activity, location, message
+        case friendIds = "friend_ids"
+        case friendNames = "friend_names"
+        case bookingId = "booking_id"
+    }
+}
+
+/// V4 待确认的删除操作
+struct V4PendingDeletion: Codable {
+    let type: String               // "schedule" | "friend"
+    let date: String?
+    let target: String?
+    let deletedItems: [ScheduleItem]?
+    let remainingItems: [ScheduleItem]?
+    let friendId: String?
+    let friendName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type, date, target
+        case deletedItems = "deleted_items"
+        case remainingItems = "remaining_items"
+        case friendId = "friend_id"
+        case friendName = "friend_name"
+    }
 }
 
 /// 对话阶段
@@ -440,13 +590,29 @@ struct VoiceScheduleEvent: Codable {
     // 查询模式标识（查询已有时刻表时为 true，不显示确认按钮）
     let isQuery: Bool?
 
-    // ========== 多阶段对话状态机字段（新增）==========
-    let phase: ConversationPhase?           // 当前阶段
-    let previousPhase: ConversationPhase?   // 上一阶段
-    let intentSummary: IntentSummary?       // 意图摘要
-    let draftPlan: DraftPlan?               // 计划草案
-    let clarifications: [ClarificationItem]? // 待澄清项
-    let canApprove: Bool?                   // 是否可以审批
+    // ========== V4 Agent 架构字段 ==========
+    let v4Phase: String?                     // 阶段名称（understanding, tool_calling, generating）
+    let toolName: String?                    // 工具名称（tool_start/tool_end）
+    let loop: Int?                           // 当前循环次数
+    let date: String?                        // 日期 YYYY-MM-DD
+    let friends: [V4FriendInfo]?             // 好友列表
+    let total: Int?                          // 好友总数
+    let filterApplied: String?               // 筛选条件描述
+    let pendingMessage: V4PendingMessage?    // 待发送消息
+    let pendingInvite: V4PendingInvite?      // 待发送邀请
+    let pendingDeletion: V4PendingDeletion?  // 待确认删除预览
+    let deletedCount: Int?                   // 已删除条目数
+    let messageId: String?                   // 已发送消息 ID
+    let sentTo: String?                      // 发送给谁
+    let awaitingConfirm: Bool?               // 是否等待确认
+
+    // ========== Legacy 多阶段对话字段 ==========
+    let legacyPhase: ConversationPhase?      // 旧阶段（兼容）
+    let previousPhase: ConversationPhase?
+    let intentSummary: IntentSummary?
+    let draftPlan: DraftPlan?
+    let clarifications: [ClarificationItem]?
+    let canApprove: Bool?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -466,7 +632,23 @@ struct VoiceScheduleEvent: Codable {
         case visibility
         case circles
         case isQuery = "is_query"
-        case phase
+        // V4 字段
+        case v4Phase = "phase"
+        case toolName = "tool_name"
+        case loop
+        case date
+        case friends
+        case total
+        case filterApplied = "filter_applied"
+        case pendingMessage = "pending_message"
+        case pendingInvite = "pending_invite"
+        case pendingDeletion = "pending_deletion"
+        case deletedCount = "deleted_count"
+        case messageId = "message_id"
+        case sentTo = "sent_to"
+        case awaitingConfirm = "awaiting_confirm"
+        // Legacy 字段
+        case legacyPhase = "legacy_phase"
         case previousPhase = "previous_phase"
         case intentSummary = "intent_summary"
         case draftPlan = "draft_plan"
@@ -651,7 +833,7 @@ struct DaySchedule: Codable, Identifiable {
 struct ScheduleGroup: Identifiable {
     let date: String
     let displayDate: String
-    let items: [ScheduleItem]
+    var items: [ScheduleItem]
     let status: String
     let isCurrentOrFuture: Bool
 
@@ -660,7 +842,7 @@ struct ScheduleGroup: Identifiable {
     init(from daySchedule: DaySchedule) {
         self.date = daySchedule.scheduleDate
         self.displayDate = daySchedule.displayDate
-        self.items = daySchedule.items
+        self.items = daySchedule.items.sorted { $0.startTime < $1.startTime }
         self.status = daySchedule.status
         self.isCurrentOrFuture = daySchedule.isCurrentOrFuture
     }
@@ -671,17 +853,266 @@ struct ScheduleGroup: Identifiable {
 /// 用户设置请求
 struct UserSettingsRequest: Encodable {
     let autoPredictEnabled: Bool?
+    let showCity: Bool?
+
+    init(autoPredictEnabled: Bool? = nil, showCity: Bool? = nil) {
+        self.autoPredictEnabled = autoPredictEnabled
+        self.showCity = showCity
+    }
 
     enum CodingKeys: String, CodingKey {
         case autoPredictEnabled = "auto_predict_enabled"
+        case showCity = "show_city"
     }
 }
 
 /// 用户设置响应
 struct UserSettingsResponse: Codable {
     let autoPredictEnabled: Bool
+    let showCity: Bool
+    let aiReady: Bool?
+    let aiReadyReasons: [String]?
+    let aiReadyDetails: AIReadyDetails?
 
     enum CodingKeys: String, CodingKey {
         case autoPredictEnabled = "auto_predict_enabled"
+        case showCity = "show_city"
+        case aiReady = "ai_ready"
+        case aiReadyReasons = "ai_ready_reasons"
+        case aiReadyDetails = "ai_ready_details"
+    }
+}
+
+/// AI 就绪详情
+struct AIReadyDetails: Codable {
+    var permLocation: Bool      // 位置权限（本地覆盖）
+    var permMotion: Bool        // 运动数据权限（本地覆盖）
+    var permCalendar: Bool      // 日历权限（本地覆盖）
+    let hasInvitedFriend: Bool  // 已邀请好友
+    let hasVoiceSchedule: Bool  // 已通过语音建立行程
+
+    enum CodingKeys: String, CodingKey {
+        case permLocation = "perm_location"
+        case permMotion = "perm_motion"
+        case permCalendar = "perm_calendar"
+        case hasInvitedFriend = "has_invited_friend"
+        case hasVoiceSchedule = "has_voice_schedule"
+    }
+
+    init(permLocation: Bool = false, permMotion: Bool = false, permCalendar: Bool = false, hasInvitedFriend: Bool = false, hasVoiceSchedule: Bool = false) {
+        self.permLocation = permLocation
+        self.permMotion = permMotion
+        self.permCalendar = permCalendar
+        self.hasInvitedFriend = hasInvitedFriend
+        self.hasVoiceSchedule = hasVoiceSchedule
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // 权限字段后端不返回，默认 false（由客户端本地覆盖）
+        permLocation = (try? container.decode(Bool.self, forKey: .permLocation)) ?? false
+        permMotion = (try? container.decode(Bool.self, forKey: .permMotion)) ?? false
+        permCalendar = (try? container.decode(Bool.self, forKey: .permCalendar)) ?? false
+        hasInvitedFriend = (try? container.decode(Bool.self, forKey: .hasInvitedFriend)) ?? false
+        hasVoiceSchedule = (try? container.decode(Bool.self, forKey: .hasVoiceSchedule)) ?? false
+    }
+}
+
+// MARK: - AI 推断当下状态
+
+/// 当下状态推理结果
+struct CurrentStatusInference: Codable {
+    let emoji: String
+    let activity: String
+    let place: String?
+    let isAvailable: Bool
+    let durationHint: String?
+    let confidence: String
+    let inferredAt: Int64?
+    let reasoning: String?
+    var gifUrl: String?
+    let gifSmallUrl: String?
+    let giphyQuery: String?
+
+    enum CodingKeys: String, CodingKey {
+        case emoji, activity, place
+        case isAvailable = "is_available"
+        case durationHint = "duration_hint"
+        case confidence
+        case inferredAt = "inferred_at"
+        case reasoning
+        case gifUrl = "gif_url"
+        case gifSmallUrl = "gif_small_url"
+        case giphyQuery = "giphy_query"
+    }
+
+    init(emoji: String, activity: String, place: String? = nil, isAvailable: Bool, durationHint: String? = nil, confidence: String, inferredAt: Int64? = nil, reasoning: String? = nil, gifUrl: String? = nil, gifSmallUrl: String? = nil, giphyQuery: String? = nil) {
+        self.emoji = emoji
+        self.activity = activity
+        self.place = place
+        self.isAvailable = isAvailable
+        self.durationHint = durationHint
+        self.confidence = confidence
+        self.inferredAt = inferredAt
+        self.reasoning = reasoning
+        self.gifUrl = gifUrl
+        self.gifSmallUrl = gifSmallUrl
+        self.giphyQuery = giphyQuery
+    }
+}
+
+/// V3 推断选项（信号矛盾时让用户选）
+struct InferenceOption: Codable {
+    let index: Int
+    let emoji: String
+    let activity: String
+    let reason: String?
+}
+
+/// V3 统一推断响应
+struct InferenceResponse: Codable {
+    let phase: String                       // "completed" | "awaiting_choice"
+    let result: CurrentStatusInference?     // phase=completed 时有值
+    let sessionId: String?                  // phase=awaiting_choice 时有值
+    let question: String?                   // phase=awaiting_choice 时有值
+    let options: [InferenceOption]?         // phase=awaiting_choice 时有值
+    let defaultIndex: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case phase, result, question, options
+        case sessionId = "session_id"
+        case defaultIndex = "default_index"
+    }
+}
+
+/// 状态反馈请求（用户修正状态）
+struct StatusFeedbackRequest: Encodable {
+    let originalEmoji: String?
+    let originalActivity: String?
+    let correctedEmoji: String
+    let correctedActivity: String
+    let correctedPlace: String?
+    let correctedIsAvailable: Bool?
+    let gifUrl: String?
+    let giphyQuery: String?
+    let useGif: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case originalEmoji = "original_emoji"
+        case originalActivity = "original_activity"
+        case correctedEmoji = "corrected_emoji"
+        case correctedActivity = "corrected_activity"
+        case correctedPlace = "corrected_place"
+        case correctedIsAvailable = "corrected_is_available"
+        case gifUrl = "gif_url"
+        case giphyQuery = "giphy_query"
+        case useGif = "use_gif"
+    }
+}
+
+/// V2 推断流式事件
+struct InferenceV2StreamEvent: Codable {
+    let type: InferenceV2EventType
+    let message: String?
+    let data: InferenceV2EventData?
+
+    enum CodingKeys: String, CodingKey {
+        case type, message, data
+    }
+
+    // 便捷属性，从 data 中解包
+    var tool: String? { data?.tool }
+    var summary: String? { data?.summary }
+    var content: String? { data?.content }
+    var question: String? { data?.question }
+    var options: [String]? { data?.options }
+    var context: String? { data?.context }
+    var result: CurrentStatusInference? { data?.result }
+    var error: String? { data?.error ?? (type == .error ? message : nil) }
+}
+
+/// V2 推断事件类型
+enum InferenceV2EventType: String, Codable {
+    case phase
+    case toolStart = "tool_start"
+    case toolResult = "tool_result"
+    case thinking
+    case askUser = "ask_user"
+    case result
+    case error
+    case none = ""
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+        self = InferenceV2EventType(rawValue: rawValue) ?? .none
+    }
+}
+
+/// V2 推断事件数据
+struct InferenceV2EventData: Codable {
+    // tool_start
+    let tool: String?
+    // tool_result
+    let summary: String?
+    // thinking
+    let content: String?
+    // ask_user
+    let sessionId: String?
+    let question: String?
+    let options: [String]?
+    let context: String?
+    // result
+    let result: CurrentStatusInference?
+    // error
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case tool, summary, content
+        case sessionId = "session_id"
+        case question, options, context
+        case result, error
+    }
+}
+
+/// V2 用户回答请求
+struct InferenceV2RespondRequest: Encodable {
+    let sessionId: String
+    let answer: String
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId = "session_id"
+        case answer
+    }
+}
+
+// MARK: - STS 临时凭证
+
+/// STS 响应
+struct STSResponse: Codable {
+    let sts: STSCredentials
+}
+
+/// STS 临时凭证
+struct STSCredentials: Codable {
+    let accessKeyId: String
+    let secretAccessKey: String
+    let sessionToken: String
+    let bucket: String
+    let region: String
+    let prefix: String
+}
+
+// MARK: - Data MD5 Extension
+
+import CommonCrypto
+
+extension Data {
+    func md5Hex() -> String {
+        var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
+        self.withUnsafeBytes { bytes in
+            _ = CC_MD5(bytes.baseAddress, CC_LONG(self.count), &digest)
+        }
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }

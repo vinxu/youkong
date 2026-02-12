@@ -9,7 +9,6 @@ class StatusAnalysisViewModel: ObservableObject {
     @Published var analysisResult: AnalysisData?
     @Published var errorMessage: String?
 
-    private let deviceCollector = DeviceStatusCollector.shared
     private let locationCollector = LocationDataCollector.shared
     private let calendarCollector = CalendarDataCollector.shared
     private let movementCollector = MovementDataCollector.shared
@@ -344,7 +343,6 @@ class StatusAnalysisViewModel: ObservableObject {
     // MARK: - Collect Device Data
 
     private func collectDeviceData() async {
-        let deviceStatus = deviceCollector.currentStatus
         let locationStatus = locationCollector.currentStatus
 
         // 位置信息
@@ -352,24 +350,6 @@ class StatusAnalysisViewModel: ObservableObject {
         appendLine("  ├─ 📍 位置: \(placeText)", type: .clue)
         if locationStatus.atPlaceSinceMinutes > 0 {
             appendLine("  │    已停留 \(locationStatus.atPlaceSinceMinutes) 分钟", type: .thinking)
-        }
-
-        // 电池状态
-        let batteryPercent = Int(deviceStatus.batteryLevel * 100)
-        let batteryText = deviceStatus.isCharging ? "\(batteryPercent)% (充电中)" : "\(batteryPercent)%"
-        appendLine("  ├─ 🔋 电量: \(batteryText)", type: .clue)
-
-        // 网络状态
-        appendLine("  ├─ 📶 网络: \(deviceStatus.networkType.rawValue)", type: .clue)
-
-        // 专注模式
-        if deviceStatus.isFocusModeOn {
-            appendLine("  ├─ 🔕 专注模式: 已开启", type: .clue)
-        }
-
-        // 耳机
-        if deviceStatus.isHeadphonesConnected {
-            appendLine("  ├─ 🎧 耳机: 已连接", type: .clue)
         }
 
         // 日历
@@ -409,16 +389,14 @@ class StatusAnalysisViewModel: ObservableObject {
     // MARK: - Build Request
 
     private func buildStatusRequest() -> StatusReportRequest {
-        let deviceStatus = deviceCollector.currentStatus
         let locationStatus = locationCollector.currentStatus
-        let calendarStatus = calendarCollector.isAuthorized ? calendarCollector.currentStatus : nil
-        let movementStatus = movementCollector.isAuthorized ? movementCollector.currentStatus : nil
 
         return StatusReportRequest(
-            screen: nil, // 屏幕数据已移除
+            screen: nil,
             location: LocationRequestData(
                 placeType: locationStatus.placeType.rawValue,
-                atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes
+                atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes,
+                city: locationStatus.city
             ),
             extendedLocation: ExtendedLocationRequestData(
                 placeType: locationStatus.placeType.rawValue,
@@ -427,22 +405,10 @@ class StatusAnalysisViewModel: ObservableObject {
                 latitude: locationStatus.latitude,
                 longitude: locationStatus.longitude
             ),
-            battery: BatteryRequestData(
-                batteryLevel: Int(deviceStatus.batteryLevel * 100),
-                batteryState: deviceStatus.batteryState.rawValue,
-                isCharging: deviceStatus.isCharging
-            ),
-            mode: ModeRequestData(
-                isLowPowerMode: deviceStatus.isLowPowerMode,
-                isFocusModeOn: deviceStatus.isFocusModeOn
-            ),
-            connection: ConnectionRequestData(
-                isHeadphonesConnected: deviceStatus.isHeadphonesConnected,
-                networkType: deviceStatus.networkType.rawValue
-            ),
-            display: DisplayRequestData(
-                screenBrightness: deviceStatus.screenBrightness
-            ),
+            battery: nil,
+            mode: nil,
+            connection: nil,
+            display: nil,
             calendar: calendarCollector.isAuthorized ? CalendarRequestData(
                 hasCurrentEvent: calendarCollector.currentStatus.hasCurrentEvent,
                 currentEventTitle: calendarCollector.currentStatus.currentEventTitle,

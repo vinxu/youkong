@@ -22,6 +22,13 @@ struct FriendGridItem: Codable, Identifiable {
     let status: String
     let updatedAt: String
     let relativeTime: String
+    let city: String?
+    let isAvailable: Bool?
+    let isVisiting: Bool?
+    let gifUrl: String?
+    let giphyQuery: String?
+    let useGif: Bool?
+    let needsSchedule: Bool?
 
     var id: String { userId }
 
@@ -33,5 +40,12 @@ struct FriendGridItem: Codable, Identifiable {
         case status
         case updatedAt = "updated_at"
         case relativeTime = "relative_time"
+        case city
+        case isAvailable = "is_available"
+        case isVisiting = "is_visiting"
+        case gifUrl = "gif_url"
+        case giphyQuery = "giphy_query"
+        case useGif = "use_gif"
+        case needsSchedule = "needs_schedule"
     }
 }

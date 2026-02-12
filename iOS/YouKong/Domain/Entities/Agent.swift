@@ -50,6 +50,7 @@ struct LocationStatus: Codable, Equatable {
     let placeName: String?          // 反向地理编码获取的地点名称
     let latitude: Double?           // 纬度
     let longitude: Double?          // 经度
+    let city: String?               // 城市名称
 
     enum CodingKeys: String, CodingKey {
         case placeType = "place_type"
@@ -57,6 +58,7 @@ struct LocationStatus: Codable, Equatable {
         case placeName = "place_name"
         case latitude
         case longitude
+        case city
     }
 
     static let unknown = LocationStatus(
@@ -64,7 +66,8 @@ struct LocationStatus: Codable, Equatable {
         atPlaceSinceMinutes: 0,
         placeName: nil,
         latitude: nil,
-        longitude: nil
+        longitude: nil,
+        city: nil
     )
 }
 

@@ -5,6 +5,8 @@ import SwiftUI
 struct OnboardingView: View {
     @State private var currentPage = 0
     @Binding var isCompleted: Bool
+    @State private var selectedProfile: ProfileType?
+    @State private var permissionDone = false
 
     var body: some View {
         ZStack {
@@ -18,18 +20,44 @@ struct OnboardingView: View {
                 PrivacyPromiseScreen(currentPage: $currentPage)
                     .tag(2)
 
-                PermissionRequestView(isCompleted: $isCompleted)
+                PermissionRequestView(isCompleted: $permissionDone)
                     .tag(3)
+
+                ProfileSelectionView(
+                    currentPage: $currentPage,
+                    selectedProfile: $selectedProfile,
+                    onNext: {
+                        withAnimation {
+                            currentPage = 5
+                        }
+                    }
+                )
+                .tag(4)
+
+                if let profile = selectedProfile {
+                    StatusSelectionView(
+                        profileType: profile,
+                        isCompleted: $isCompleted
+                    )
+                    .tag(5)
+                }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
             .ignoresSafeArea()
 
             // 自定义页面指示器
-            if currentPage < 3 {
+            if currentPage < 3 || currentPage >= 4 {
                 VStack {
                     Spacer()
-                    PageIndicator(currentPage: currentPage, totalPages: 4)
+                    PageIndicator(currentPage: currentPage, totalPages: 6)
                         .padding(.bottom, 50)
+                }
+            }
+        }
+        .onChange(of: permissionDone) { done in
+            if done {
+                withAnimation {
+                    currentPage = 4
                 }
             }
         }

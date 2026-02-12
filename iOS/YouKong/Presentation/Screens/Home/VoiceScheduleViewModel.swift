@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import EventKit
 
 /// 语音状态时刻表流程状态
 enum VoiceScheduleState: Equatable {
@@ -61,12 +62,29 @@ class VoiceScheduleViewModel: ObservableObject {
     @Published var selectedCircleIDs: Set<String> = []
     @Published var availableCircles: [CircleInfoCompact] = []
 
-    // ========== 多阶段对话状态机（新增）==========
+    // ========== V4 Agent 状态 ==========
+    @Published var v4Phase: String = ""              // 当前处理阶段
+    @Published var currentToolName: String = ""      // 当前执行的工具名
+    @Published var friendsResult: [V4FriendInfo] = [] // 好友查询结果
+    @Published var pendingMessage: V4PendingMessage?  // 待确认消息
+    @Published var pendingInvite: V4PendingInvite?    // 待确认邀请
+    @Published var pendingDeletion: V4PendingDeletion? // 待确认删除
+    @Published var streamingText: String = ""          // 流式文本累积
+
+    // ========== Legacy 多阶段对话状态机 ==========
     @Published var currentPhase: ConversationPhase = .understanding
     @Published var intentSummary: IntentSummary?
     @Published var draftPlan: DraftPlan?
     @Published var clarifications: [ClarificationItem] = []
     @Published var canApprove: Bool = false
+
+    // 覆盖层和录音控制
+    @Published var showOverlay: Bool = false
+
+    /// 是否可以录音（非处理/确认状态时可录音）
+    var canRecord: Bool {
+        state != .processing && state != .confirming
+    }
 
     /// 过程反馈条目
     struct ProgressItem: Identifiable {
@@ -89,6 +107,14 @@ class VoiceScheduleViewModel: ObservableObject {
     private let sseClient = SSEClient()
     private var sessionId: String?
     private var cancellables = Set<AnyCancellable>()
+
+    /// SSE 流专用 Session：15 秒无数据超时，30 秒总限
+    private lazy var sseSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 30
+        return URLSession(configuration: config)
+    }()
 
     // MARK: - Init
 
@@ -182,6 +208,62 @@ class VoiceScheduleViewModel: ObservableObject {
         await processAudio(audioData)
     }
 
+    // MARK: - Text Input
+
+    /// 提交文本输入（走 V4 Agent 流程，跳过语音转文字）
+    func submitText(_ text: String) async {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        guard state != .processing && state != .confirming else { return }
+
+        state = .processing
+        processingStatus = "处理中..."
+        progressItems = []
+
+        do {
+            let endpoint = APIEndpoint.voiceScheduleText(sessionId: sessionId, text: trimmed)
+
+            var urlRequest = try buildSSERequest(for: endpoint)
+            urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+
+            let (bytes, response) = try await sseSession.bytes(for: urlRequest)
+
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200 else {
+                throw SSEError.httpError(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0)
+            }
+
+            for try await line in bytes.lines {
+                guard !line.isEmpty else { continue }
+                if line == "data: [DONE]" { break }
+
+                if let event = parseVoiceScheduleEvent(line) {
+                    handleEvent(event)
+
+                    if let sid = event.sessionId, sessionId == nil {
+                        sessionId = sid
+                    }
+
+                    if event.type == .error || event.type == .statusUpdated ||
+                       event.type == .scheduleSaved || event.type == .confirmed ||
+                       event.type == .messageSent || event.type == .inviteSent ||
+                       event.type == .deletePreview || event.type == .scheduleDeleted ||
+                       event.type == .friendRemoved || event.type == .inviteResponded {
+                        break
+                    }
+                }
+            }
+        } catch {
+            let code = (error as NSError).code
+            if code == NSURLErrorTimedOut {
+                addMessage(.system, content: "处理超时，请重试")
+            } else if code != NSURLErrorCancelled {
+                addMessage(.system, content: "处理失败，请重试")
+            }
+            state = .idle
+        }
+    }
+
     // MARK: - Process Audio
 
     private func processAudio(_ audioData: Data) async {
@@ -192,21 +274,69 @@ class VoiceScheduleViewModel: ObservableObject {
         progressItems = []
 
         do {
-            // 传递 sessionId 以恢复多轮对话上下文（如目标日期）
-            let newSessionId = try await sseClient.streamVoiceSchedule(
-                audioData: audioData,
-                sessionId: sessionId,  // 传递已有的 sessionId
-                onEvent: { [weak self] event in
-                    self?.handleEvent(event)
-                }
-            )
+            let endpoint = APIEndpoint.voiceScheduleStream
 
-            // 保存/更新 session ID
-            if let sid = newSessionId {
-                sessionId = sid
+            // 构建 multipart 请求
+            let boundary = UUID().uuidString
+            var urlRequest = try buildSSERequest(for: endpoint)
+            urlRequest.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+            urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+
+            var body = Data()
+            // 音频文件部分
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"audio\"; filename=\"voice.wav\"\r\n".data(using: .utf8)!)
+            body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+            body.append(audioData)
+            body.append("\r\n".data(using: .utf8)!)
+
+            // session_id 部分（如果有）
+            if let sid = sessionId {
+                body.append("--\(boundary)\r\n".data(using: .utf8)!)
+                body.append("Content-Disposition: form-data; name=\"session_id\"\r\n\r\n".data(using: .utf8)!)
+                body.append(sid.data(using: .utf8)!)
+                body.append("\r\n".data(using: .utf8)!)
+            }
+
+            body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+            urlRequest.httpBody = body
+
+            let (bytes, response) = try await sseSession.bytes(for: urlRequest)
+
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200 else {
+                throw SSEError.httpError(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0)
+            }
+
+            for try await line in bytes.lines {
+                guard !line.isEmpty else { continue }
+                if line == "data: [DONE]" { break }
+
+                if let event = parseVoiceScheduleEvent(line) {
+                    handleEvent(event)
+
+                    // 保存 session ID
+                    if let sid = event.sessionId, sessionId == nil {
+                        sessionId = sid
+                    }
+
+                    // 终态事件后退出 stream（防止 [DONE] 未收到时卡住）
+                    if event.type == .error || event.type == .statusUpdated ||
+                       event.type == .scheduleSaved || event.type == .confirmed ||
+                       event.type == .messageSent || event.type == .inviteSent ||
+                       event.type == .deletePreview || event.type == .scheduleDeleted ||
+                       event.type == .friendRemoved || event.type == .inviteResponded {
+                        break
+                    }
+                }
             }
         } catch {
-            addMessage(.system, content: "处理失败: \(error.localizedDescription)")
+            let code = (error as NSError).code
+            if code == NSURLErrorTimedOut {
+                addMessage(.system, content: "处理超时，请重试")
+            } else if code != NSURLErrorCancelled {
+                addMessage(.system, content: "处理失败，请重试")
+            }
             state = .idle
         }
     }
@@ -234,7 +364,7 @@ class VoiceScheduleViewModel: ObservableObject {
                 progressItems[i].isCompleted = true
             }
 
-            transcript = event.text ?? ""
+            transcript = event.message ?? ""
             processingStatus = "分析中..."
             // 添加用户消息
             if !transcript.isEmpty {
@@ -308,7 +438,10 @@ class VoiceScheduleViewModel: ObservableObject {
             let message = event.message ?? "我在这里，有什么可以帮你的？"
             addMessage(.aiText, content: message)
             progressItems = []  // 清除进度
-            state = .idle  // 保持可对话状态
+            // 不覆盖终态（.completed），避免 chat 事件把已完成的状态冲掉
+            if state != .completed {
+                state = .idle
+            }
 
         case .confirmed:
             addMessage(.system, content: "✓ 已保存！状态将按时刻表自动更新")
@@ -320,17 +453,174 @@ class VoiceScheduleViewModel: ObservableObject {
             state = .idle
             progressItems = []
 
-        // ========== 多阶段对话状态机事件处理（新增）==========
+        // ========== V4 Agent 架构事件处理 ==========
+        case .phase:
+            // V4 处理阶段（understanding, thinking, continuing, complete）
+            v4Phase = event.v4Phase ?? ""
+            processingStatus = event.message ?? "处理中..."
+            print("[VoiceSchedule-V4] phase=\(v4Phase) loop=\(event.loop ?? 0)")
+
+        case .toolStart:
+            // V4 工具开始执行
+            currentToolName = event.toolName ?? ""
+            let toolDesc = event.message ?? "执行 \(currentToolName)..."
+            let item = ProgressItem(action: "tool", message: toolDesc, detail: nil)
+            progressItems.append(item)
+            processingStatus = toolDesc
+
+        case .toolEnd:
+            // V4 工具执行完成
+            if !progressItems.isEmpty {
+                progressItems[progressItems.count - 1].isCompleted = true
+            }
+            currentToolName = ""
+
+        case .schedulePreview:
+            // V4 时刻表预览（替代旧 schedule 事件）
+            if let items = event.items {
+                schedule = items
+                let dateStr = event.date ?? ""
+                let msg = event.message ?? "已生成时刻表预览"
+                addMessage(.aiSchedule, content: msg, schedule: items, reasoning: nil, isQuery: false)
+            }
+            progressItems = []
+            state = .awaitingApproval
+            canApprove = true
+
+        case .scheduleSaved:
+            // V4 时刻表已保存（替代旧 confirmed 事件）
+            if let items = event.items {
+                schedule = items
+                // 为有提醒的 items 创建系统提醒事项
+                let dateStr = event.date ?? todayDateString()
+                scheduleSystemReminders(items: items, date: dateStr)
+            }
+            addMessage(.system, content: "✓ 时刻表已保存！状态将按时刻表自动更新")
+            state = .completed
+
+        case .statusUpdated:
+            // V4 当前状态已更新（替代旧 current_status 事件）
+            let emoji = event.emoji ?? "🤔"
+            let status = event.status ?? "状态已更新"
+            let msg = event.message ?? "\(emoji) \(status)"
+            addMessage(.aiText, content: msg)
+            progressItems = []
+            state = .completed
+
+        case .preferenceUpdated:
+            // V4 偏好设置已更新
+            let msg = event.message ?? "偏好设置已更新"
+            addMessage(.system, content: "✓ \(msg)")
+            progressItems = []
+            state = .idle
+
+        case .chatStream:
+            // V4 流式文本片段
+            if let text = event.message {
+                streamingText += text
+                // 替换最后一条 AI 消息或创建新的
+                if let lastIndex = messages.lastIndex(where: { $0.type == .aiText }) {
+                    var msg = messages[lastIndex]
+                    messages[lastIndex] = ChatMessage(
+                        type: .aiText,
+                        content: streamingText,
+                        timestamp: msg.timestamp
+                    )
+                } else {
+                    addMessage(.aiText, content: streamingText)
+                }
+            }
+
+        case .chatStreamEnd:
+            // V4 流式输出结束
+            streamingText = ""
+            progressItems = []
+            state = .idle
+
+        case .friendsResult:
+            // V4 好友查询结果
+            friendsResult = event.friends ?? []
+            let msg = event.message ?? "查询完成"
+            addMessage(.aiText, content: msg)
+            progressItems = []
+            state = .idle
+
+        case .messagePreview:
+            // V4 消息预览（待确认）
+            pendingMessage = event.pendingMessage
+            let msg = event.message ?? "消息预览"
+            addMessage(.aiText, content: msg, awaitingAction: true)
+            progressItems = []
+            state = .awaitingApproval
+            canApprove = true
+
+        case .messageSent:
+            // V4 消息已发送
+            pendingMessage = nil
+            let sentTo = event.sentTo ?? ""
+            let msg = event.message ?? "消息已发送给 \(sentTo)"
+            addMessage(.system, content: "✓ \(msg)")
+            state = .idle
+
+        case .invitePreview:
+            // V4 邀请预览（待确认）
+            pendingInvite = event.pendingInvite
+            let msg = event.message ?? "邀请预览"
+            addMessage(.aiText, content: msg, awaitingAction: true)
+            progressItems = []
+            state = .awaitingApproval
+            canApprove = true
+
+        case .inviteSent:
+            // V4 邀请已发送
+            pendingInvite = nil
+            let sentTo = event.sentTo ?? ""
+            let msg = event.message ?? "邀请已发送给 \(sentTo)"
+            addMessage(.system, content: "✓ \(msg)")
+            state = .idle
+
+        case .deletePreview:
+            // V4 删除预览（待确认）
+            pendingDeletion = event.pendingDeletion
+            let msg = event.message ?? "将删除安排，等待确认"
+            addMessage(.aiText, content: msg, awaitingAction: true)
+            progressItems = []
+            state = .awaitingApproval
+            canApprove = true
+
+        case .scheduleDeleted:
+            // V4 日程已删除
+            pendingDeletion = nil
+            if let items = event.items {
+                schedule = items
+            } else {
+                schedule = []
+            }
+            let msg = event.message ?? "已删除"
+            addMessage(.system, content: "✓ \(msg)")
+            state = .completed
+
+        case .friendRemoved:
+            // V4 好友已删除
+            pendingDeletion = nil
+            let msg = event.message ?? "好友已删除"
+            addMessage(.system, content: "✓ \(msg)")
+            state = .completed
+
+        case .inviteResponded:
+            // V4 收到的邀请已响应
+            let msg = event.message ?? "已响应邀请"
+            addMessage(.system, content: "✓ \(msg)")
+            state = .completed
+
+        // ========== Legacy 多阶段对话状态机事件 ==========
         case .phaseChange:
-            // 阶段转换
-            if let phase = event.phase {
+            if let phase = event.legacyPhase {
                 currentPhase = phase
                 processingStatus = event.message ?? "阶段: \(phase.rawValue)"
-                print("[VoiceSchedule] 阶段变更: \(event.previousPhase?.rawValue ?? "nil") -> \(phase.rawValue)")
             }
 
         case .intentSummary:
-            // 意图理解结果
             if let summary = event.intentSummary {
                 intentSummary = summary
                 let activities = summary.activities?.joined(separator: "、") ?? ""
@@ -342,11 +632,9 @@ class VoiceScheduleViewModel: ObservableObject {
             }
 
         case .discussion:
-            // 讨论消息
             let message = event.message ?? "需要确认一些信息"
             if let clarifications = event.clarifications {
                 self.clarifications = clarifications
-                // 转换为旧格式的问题
                 let questions = clarifications.filter { !($0.answered ?? false) }.map { item in
                     ClarifyQuestion(id: item.id, question: item.question, options: [], allowVoice: true)
                 }
@@ -361,7 +649,6 @@ class VoiceScheduleViewModel: ObservableObject {
             state = .discussing
 
         case .draftPlan:
-            // 计划草案（待审批）
             if let plan = event.draftPlan {
                 draftPlan = plan
                 if let scheduleItems = plan.schedule {
@@ -372,8 +659,6 @@ class VoiceScheduleViewModel: ObservableObject {
                 }
                 let summary = plan.summary ?? "已生成时刻表"
                 addMessage(.aiSchedule, content: summary, schedule: plan.schedule, reasoning: plan.reasoning, isQuery: false)
-
-                // 显示变更列表
                 if let changes = plan.changes, !changes.isEmpty {
                     var changesText = "变更：\n"
                     for change in changes {
@@ -387,7 +672,6 @@ class VoiceScheduleViewModel: ObservableObject {
             state = .awaitingApproval
 
         case .approvalPrompt:
-            // 审批提示
             let message = event.message ?? "确认后将保存时刻表"
             canApprove = event.canApprove ?? true
             if let plan = event.draftPlan, let scheduleItems = plan.schedule {
@@ -398,7 +682,7 @@ class VoiceScheduleViewModel: ObservableObject {
             }
             state = .awaitingApproval
 
-        case .none:
+        case .unknown, .none:
             break
         }
     }
@@ -423,13 +707,12 @@ class VoiceScheduleViewModel: ObservableObject {
         await confirmScheduleWithVisibility(visibility: selectedVisibility, circleIDs: Array(selectedCircleIDs))
     }
 
-    /// 带可见性设置的确认
+    /// 带可见性设置的确认（通过 V4 text 端点发送"确认"）
     func confirmScheduleWithVisibility(visibility: ScheduleVisibility, circleIDs: [String]) async {
         guard let sid = sessionId else {
             // 没有 session，直接确认当前状态
             if !schedule.isEmpty {
                 state = .confirming
-                // 模拟确认
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 addMessage(.system, content: "✓ 已保存！")
                 state = .completed
@@ -440,24 +723,13 @@ class VoiceScheduleViewModel: ObservableObject {
         state = .confirming
 
         do {
-            // 构建带可见性的交互数据
-            let interactionData = VoiceScheduleInteractionData(
-                visibility: visibility.rawValue,
-                circleIds: visibility == .circles ? circleIDs : nil
-            )
-
-            let requestBody = VoiceScheduleInteractionRequest(
-                sessionId: sid,
-                action: VoiceScheduleAction.confirm.rawValue,
-                data: interactionData
-            )
-
-            let endpoint = APIEndpoint.voiceScheduleInteraction(request: requestBody)
+            // 通过 V4 text 端点发送"确认"，让 LLM 调用 confirm 工具
+            let endpoint = APIEndpoint.voiceScheduleText(sessionId: sid, text: "确认")
 
             var urlRequest = try buildSSERequest(for: endpoint)
             urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 
-            let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+            let (bytes, response) = try await sseSession.bytes(for: urlRequest)
 
             guard let httpResponse = response as? HTTPURLResponse,
                   httpResponse.statusCode == 200 else {
@@ -474,13 +746,21 @@ class VoiceScheduleViewModel: ObservableObject {
                 if let event = parseVoiceScheduleEvent(line) {
                     handleEvent(event)
 
-                    if event.type == .error || event.type == .confirmed {
+                    if event.type == .error || event.type == .confirmed || event.type == .scheduleSaved
+                        || event.type == .messageSent || event.type == .inviteSent
+                        || event.type == .scheduleDeleted || event.type == .friendRemoved
+                        || event.type == .inviteResponded {
                         break
                     }
                 }
             }
         } catch {
-            addMessage(.system, content: "确认失败: \(error.localizedDescription)")
+            let code = (error as NSError).code
+            if code == NSURLErrorTimedOut {
+                addMessage(.system, content: "处理超时，请重试")
+            } else if code != NSURLErrorCancelled {
+                addMessage(.system, content: "处理失败，请重试")
+            }
             state = .idle
         }
     }
@@ -532,16 +812,39 @@ class VoiceScheduleViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Cancel Pending
+
+    /// 放弃当前待确认操作（预览/草稿），保留对话继续修改
+    func cancelPending() {
+        schedule = []
+        pendingMessage = nil
+        pendingInvite = nil
+        pendingDeletion = nil
+        canApprove = false
+        showVisibilitySelection = false
+        state = .idle
+        addMessage(.system, content: "已放弃，你可以继续说")
+    }
+
     // MARK: - Cancel
 
     func cancelSession() async {
         if let sid = sessionId {
             do {
-                try await sseClient.streamVoiceScheduleInteraction(
+                let requestBody = VoiceScheduleInteractionRequest(
                     sessionId: sid,
-                    action: .cancel,
-                    onEvent: { _ in }
+                    action: VoiceScheduleAction.cancel.rawValue,
+                    data: nil
                 )
+                let endpoint = APIEndpoint.voiceScheduleInteraction(request: requestBody)
+                var urlRequest = try buildSSERequest(for: endpoint)
+                urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+
+                let (bytes, _) = try await sseSession.bytes(for: urlRequest)
+                for try await line in bytes.lines {
+                    guard !line.isEmpty else { continue }
+                    if line == "data: [DONE]" { break }
+                }
             } catch {
                 // 忽略取消错误
             }
@@ -566,7 +869,16 @@ class VoiceScheduleViewModel: ObservableObject {
         selectedVisibility = .allFriends
         selectedCircleIDs = []
 
-        // 多阶段对话状态机重置
+        // V4 Agent 状态重置
+        v4Phase = ""
+        currentToolName = ""
+        friendsResult = []
+        pendingMessage = nil
+        pendingInvite = nil
+        pendingDeletion = nil
+        streamingText = ""
+
+        // Legacy 多阶段对话状态机重置
         currentPhase = .understanding
         intentSummary = nil
         draftPlan = nil
@@ -582,7 +894,8 @@ class VoiceScheduleViewModel: ObservableObject {
         schedule: [ScheduleItem]? = nil,
         questions: [ClarifyQuestion]? = nil,
         reasoning: [String]? = nil,
-        isQuery: Bool = false
+        isQuery: Bool = false,
+        awaitingAction: Bool = false
     ) {
         var message = ChatMessage(
             type: type,
@@ -593,6 +906,89 @@ class VoiceScheduleViewModel: ObservableObject {
             reasoning: reasoning
         )
         message.isQuery = isQuery
+        message.awaitingAction = awaitingAction
         messages.append(message)
+    }
+
+    private func todayDateString() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
+    // MARK: - System Reminders (EKReminder)
+
+    func scheduleSystemReminders(items: [ScheduleItem], date: String) {
+        Self.scheduleReminders(items: items, date: date)
+    }
+
+    static func scheduleReminders(items: [ScheduleItem], date: String) {
+        let reminderItems = items.filter { ($0.remindBefore ?? 0) > 0 }
+        guard !reminderItems.isEmpty else { return }
+
+        let store = EKEventStore()
+
+        let requestAccess: (@escaping (Bool, Error?) -> Void) -> Void = { completion in
+            if #available(iOS 17.0, *) {
+                store.requestFullAccessToReminders(completion: completion)
+            } else {
+                store.requestAccess(to: .reminder, completion: completion)
+            }
+        }
+
+        requestAccess { granted, error in
+            guard granted else {
+                print("[Reminder] 权限未授予: \(error?.localizedDescription ?? "unknown")")
+                return
+            }
+
+            for item in reminderItems {
+                createReminder(store: store, item: item, date: date)
+            }
+        }
+    }
+
+    private static func createReminder(store: EKEventStore, item: ScheduleItem, date: String) {
+        guard let dueDate = parseDateTime(date: date, time: item.startTime) else { return }
+        let remindMinutes = item.remindBefore ?? 15
+
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "\(item.emoji) \(item.status)"
+        reminder.calendar = store.defaultCalendarForNewReminders()
+        reminder.dueDateComponents = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute], from: dueDate
+        )
+        reminder.addAlarm(EKAlarm(relativeOffset: TimeInterval(-remindMinutes * 60)))
+
+        do {
+            try store.save(reminder, commit: true)
+            let key = "reminder_\(date)_\(item.startTime)"
+            UserDefaults.standard.set(reminder.calendarItemIdentifier, forKey: key)
+            print("[Reminder] 已创建: \(item.emoji) \(item.status), 提前\(remindMinutes)分钟")
+        } catch {
+            print("[Reminder] 创建失败: \(error)")
+        }
+    }
+
+    static func removeSystemReminder(date: String, startTime: String) {
+        let key = "reminder_\(date)_\(startTime)"
+        guard let identifier = UserDefaults.standard.string(forKey: key) else { return }
+
+        let store = EKEventStore()
+        if let calendarItem = store.calendarItem(withIdentifier: identifier) as? EKReminder {
+            do {
+                try store.remove(calendarItem, commit: true)
+                print("[Reminder] 已删除: \(date) \(startTime)")
+            } catch {
+                print("[Reminder] 删除失败: \(error)")
+            }
+        }
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+
+    private static func parseDateTime(date: String, time: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter.date(from: "\(date) \(time)")
     }
 }

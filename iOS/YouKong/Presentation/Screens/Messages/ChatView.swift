@@ -10,7 +10,10 @@ struct ChatView: View {
     @State private var keyboardHeight: CGFloat = 0
 
     // 输入框焦点状态
-    @FocusState private var isInputFocused: Bool
+    @State private var isInputFocused: Bool = false
+
+    // 好友行程表弹窗
+    @State private var showFriendSchedule = false
 
     init(partner: UserProfile, conversationId: String? = nil) {
         self.partner = partner
@@ -48,6 +51,11 @@ struct ChatView: View {
                 // 终端风格头部（带返回按钮）
                 chatHeader
 
+                // 查看好友行程表入口条
+                if let p = partner {
+                    friendScheduleBar(name: p.nickname)
+                }
+
                 // 消息列表
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -55,7 +63,11 @@ struct ChatView: View {
                             ForEach(viewModel.messages) { message in
                                 TerminalMessageRow(
                                     message: message,
-                                    isMe: !viewModel.isFromPartner(message)
+                                    isMe: !viewModel.isFromPartner(message),
+                                    respondingBookingId: viewModel.respondingBookingId,
+                                    onRespondBooking: { bookingId, action in
+                                        Task { await viewModel.respondToBooking(bookingId: bookingId, action: action) }
+                                    }
                                 )
                                 .id(message.id)
                             }
@@ -72,7 +84,7 @@ struct ChatView: View {
                         DragGesture(minimumDistance: 0)
                             .onChanged { _ in
                                 // 手指按下立即收起键盘
-                                hideKeyboard()
+                                isInputFocused = false
                             }
                     )
                     .onChange(of: viewModel.messages.count) { _ in
@@ -96,6 +108,7 @@ struct ChatView: View {
         }
         .navigationBarHidden(true)
         .navigationBarBackButtonHidden(true)
+        .background(EnableSwipeBack())
         .task {
             await viewModel.loadMessages()
         }
@@ -131,6 +144,34 @@ struct ChatView: View {
                 }
             }
         }
+        .sheet(isPresented: $showFriendSchedule) {
+            if let p = partner {
+                FriendScheduleView(friendId: p.id, friendName: p.nickname)
+            }
+        }
+    }
+
+    // MARK: - Friend Schedule Bar
+
+    private func friendScheduleBar(name: String) -> some View {
+        Button {
+            showFriendSchedule = true
+        } label: {
+            HStack(spacing: 8) {
+                Text("📅")
+                    .font(.system(size: 14))
+                Text("查看\(name)的行程表")
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundColor(CLIColors.green)
+                Spacer()
+                Text(">")
+                    .font(.system(size: 14, design: .monospaced))
+                    .foregroundColor(.gray)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color(white: 0.12))
+        }
     }
 
     private var terminalInputBar: some View {
@@ -143,28 +184,23 @@ struct ChatView: View {
                     .font(.system(size: 16, design: .monospaced))
                     .foregroundColor(.green)
 
-                // 输入框
-                TextField("输入消息...", text: $viewModel.messageInput)
-                    .font(.system(size: 14, design: .monospaced))
-                    .foregroundColor(.white)
-                    .textFieldStyle(.plain)
-                    .submitLabel(.send)
-                    .focused($isInputFocused)
-                    .onSubmit {
-                        Task {
-                            await viewModel.sendMessage()
-                            // ✅ 发送后保持焦点，不收起键盘
-                            isInputFocused = true
-                        }
+                // 输入框（UIKit wrapper，发送时键盘不收起）
+                NonDismissingTextField(
+                    text: $viewModel.messageInput,
+                    placeholder: "输入消息...",
+                    placeholderColor: .gray,
+                    textColor: .white,
+                    font: .monospacedSystemFont(ofSize: 14, weight: .regular),
+                    isFocused: $isInputFocused,
+                    onSend: { _ in
+                        Task { await viewModel.sendMessage() }
                     }
+                )
+                .frame(height: 24)
 
                 // 发送按钮（ASCII 箭头）
                 Button {
-                    Task {
-                        await viewModel.sendMessage()
-                        // ✅ 发送后保持焦点，不收起键盘
-                        isInputFocused = true
-                    }
+                    Task { await viewModel.sendMessage() }
                 } label: {
                     Text(CLIConstants.rightArrow)
                         .font(.system(size: 20, design: .monospaced))
@@ -292,6 +328,8 @@ struct ChatView: View {
 struct TerminalMessageRow: View {
     let message: Message
     let isMe: Bool
+    var respondingBookingId: String? = nil
+    var onRespondBooking: ((String, String) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -327,6 +365,12 @@ struct TerminalMessageRow: View {
         )
     }
 
+    /// 从 metadata 中安全取 String 值
+    private func metaString(_ key: String) -> String? {
+        guard let meta = message.metadata, let val = meta[key] else { return nil }
+        return val.value as? String
+    }
+
     @ViewBuilder
     private var messageContentView: some View {
         switch message.type {
@@ -349,19 +393,104 @@ struct TerminalMessageRow: View {
             }
 
         case .confirmResponse:
-            if let content = message.content, content == "accepted" {
+            if metaString("action") == "accepted" || (message.content ?? "").contains("接受") {
                 HStack(spacing: 4) {
-                    Text("[ACCEPT]")
+                    Text("[已接受]")
                         .foregroundColor(.green)
-                    Text("已确认见面")
+                    Text(message.content ?? "已确认见面")
                 }
             } else {
                 HStack(spacing: 4) {
-                    Text("[REJECT]")
+                    Text("[已拒绝]")
                         .foregroundColor(.red)
-                    Text("已拒绝")
+                    Text(message.content ?? "已拒绝")
                 }
             }
+
+        case .scheduleInvite:
+            scheduleInviteView
+        }
+    }
+
+    // MARK: - Schedule Invite Card
+
+    @ViewBuilder
+    private var scheduleInviteView: some View {
+        let activity = metaString("activity") ?? "邀约"
+        let date = metaString("date") ?? ""
+        let startTime = metaString("start_time") ?? ""
+        let endTime = metaString("end_time") ?? ""
+        let location = metaString("location")
+        let status = metaString("status") ?? "pending"
+        let bookingId = metaString("booking_id")
+
+        VStack(alignment: .leading, spacing: 6) {
+            // 标题行
+            HStack(spacing: 4) {
+                Text("[INVITE]")
+                    .foregroundColor(.cyan)
+                Text("📅 \(activity)")
+            }
+
+            // 详情
+            VStack(alignment: .leading, spacing: 2) {
+                Text("  日期: \(date)")
+                    .foregroundColor(.gray)
+                Text("  时间: \(startTime)-\(endTime)")
+                    .foregroundColor(.gray)
+                if let loc = location, !loc.isEmpty {
+                    Text("  地点: \(loc)")
+                        .foregroundColor(.gray)
+                }
+            }
+
+            // 状态/操作按钮
+            if status == "pending" && !isMe {
+                // 被邀请方且待响应
+                if let bid = bookingId {
+                    let isResponding = respondingBookingId == bid
+                    HStack(spacing: 12) {
+                        Button {
+                            onRespondBooking?(bid, "accept")
+                        } label: {
+                            Text(isResponding ? "[...]" : "[接受]")
+                                .foregroundColor(.green)
+                        }
+                        .disabled(isResponding)
+
+                        Button {
+                            onRespondBooking?(bid, "decline")
+                        } label: {
+                            Text(isResponding ? "[...]" : "[拒绝]")
+                                .foregroundColor(.red)
+                        }
+                        .disabled(isResponding)
+                    }
+                    .padding(.top, 4)
+                }
+            } else if status == "accepted" {
+                Text("  [已接受]")
+                    .foregroundColor(.green)
+            } else if status == "declined" {
+                Text("  [已拒绝]")
+                    .foregroundColor(.red)
+            }
+        }
+    }
+}
+
+/// Re-enables the interactive swipe-back gesture when navigationBar is hidden.
+private struct EnableSwipeBack: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> UIViewController {
+        EnableSwipeBackVC()
+    }
+    func updateUIViewController(_ vc: UIViewController, context: Context) {}
+
+    class EnableSwipeBackVC: UIViewController {
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            navigationController?.interactivePopGestureRecognizer?.isEnabled = true
+            navigationController?.interactivePopGestureRecognizer?.delegate = nil
         }
     }
 }

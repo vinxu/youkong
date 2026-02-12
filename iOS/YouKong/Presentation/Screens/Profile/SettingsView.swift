@@ -296,7 +296,7 @@ struct SettingsView: View {
         isLoadingSettings = true
         do {
             let settings = try await agentRepository.getUserSettings()
-            showCity = settings.showCity
+            showCity = settings.showCity ?? false
         } catch {
             print("[Settings] Load settings failed: \(error)")
         }
@@ -308,7 +308,7 @@ struct SettingsView: View {
         do {
             let request = UserSettingsRequest(showCity: newValue)
             let response = try await agentRepository.updateUserSettings(request: request)
-            showCity = response.showCity
+            showCity = response.showCity ?? newValue
             print("[Settings] Show city updated: \(showCity)")
         } catch {
             print("[Settings] Update show city failed: \(error)")

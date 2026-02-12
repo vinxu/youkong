@@ -206,6 +206,53 @@ extension APIEndpoint {
         )
     }
 
+    // MARK: - AI Status Inference V2
+
+    /// AI 状态推断 V2（同步版）
+    static func inferStatusV2(request: StatusReportRequest) -> APIEndpoint {
+        return APIEndpoint(
+            path: "/api/v1/agent/infer-status-v2",
+            method: .post,
+            body: request
+        )
+    }
+
+    /// AI 状态推断 V2（SSE 流式版）
+    static func inferStatusV2Stream(request: StatusReportRequest) -> APIEndpoint {
+        return APIEndpoint(
+            path: "/api/v1/agent/infer-status-v2/stream",
+            method: .post,
+            body: request
+        )
+    }
+
+    /// AI 状态推断 V3 用户选择（session_id + selected_index）
+    static func inferStatusV3Respond(sessionId: String, selectedIndex: Int) -> APIEndpoint {
+        struct Body: Encodable {
+            let session_id: String
+            let selected_index: Int
+        }
+        return APIEndpoint(
+            path: "/api/v1/agent/infer-status-v2/respond",
+            method: .post,
+            body: Body(session_id: sessionId, selected_index: selectedIndex)
+        )
+    }
+
+    /// 状态反馈（用户修正）
+    static func submitStatusFeedback(request: StatusFeedbackRequest) -> APIEndpoint {
+        return APIEndpoint(
+            path: "/api/v1/agent/status-feedback",
+            method: .post,
+            body: request
+        )
+    }
+
+    /// 获取 COS STS 临时上传凭证
+    static var stsCredentials: APIEndpoint {
+        APIEndpoint(path: "/api/v1/agent/sts", method: .get)
+    }
+
     // MARK: - Voice Schedule（语音状态时刻表）
 
     /// 语音状态时刻表 SSE 流（首次上传音频）
@@ -214,6 +261,56 @@ extension APIEndpoint {
         APIEndpoint(
             path: "/api/v1/agent/voice-schedule/stream",
             method: .post
+        )
+    }
+
+    // MARK: - Schedule Item Edit（时刻表条目编辑）
+
+    static func updateScheduleItem(
+        date: String,
+        oldStartTime: String, oldEndTime: String,
+        newStartTime: String, newEndTime: String,
+        emoji: String, status: String,
+        highlight: Bool? = nil,
+        remindBefore: Int? = nil
+    ) -> APIEndpoint {
+        struct Body: Encodable {
+            let old_start_time: String
+            let old_end_time: String
+            let new_start_time: String
+            let new_end_time: String
+            let emoji: String
+            let status: String
+            let highlight: Bool?
+            let remind_before: Int?
+        }
+        return APIEndpoint(
+            path: "/api/v1/agent/my-schedule/\(date)/item",
+            method: .put,
+            body: Body(
+                old_start_time: oldStartTime, old_end_time: oldEndTime,
+                new_start_time: newStartTime, new_end_time: newEndTime,
+                emoji: emoji, status: status,
+                highlight: highlight,
+                remind_before: remindBefore
+            )
+        )
+    }
+
+    // MARK: - Schedule Item Delete（时刻表条目删除）
+
+    static func deleteScheduleItem(
+        date: String,
+        startTime: String,
+        endTime: String
+    ) -> APIEndpoint {
+        return APIEndpoint(
+            path: "/api/v1/agent/my-schedule/\(date)/item",
+            method: .delete,
+            queryItems: [
+                URLQueryItem(name: "start_time", value: startTime),
+                URLQueryItem(name: "end_time", value: endTime),
+            ]
         )
     }
 
@@ -234,12 +331,30 @@ extension APIEndpoint {
         )
     }
 
-    /// 语音状态时刻表后续交互
+    static func getUserSchedule(userId: String) -> APIEndpoint {
+        APIEndpoint(path: "/api/v1/agent/user/\(userId)/schedule")
+    }
+
+    /// 语音状态时刻表后续交互（Legacy V3）
     static func voiceScheduleInteraction(request: VoiceScheduleInteractionRequest) -> APIEndpoint {
         APIEndpoint(
             path: "/api/v1/agent/voice-schedule/interact",
             method: .post,
             body: request
+        )
+    }
+
+    /// V4 语音时刻表文本输入（用于确认、补充等交互）
+    static func voiceScheduleText(sessionId: String?, text: String, sensorData: StatusReportRequest? = nil) -> APIEndpoint {
+        struct Body: Encodable {
+            let session_id: String?
+            let text: String
+            let sensor_data: StatusReportRequest?
+        }
+        return APIEndpoint(
+            path: "/api/v1/agent/voice-schedule/text",
+            method: .post,
+            body: Body(session_id: sessionId, text: text, sensor_data: sensorData)
         )
     }
 
@@ -381,6 +496,32 @@ extension APIEndpoint {
             body: request
         )
     }
+
+    // MARK: - Booking（预约）
+
+    /// 接受/拒绝预约邀请
+    static func respondToBooking(bookingId: String, action: String) -> APIEndpoint {
+        APIEndpoint(
+            path: "/api/v1/bookings/\(bookingId)/respond",
+            method: .post,
+            body: ["action": action]
+        )
+    }
+
+    /// 获取我的预约列表
+    static var getBookings: APIEndpoint {
+        APIEndpoint(path: "/api/v1/bookings")
+    }
+
+    /// 获取预约详情
+    static func getBooking(bookingId: String) -> APIEndpoint {
+        APIEndpoint(path: "/api/v1/bookings/\(bookingId)")
+    }
+
+    /// 取消预约
+    static func cancelBooking(bookingId: String) -> APIEndpoint {
+        APIEndpoint(path: "/api/v1/bookings/\(bookingId)", method: .delete)
+    }
 }
 
 // MARK: - Request Types
@@ -401,3 +542,18 @@ struct OnboardingStatusOptionsRequest: Encodable {
 }
 
 extension Dictionary: Encodable where Key == String, Value == String {}
+
+// MARK: - App Version
+
+extension APIEndpoint {
+    static func checkAppVersion(platform: String, currentVersion: String) -> APIEndpoint {
+        .init(
+            path: "/api/v1/app/version",
+            method: .get,
+            queryItems: [
+                URLQueryItem(name: "platform", value: platform),
+                URLQueryItem(name: "current_version", value: currentVersion)
+            ]
+        )
+    }
+}

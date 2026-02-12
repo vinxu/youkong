@@ -4,7 +4,7 @@ import SwiftUI
 struct CLIColors {
     // 背景色
     static let background = Color(hex: "#0D1117")          // 主背景（GitHub Dark）
-    static let backgroundSecondary = Color(hex: "#161B22") // 次背景（卡片/提升）
+    static let backgroundSecondary = Color(hex: "#21262D") // 次背景（卡片/提升）
     static let border = Color(hex: "#30363D")              // 边框/分隔线
 
     // 文本色
@@ -21,6 +21,9 @@ struct CLIColors {
     static let blue = Color(hex: "#58A6FF")                // 信息/链接
     static let purple = Color(hex: "#BC8CFF")              // 特殊
     static let cyan = Color(hex: "#39C5CF")                // 强调
+
+    // 高亮背景（用于有空状态等）
+    static let backgroundHighlight = Color(hex: "#1C2333")  // 微亮背景
 
     // 概率颜色映射（0-100%）
     static func probabilityColor(for probability: Int) -> Color {

@@ -61,6 +61,19 @@ class VoiceRecordingManager: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Audio Session
+
+    /// 预热音频会话，减少录音启动延迟
+    func prepareAudioSession() {
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
+            try audioSession.setActive(true)
+        } catch {
+            print("🎤 [Voice] 预热音频会话失败: \(error)")
+        }
+    }
+
     // MARK: - Recording
 
     /// 开始录音

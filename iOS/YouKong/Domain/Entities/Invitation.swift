@@ -71,4 +71,6 @@ enum FriendshipSource: String, Codable {
     case invitation = "INVITATION"
     case search = "SEARCH"
     case manual = "MANUAL"
+    case contacts = "CONTACTS"
+    case request = "REQUEST"
 }

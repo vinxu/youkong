@@ -48,6 +48,19 @@ final class UnreadMessageManager: ObservableObject {
         NotificationManager.shared.updateBadge(count: totalUnreadCount)
     }
 
+    /// 从会话列表同步未读计数
+    func syncFromConversations(_ conversations: [Conversation]) {
+        var newCounts: [String: Int] = [:]
+        for conversation in conversations {
+            if conversation.unreadCount > 0 {
+                newCounts[conversation.id] = conversation.unreadCount
+            }
+        }
+        unreadCounts = newCounts
+        updateTotalCount()
+        updateAppBadge()
+    }
+
     /// 清除所有未读（退出登录时调用）
     func clearAll() {
         unreadCounts.removeAll()

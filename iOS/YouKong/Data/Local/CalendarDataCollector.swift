@@ -94,6 +94,7 @@ class CalendarDataCollector: ObservableObject {
 
     /// 获取当前日历状态
     func getCurrentStatus() -> CalendarStatus {
+        checkAuthorization()
         guard isAuthorized else {
             return .noPermission
         }

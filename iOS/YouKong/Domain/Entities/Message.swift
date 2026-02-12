@@ -5,6 +5,7 @@ enum MessageType: String, Codable {
     case availabilityCard = "AVAILABILITY_CARD"
     case confirmRequest = "CONFIRM_REQUEST"
     case confirmResponse = "CONFIRM_RESPONSE"
+    case scheduleInvite = "SCHEDULE_INVITE"
 }
 
 struct Message: Codable, Identifiable, Equatable {
@@ -103,4 +104,22 @@ struct AnyCodable: Codable, Equatable {
         default: return false
         }
     }
+}
+
+// MARK: - Booking Response Models
+
+struct BookingRespondResponse: Codable {
+    let booking: BookingInfo?
+    let scheduleUpdated: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case booking
+        case scheduleUpdated = "schedule_updated"
+    }
+}
+
+struct BookingInfo: Codable {
+    let id: String
+    let title: String
+    let status: String
 }

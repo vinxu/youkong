@@ -266,6 +266,89 @@ actor SSEClient {
         }
     }
 
+    // MARK: - Inference V2 Stream
+
+    /// 流式 AI 推断 V2（Agent-based）
+    /// 返回 session ID，用于后续用户确认回答
+    @discardableResult
+    func streamInferenceV2(
+        request: StatusReportRequest,
+        onEvent: @escaping @MainActor (InferenceV2StreamEvent) -> Void
+    ) async throws -> String? {
+        let endpoint = APIEndpoint.inferStatusV2Stream(request: request)
+
+        var urlRequest = try buildRequest(for: endpoint)
+        urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        urlRequest.timeoutInterval = 60 // SSE 推断最长 60 秒
+
+        print("[SSE-V2] Connecting to \(urlRequest.url?.absoluteString ?? "unknown")...")
+
+        let (bytes, response) = try await session.bytes(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SSEError.invalidResponse
+        }
+
+        print("[SSE-V2] HTTP \(httpResponse.statusCode), headers: \(httpResponse.allHeaderFields["Content-Type"] ?? "unknown")")
+
+        guard httpResponse.statusCode == 200 else {
+            throw SSEError.httpError(statusCode: httpResponse.statusCode)
+        }
+
+        var sessionId: String?
+        var lineCount = 0
+
+        print("[SSE-V2] Starting to read lines...")
+        for try await line in bytes.lines {
+            lineCount += 1
+
+            // 跳过心跳注释和空行
+            if line.isEmpty || line.hasPrefix(":") {
+                if lineCount <= 3 {
+                    print("[SSE-V2] Line #\(lineCount): (heartbeat/empty)")
+                }
+                continue
+            }
+
+            guard line.hasPrefix("data: ") else {
+                print("[SSE-V2] Line #\(lineCount): unexpected: \(line.prefix(60))")
+                continue
+            }
+
+            let jsonString = String(line.dropFirst(6))
+
+            // 检测流结束标记
+            if jsonString == "[DONE]" {
+                print("[SSE-V2] Received [DONE]")
+                break
+            }
+
+            guard let data = jsonString.data(using: .utf8) else { continue }
+
+            do {
+                let event = try JSONDecoder().decode(InferenceV2StreamEvent.self, from: data)
+                print("[SSE-V2] Event: \(event.type.rawValue) - \(event.message?.prefix(30) ?? "")")
+
+                // 提取 session_id
+                if let sid = event.data?.sessionId, sessionId == nil {
+                    sessionId = sid
+                }
+                await MainActor.run {
+                    onEvent(event)
+                }
+                // 结束条件
+                if event.type == .result || event.type == .error {
+                    break
+                }
+            } catch {
+                print("[SSE-V2] Parse error: \(error), line: \(jsonString.prefix(80))")
+            }
+        }
+
+        print("[SSE-V2] Finished. Total lines: \(lineCount), sessionId: \(sessionId ?? "nil")")
+        return sessionId
+    }
+
     // MARK: - Private Methods
 
     private func buildRequest(for endpoint: APIEndpoint) throws -> URLRequest {

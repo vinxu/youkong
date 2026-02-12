@@ -11,7 +11,19 @@ class StatusReportManager: ObservableObject {
 
     @Injected(\.agentRepository) private var repository
 
+    /// 最小上报间隔（秒），防止前后台快速切换时频繁上报
+    private let minReportInterval: TimeInterval = 60
+
     private init() {}
+
+    /// 场景切换触发的自动上报（带冷却）
+    func reportIfNeeded() async {
+        if let last = lastReportTime, Date().timeIntervalSince(last) < minReportInterval {
+            print("[STATUS REPORT] Skipped (cooldown \(Int(minReportInterval - Date().timeIntervalSince(last)))s)")
+            return
+        }
+        await reportStatus()
+    }
 
     /// 手动上报状态
     func reportStatus() async {
@@ -35,18 +47,23 @@ class StatusReportManager: ObservableObject {
         // 构建请求
         let screenData: ScreenRequestData? = nil  // 不上报屏幕数据
 
-        let locationData = LocationRequestData(
-            placeType: locationStatus.placeType.rawValue,
-            atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes
-        )
+        let hasLocationPermission = LocationDataCollector.shared.isLocationAuthorized
 
-        let extendedLocationData = ExtendedLocationRequestData(
-            placeType: locationStatus.placeType.rawValue,
-            placeName: locationStatus.placeName,
-            atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes,
-            latitude: locationStatus.latitude,
-            longitude: locationStatus.longitude
-        )
+        let locationData: LocationRequestData? = hasLocationPermission ?
+            LocationRequestData(
+                placeType: locationStatus.placeType.rawValue,
+                atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes,
+                city: locationStatus.city
+            ) : nil
+
+        let extendedLocationData: ExtendedLocationRequestData? = hasLocationPermission ?
+            ExtendedLocationRequestData(
+                placeType: locationStatus.placeType.rawValue,
+                placeName: locationStatus.placeName,
+                atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes,
+                latitude: locationStatus.latitude,
+                longitude: locationStatus.longitude
+            ) : nil
 
         let batteryData = BatteryRequestData(
             batteryLevel: Int(deviceStatus.batteryLevel * 100),

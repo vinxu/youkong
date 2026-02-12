@@ -192,7 +192,7 @@ func main() {
 	conversationService := service.NewConversationService(messageRepo, userRepo, notificationService, wsManager)
 	wechatService := service.NewWechatService(wechatRepo, userRepo, invitationRepo, friendshipRepo, circleRepo, wechatClient, jwtManager)
 	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
-	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo, friendRequestRepo, notificationService)
+	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo, friendRequestRepo)
 	userProfileService := service.NewUserProfileService(userProfileRepo)
 	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, memoryRepo, scheduleRepo, userProfileService, llmClient)
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
@@ -231,8 +231,8 @@ func main() {
 
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
-	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL, messageRepo, userSettingsRepo, scheduleRepo)
-	userHandler.SetAIReadinessDeps(friendshipRepo, redisClient)
+	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL, messageRepo, userSettingsRepo, scheduleRepo, friendshipRepo)
+	userHandler.SetRedisClient(redisClient)
 	circleHandler := handler.NewCircleHandler(circleService)
 	conversationHandler := handler.NewConversationHandler(conversationService)
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
@@ -363,6 +363,9 @@ func main() {
 
 		// 公开邀请接口（无需登录）
 		v1.GET("/invite/:code", invitationHandler.GetInvitationByCode)
+
+		// 版本检查（无需登录）
+		v1.GET("/app/version", userHandler.CheckAppVersion)
 
 		// 需要认证的路由
 		authorized := v1.Group("")

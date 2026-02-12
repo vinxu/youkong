@@ -39,7 +39,10 @@ struct MyScheduleTimelineView: View {
                 .fill(CLIColors.border)
                 .frame(height: 1)
 
-            // Content (no AI predict toggle)
+            // AI Auto-Predict Toggle
+            AutoPredictToggleBar(viewModel: viewModel)
+
+            // Content
             MyScheduleTimelineContent(viewModel: viewModel)
         }
         .background(CLIColors.background)
@@ -172,7 +175,7 @@ struct MyScheduleTimelineContent: View {
             }
             .sheet(isPresented: $viewModel.showEditSheet) {
                 ScheduleEditSheet(viewModel: viewModel)
-                    .presentationDetents([.medium])
+                    .presentationDetents([.large])
             }
             .alert("删除状态", isPresented: $viewModel.showDeleteConfirm) {
                 Button("删除", role: .destructive) {
@@ -213,6 +216,208 @@ struct MyScheduleTimelineContent: View {
             Spacer()
         }
         .padding(.vertical, 16)
+    }
+}
+
+// MARK: - Auto Predict Toggle Bar
+
+struct AutoPredictToggleBar: View {
+    @ObservedObject var viewModel: MyScheduleTimelineViewModel
+    @State private var showReadinessSheet = false
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text("AI 自动推测")
+                            .font(.cliBodySmall)
+                            .foregroundColor(CLIColors.textPrimary)
+
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 12))
+                            .foregroundColor(CLIColors.textWeak)
+                    }
+
+                    Text("根据你的习惯和数据，自动补全空缺状态")
+                        .font(.cliCaptionSmall)
+                        .foregroundColor(CLIColors.textWeak)
+                }
+                .onTapGesture {
+                    showReadinessSheet = true
+                }
+
+                Spacer()
+
+                Toggle("", isOn: Binding(
+                    get: { viewModel.autoPredictEnabled },
+                    set: { newValue in
+                        if !viewModel.aiReady && newValue {
+                            showReadinessSheet = true
+                        } else {
+                            Task { await viewModel.toggleAutoPredict() }
+                        }
+                    }
+                ))
+                .toggleStyle(SwitchToggleStyle(tint: CLIColors.green))
+                .labelsHidden()
+                .disabled(viewModel.isTogglingAutoPredict)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(CLIColors.backgroundSecondary)
+        .sheet(isPresented: $showReadinessSheet) {
+            AIReadinessSheet(viewModel: viewModel)
+        }
+    }
+}
+
+// MARK: - AI Readiness Sheet
+
+struct AIReadinessSheet: View {
+    @ObservedObject var viewModel: MyScheduleTimelineViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var showAddFriend = false
+
+    private var allReady: Bool {
+        viewModel.aiReady
+    }
+
+    var body: some View {
+        NavigationView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("让 AI 了解你和你的朋友，才能更准确地帮你推断后续状态。")
+                    .font(.cliBodySmall)
+                    .foregroundColor(CLIColors.textSecondary)
+                    .padding(.horizontal)
+
+                VStack(alignment: .leading, spacing: 0) {
+                    sectionHeader("数据权限授权")
+
+                    readinessRow(
+                        icon: "location.fill",
+                        title: "位置权限 (LBS)",
+                        ready: viewModel.aiReadyDetails?.permLocation ?? false
+                    ) {
+                        openSystemSettings()
+                    }
+                    readinessRow(
+                        icon: "figure.walk",
+                        title: "运动数据权限",
+                        ready: viewModel.aiReadyDetails?.permMotion ?? false
+                    ) {
+                        openSystemSettings()
+                    }
+                    readinessRow(
+                        icon: "calendar",
+                        title: "日历权限",
+                        ready: viewModel.aiReadyDetails?.permCalendar ?? false
+                    ) {
+                        openSystemSettings()
+                    }
+
+                    Divider().padding(.vertical, 8)
+
+                    sectionHeader("社交")
+
+                    readinessRow(
+                        icon: "person.badge.plus",
+                        title: "邀请一个朋友加入有空",
+                        ready: viewModel.aiReadyDetails?.hasInvitedFriend ?? false
+                    ) {
+                        showAddFriend = true
+                    }
+
+                    Divider().padding(.vertical, 8)
+
+                    sectionHeader("行程")
+
+                    readinessRow(
+                        icon: "mic.fill",
+                        title: "成功建立一次行程",
+                        ready: viewModel.aiReadyDetails?.hasVoiceSchedule ?? false,
+                        action: nil
+                    )
+                }
+                .padding(.horizontal)
+
+                if !allReady {
+                    Text("完成以上条件，即可开启 AI 自动推测")
+                        .font(.cliCaptionSmall)
+                        .foregroundColor(CLIColors.yellow)
+                        .padding(.horizontal)
+                }
+
+                Spacer()
+            }
+            .padding(.top, 16)
+            .background(CLIColors.background)
+            .navigationTitle("AI 自动推测")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") { dismiss() }
+                        .foregroundColor(CLIColors.green)
+                }
+            }
+            .sheet(isPresented: $showAddFriend) {
+                AddFriendSheetView()
+            }
+        }
+    }
+
+    private func openSystemSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url)
+        }
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.cliCaptionSmall)
+            .foregroundColor(CLIColors.textWeak)
+            .textCase(.uppercase)
+            .padding(.bottom, 6)
+    }
+
+    private func readinessRow(icon: String, title: String, ready: Bool, action: (() -> Void)? = nil) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundColor(ready ? CLIColors.green : CLIColors.textWeak)
+                .frame(width: 20)
+
+            Text(title)
+                .font(.cliBodySmall)
+                .foregroundColor(ready ? CLIColors.textPrimary : CLIColors.textSecondary)
+
+            Spacer()
+
+            if ready {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundColor(CLIColors.green)
+            } else if action != nil {
+                Text("去完成")
+                    .font(.cliCaptionSmall)
+                    .foregroundColor(CLIColors.green)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10))
+                    .foregroundColor(CLIColors.textWeak)
+            } else {
+                Image(systemName: "circle")
+                    .font(.system(size: 16))
+                    .foregroundColor(CLIColors.textWeak)
+            }
+        }
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if !ready, let action = action {
+                action()
+            }
+        }
     }
 }
 
@@ -360,7 +565,7 @@ struct ScheduleItemView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(item.isAIGuess == true ? "\(item.status) (AI 推测)" : item.status)
+                    Text(item.isAIGuess == true ? "\(item.status) (AI)" : item.status)
                         .font(.cliBodySmall)
                         .foregroundColor(textColor)
                         .lineLimit(1)
@@ -371,6 +576,11 @@ struct ScheduleItemView: View {
                             .foregroundColor(.cyan)
                             .lineLimit(1)
                     }
+                }
+
+                if (item.remindBefore ?? 0) > 0 {
+                    Text("🔔")
+                        .font(.system(size: 12))
                 }
 
                 Spacer()
@@ -456,6 +666,7 @@ struct ScheduleEditSheet: View {
                 .frame(height: 1)
 
             // Edit form
+            ScrollView {
             VStack(spacing: 20) {
                 // Time adjustment
                 VStack(spacing: 12) {
@@ -643,12 +854,58 @@ struct ScheduleEditSheet: View {
                     )
                 }
 
-                Spacer()
+                // Remind before picker
+                HStack {
+                    Text("> 提醒:")
+                        .font(.cliBodySmall)
+                        .foregroundColor(CLIColors.textSecondary)
+
+                    Spacer()
+
+                    Menu {
+                        Button("不提醒") { viewModel.editRemindBefore = 0 }
+                        Button("5分钟前") { viewModel.editRemindBefore = 5 }
+                        Button("10分钟前") { viewModel.editRemindBefore = 10 }
+                        Button("15分钟前") { viewModel.editRemindBefore = 15 }
+                        Button("30分钟前") { viewModel.editRemindBefore = 30 }
+                        Button("1小时前") { viewModel.editRemindBefore = 60 }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(viewModel.editRemindBefore == 0 ? "不提醒" : remindLabel(viewModel.editRemindBefore))
+                                .font(.cliBodySmall)
+                                .foregroundColor(viewModel.editRemindBefore > 0 ? CLIColors.green : CLIColors.textSecondary)
+                            Text("▼")
+                                .font(.cliCaptionSmall)
+                                .foregroundColor(CLIColors.textWeak)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(CLIColors.backgroundSecondary)
+                        .cornerRadius(4)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(CLIColors.border, lineWidth: 1)
+                        )
+                    }
+                }
+
             }
             .padding(.horizontal, 16)
             .padding(.top, 20)
+            }
         }
         .background(CLIColors.background)
+    }
+
+    private func remindLabel(_ minutes: Int) -> String {
+        switch minutes {
+        case 5: return "5分钟前"
+        case 10: return "10分钟前"
+        case 15: return "15分钟前"
+        case 30: return "30分钟前"
+        case 60: return "1小时前"
+        default: return "\(minutes)分钟前"
+        }
     }
 }
 

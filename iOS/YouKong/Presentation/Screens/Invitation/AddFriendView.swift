@@ -8,8 +8,17 @@ struct AddFriendView: View {
 
     var body: some View {
         AddFriendContentView(viewModel: viewModel)
-            .navigationTitle("添加好友")
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Text("$ add --friend")
+                        .font(.cliHeadline)
+                        .foregroundColor(CLIColors.textPrimary)
+                }
+            }
+            .toolbarBackground(CLIColors.background, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
     }
 }
 
@@ -22,15 +31,24 @@ struct AddFriendSheetView: View {
     var body: some View {
         NavigationStack {
             AddFriendContentView(viewModel: viewModel)
-                .navigationTitle("添加好友")
+                .navigationTitle("")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        Text("$ add --friend")
+                            .font(.cliHeadline)
+                            .foregroundColor(CLIColors.textPrimary)
+                    }
                     ToolbarItem(placement: .topBarLeading) {
                         Button("取消") {
                             dismiss()
                         }
+                        .font(.cliBody)
+                        .foregroundColor(CLIColors.textSecondary)
                     }
                 }
+                .toolbarBackground(CLIColors.background, for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
         }
     }
 }
@@ -42,63 +60,81 @@ struct AddFriendContentView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 24) {
+            VStack(spacing: 20) {
                 // 说明文字
                 VStack(spacing: 8) {
-                    Image(systemName: "person.badge.plus")
-                        .font(.system(size: 48))
-                        .foregroundColor(.primaryGreen)
+                    Text("[+]")
+                        .font(.system(size: 36, weight: .bold, design: .monospaced))
+                        .foregroundColor(CLIColors.green)
 
                     Text("输入好友的手机号码")
-                        .foregroundColor(.secondary)
+                        .font(.cliBody)
+                        .foregroundColor(CLIColors.textSecondary)
                 }
-                .padding(.top, 40)
+                .padding(.top, 32)
 
                 // 手机号输入框
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text("手机号")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+                        .font(.cliCaption)
+                        .foregroundColor(CLIColors.textSecondary)
 
-                    HStack {
-                        Image(systemName: "phone")
-                            .foregroundColor(.secondary)
+                    HStack(spacing: 6) {
+                        Text("$")
+                            .font(.system(size: 14, weight: .medium, design: .monospaced))
+                            .foregroundColor(CLIColors.green)
 
-                        TextField("请输入手机号", text: $viewModel.phoneNumber)
+                        TextField("", text: $viewModel.phoneNumber, prompt: Text("请输入手机号").foregroundColor(CLIColors.textWeak))
+                            .font(.system(size: 14, design: .monospaced))
+                            .foregroundColor(CLIColors.textPrimary)
                             .keyboardType(.phonePad)
                             .textContentType(.telephoneNumber)
                     }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(12)
+                    .padding(12)
+                    .background(CLIColors.backgroundSecondary)
+                    .overlay(
+                        Rectangle()
+                            .stroke(CLIColors.border, lineWidth: 1)
+                    )
                 }
-                .padding(.horizontal)
+                .padding(.horizontal, 16)
 
                 // 验证消息（可选）
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text("验证消息（可选）")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+                        .font(.cliCaption)
+                        .foregroundColor(CLIColors.textSecondary)
 
-                    TextField("我是...", text: $viewModel.message)
-                        .padding()
-                        .background(Color(.systemGray6))
-                        .cornerRadius(12)
+                    HStack(spacing: 6) {
+                        Text(">")
+                            .font(.system(size: 14, weight: .medium, design: .monospaced))
+                            .foregroundColor(CLIColors.textSecondary)
+
+                        TextField("", text: $viewModel.message, prompt: Text("我是...").foregroundColor(CLIColors.textWeak))
+                            .font(.system(size: 14, design: .monospaced))
+                            .foregroundColor(CLIColors.textPrimary)
+                    }
+                    .padding(12)
+                    .background(CLIColors.backgroundSecondary)
+                    .overlay(
+                        Rectangle()
+                            .stroke(CLIColors.border, lineWidth: 1)
+                    )
                 }
-                .padding(.horizontal)
+                .padding(.horizontal, 16)
 
                 // 请求结果
                 if let result = viewModel.requestResult {
                     resultView(result)
-                        .padding(.horizontal)
+                        .padding(.horizontal, 16)
                 }
 
                 // 错误提示
                 if let error = viewModel.errorMessage {
-                    Text(error)
-                        .font(.subheadline)
-                        .foregroundColor(.red)
-                        .padding(.horizontal)
+                    Text("> \(error)")
+                        .font(.cliCaption)
+                        .foregroundColor(CLIColors.red)
+                        .padding(.horizontal, 16)
                 }
 
                 // 发送请求按钮
@@ -107,64 +143,78 @@ struct AddFriendContentView: View {
                         await viewModel.sendRequest()
                     }
                 } label: {
-                    HStack {
+                    HStack(spacing: 6) {
                         if viewModel.isLoading {
                             ProgressView()
                                 .tint(.white)
+                                .scaleEffect(0.8)
                         } else {
-                            Text("发送好友请求")
+                            Text("[发送好友请求]")
+                                .font(.system(size: 14, weight: .medium, design: .monospaced))
                         }
                     }
                     .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(viewModel.isValidPhone ? Color.primaryGreen : Color.gray)
-                    .foregroundColor(.white)
-                    .cornerRadius(12)
+                    .padding(.vertical, 12)
+                    .background(viewModel.isValidPhone ? CLIColors.green : CLIColors.backgroundSecondary)
+                    .foregroundColor(viewModel.isValidPhone ? .white : CLIColors.textWeak)
+                    .overlay(
+                        Rectangle()
+                            .stroke(viewModel.isValidPhone ? Color.clear : CLIColors.border, lineWidth: 1)
+                    )
                 }
                 .disabled(!viewModel.isValidPhone || viewModel.isLoading)
-                .padding()
+                .padding(.horizontal, 16)
             }
+            .padding(.bottom, 20)
         }
+        .background(CLIColors.background)
     }
 
     @ViewBuilder
     private func resultView(_ result: SendFriendRequestResponse) -> some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                if let user = result.user {
-                    Text(CLIConstants.bullet).font(.system(size: 16, design: .monospaced)).foregroundColor(.green).frame(width: 30)
+        HStack(spacing: 12) {
+            if let user = result.user {
+                Text(CLIConstants.bullet)
+                    .font(.cliHeadline)
+                    .foregroundColor(CLIColors.green)
+                    .frame(width: 24)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(user.nickname)
-                            .fontWeight(.medium)
-                        Text(statusText(result.status))
-                            .font(.caption)
-                            .foregroundColor(statusColor(result.status))
-                    }
-                } else {
-                    Image(systemName: "person.slash")
-                        .font(.title)
-                        .foregroundColor(.secondary)
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("未找到用户")
-                            .fontWeight(.medium)
-                        Text(result.message ?? "该手机号未注册")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(user.nickname)
+                        .font(.cliBody)
+                        .foregroundColor(CLIColors.textPrimary)
+                    Text(statusText(result.status))
+                        .font(.cliCaption)
+                        .foregroundColor(statusColor(result.status))
                 }
+            } else {
+                Text("x")
+                    .font(.system(size: 16, weight: .bold, design: .monospaced))
+                    .foregroundColor(CLIColors.textSecondary)
+                    .frame(width: 24)
 
-                Spacer()
-
-                Image(systemName: statusIcon(result.status))
-                    .foregroundColor(statusColor(result.status))
-                    .font(.title2)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("未找到用户")
+                        .font(.cliBody)
+                        .foregroundColor(CLIColors.textPrimary)
+                    Text(result.message ?? "该手机号未注册")
+                        .font(.cliCaption)
+                        .foregroundColor(CLIColors.textSecondary)
+                }
             }
-            .padding()
-            .background(statusColor(result.status).opacity(0.1))
-            .cornerRadius(12)
+
+            Spacer()
+
+            Text(statusBracketText(result.status))
+                .font(.cliCaption)
+                .foregroundColor(statusColor(result.status))
         }
+        .padding(12)
+        .background(CLIColors.backgroundSecondary)
+        .overlay(
+            Rectangle()
+                .stroke(CLIColors.border, lineWidth: 1)
+        )
     }
 
     private func statusText(_ status: FriendRequestStatus) -> String {
@@ -184,27 +234,25 @@ struct AddFriendContentView: View {
         }
     }
 
-    private func statusColor(_ status: FriendRequestStatus) -> Color {
+    private func statusBracketText(_ status: FriendRequestStatus) -> String {
         switch status {
         case .pending, .alreadyRequested:
-            return .orange
-        case .accepted:
-            return .green
-        case .alreadyFriends:
-            return .blue
+            return "[等待中]"
+        case .accepted, .alreadyFriends:
+            return "[已通过]"
         case .rejected, .cancelled:
-            return .red
+            return "[已拒绝]"
         }
     }
 
-    private func statusIcon(_ status: FriendRequestStatus) -> String {
+    private func statusColor(_ status: FriendRequestStatus) -> Color {
         switch status {
         case .pending, .alreadyRequested:
-            return "clock.fill"
+            return CLIColors.yellow
         case .accepted, .alreadyFriends:
-            return "checkmark.circle.fill"
+            return CLIColors.green
         case .rejected, .cancelled:
-            return "xmark.circle.fill"
+            return CLIColors.red
         }
     }
 }
@@ -254,13 +302,17 @@ struct FriendRequestsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Tab 选择器
-            Picker("", selection: $selectedTab) {
-                Text("收到的请求").tag(0)
-                Text("发出的请求").tag(1)
+            // Tab 选择器 (CLI style)
+            HStack(spacing: 8) {
+                tabButton("收到的请求", tag: 0)
+                tabButton("发出的请求", tag: 1)
             }
-            .pickerStyle(.segmented)
-            .padding()
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Rectangle()
+                .fill(CLIColors.border)
+                .frame(height: 1)
 
             // 内容
             TabView(selection: $selectedTab) {
@@ -272,7 +324,18 @@ struct FriendRequestsView: View {
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
         }
-        .navigationTitle("好友请求")
+        .background(CLIColors.background)
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Text("$ friend-requests")
+                    .font(.cliHeadline)
+                    .foregroundColor(CLIColors.textPrimary)
+            }
+        }
+        .toolbarBackground(CLIColors.background, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .refreshable {
             await viewModel.refresh()
         }
@@ -281,28 +344,67 @@ struct FriendRequestsView: View {
         }
     }
 
+    private func tabButton(_ title: String, tag: Int) -> some View {
+        Button {
+            withAnimation { selectedTab = tag }
+        } label: {
+            Text(title)
+                .font(.cliCaption)
+                .foregroundColor(selectedTab == tag ? .white : CLIColors.textSecondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(selectedTab == tag ? CLIColors.green : CLIColors.backgroundSecondary)
+                .overlay(
+                    Rectangle()
+                        .stroke(CLIColors.border, lineWidth: selectedTab == tag ? 0 : 1)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
     private var receivedRequestsTab: some View {
         Group {
             if viewModel.isLoading && viewModel.receivedRequests.isEmpty {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 8) {
+                    HStack(spacing: 4) {
+                        Text("[")
+                            .font(.cliBody)
+                            .foregroundColor(CLIColors.textSecondary)
+                        ProgressView()
+                            .tint(CLIColors.green)
+                            .scaleEffect(0.8)
+                        Text("]")
+                            .font(.cliBody)
+                            .foregroundColor(CLIColors.textSecondary)
+                    }
+                    Text("加载中...")
+                        .font(.cliCaption)
+                        .foregroundColor(CLIColors.textWeak)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if viewModel.receivedRequests.isEmpty {
-                emptyView(
+                cliEmptyView(
                     icon: "tray",
                     title: "没有好友请求",
                     subtitle: "暂时没有人向你发送好友请求"
                 )
             } else {
-                List {
-                    ForEach(viewModel.receivedRequests) { request in
-                        ReceivedRequestRow(request: request) { accept in
-                            Task {
-                                await viewModel.handleRequest(request, accept: accept)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(viewModel.receivedRequests) { request in
+                            ReceivedRequestRow(request: request) { accept in
+                                Task {
+                                    await viewModel.handleRequest(request, accept: accept)
+                                }
                             }
+
+                            Rectangle()
+                                .fill(CLIColors.border)
+                                .frame(height: 1)
+                                .padding(.leading, 40)
                         }
                     }
                 }
-                .listStyle(.plain)
             }
         }
     }
@@ -310,35 +412,44 @@ struct FriendRequestsView: View {
     private var sentRequestsTab: some View {
         Group {
             if viewModel.sentRequests.isEmpty {
-                emptyView(
+                cliEmptyView(
                     icon: "paperplane",
                     title: "没有发出的请求",
                     subtitle: "你还没有发送过好友请求"
                 )
             } else {
-                List {
-                    ForEach(viewModel.sentRequests) { request in
-                        SentRequestRow(request: request)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(viewModel.sentRequests) { request in
+                            SentRequestRow(request: request)
+
+                            Rectangle()
+                                .fill(CLIColors.border)
+                                .frame(height: 1)
+                                .padding(.leading, 40)
+                        }
                     }
                 }
-                .listStyle(.plain)
             }
         }
     }
 
-    private func emptyView(icon: String, title: String, subtitle: String) -> some View {
-        VStack(spacing: 16) {
+    private func cliEmptyView(icon: String, title: String, subtitle: String) -> some View {
+        VStack(spacing: 12) {
             Image(systemName: icon)
-                .font(.system(size: 48))
-                .foregroundColor(.secondary)
+                .font(.system(size: 40))
+                .foregroundColor(CLIColors.textWeak)
+
             Text(title)
-                .font(.headline)
-                .foregroundColor(.secondary)
+                .font(.cliBody)
+                .foregroundColor(CLIColors.textSecondary)
+
             Text(subtitle)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+                .font(.cliCaption)
+                .foregroundColor(CLIColors.textWeak)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.top, 60)
     }
 }
 
@@ -349,73 +460,84 @@ struct ReceivedRequestRow: View {
     let onHandle: (Bool) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                Text(CLIConstants.bullet).font(.system(size: 16, design: .monospaced)).foregroundColor(.green).frame(width: 30)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 0) {
+                Text(CLIConstants.bullet)
+                    .font(.cliHeadline)
+                    .foregroundColor(CLIColors.green)
+                    .frame(width: 30)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(request.user.nickname)
-                        .fontWeight(.medium)
+                        .font(.cliBody)
+                        .foregroundColor(CLIColors.textPrimary)
 
                     if let message = request.message, !message.isEmpty {
-                        Text(message)
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
+                        Text("> \(message)")
+                            .font(.cliCaption)
+                            .foregroundColor(CLIColors.textSecondary)
                             .lineLimit(2)
                     }
 
                     Text(request.createdAt, style: .relative)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                        .font(.cliCaptionSmall)
+                        .foregroundColor(CLIColors.textWeak)
                 }
 
                 Spacer()
             }
 
             if request.status == .pending {
-                HStack(spacing: 12) {
+                HStack(spacing: 8) {
                     Button {
                         onHandle(false)
                     } label: {
-                        Text("拒绝")
-                            .font(.subheadline)
+                        Text("[拒绝]")
+                            .font(.system(size: 13, weight: .medium, design: .monospaced))
+                            .foregroundColor(CLIColors.textSecondary)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
-                            .background(Color(.systemGray5))
-                            .foregroundColor(.primary)
-                            .cornerRadius(8)
+                            .background(CLIColors.backgroundSecondary)
+                            .overlay(
+                                Rectangle()
+                                    .stroke(CLIColors.border, lineWidth: 1)
+                            )
                     }
+                    .buttonStyle(.plain)
 
                     Button {
                         onHandle(true)
                     } label: {
-                        Text("同意")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
+                        Text("[同意]")
+                            .font(.system(size: 13, weight: .medium, design: .monospaced))
+                            .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
-                            .background(Color.primaryGreen)
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
+                            .background(CLIColors.green)
                     }
+                    .buttonStyle(.plain)
                 }
+                .padding(.leading, 30)
             } else {
                 HStack {
                     Text(statusText)
-                        .font(.caption)
+                        .font(.cliCaption)
                         .foregroundColor(statusColor)
                 }
+                .padding(.leading, 30)
             }
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .background(CLIColors.background)
     }
 
     private var statusText: String {
         switch request.status {
         case .accepted:
-            return "已同意"
+            return "[已同意]"
         case .rejected:
-            return "已拒绝"
+            return "[已拒绝]"
         default:
             return ""
         }
@@ -424,11 +546,11 @@ struct ReceivedRequestRow: View {
     private var statusColor: Color {
         switch request.status {
         case .accepted:
-            return .green
+            return CLIColors.green
         case .rejected:
-            return .red
+            return CLIColors.red
         default:
-            return .secondary
+            return CLIColors.textSecondary
         }
     }
 }
@@ -439,48 +561,50 @@ struct SentRequestRow: View {
     let request: FriendRequest
 
     var body: some View {
-        HStack(spacing: 12) {
-            Text(CLIConstants.bullet).font(.system(size: 16, design: .monospaced)).foregroundColor(.green).frame(width: 30)
+        HStack(spacing: 0) {
+            Text(CLIConstants.bullet)
+                .font(.cliHeadline)
+                .foregroundColor(CLIColors.green)
+                .frame(width: 30)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(request.user.nickname)
-                    .fontWeight(.medium)
+                    .font(.cliBody)
+                    .foregroundColor(CLIColors.textPrimary)
 
                 if let message = request.message, !message.isEmpty {
-                    Text(message)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+                    Text("> \(message)")
+                        .font(.cliCaption)
+                        .foregroundColor(CLIColors.textSecondary)
                         .lineLimit(1)
                 }
 
                 Text(request.createdAt, style: .relative)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .font(.cliCaptionSmall)
+                    .foregroundColor(CLIColors.textWeak)
             }
 
             Spacer()
 
             Text(statusText)
-                .font(.caption)
-                .foregroundColor(.white)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(statusColor)
-                .cornerRadius(10)
+                .font(.cliCaption)
+                .foregroundColor(statusColor)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .background(CLIColors.background)
     }
 
     private var statusText: String {
         switch request.status {
         case .pending:
-            return "等待确认"
+            return "[等待确认]"
         case .accepted:
-            return "已通过"
+            return "[已通过]"
         case .rejected:
-            return "已拒绝"
+            return "[已拒绝]"
         case .cancelled:
-            return "已取消"
+            return "[已取消]"
         default:
             return ""
         }
@@ -489,13 +613,13 @@ struct SentRequestRow: View {
     private var statusColor: Color {
         switch request.status {
         case .pending:
-            return .orange
+            return CLIColors.yellow
         case .accepted:
-            return .green
+            return CLIColors.green
         case .rejected, .cancelled:
-            return .red
+            return CLIColors.red
         default:
-            return .secondary
+            return CLIColors.textSecondary
         }
     }
 }
@@ -537,13 +661,10 @@ class FriendRequestsViewModel: ObservableObject {
         receivedRequests.removeAll { $0.id == request.id }
 
         do {
-            let response = try await contactRepository.handleFriendRequest(
+            _ = try await contactRepository.handleFriendRequest(
                 requestId: request.id,
                 accept: accept
             )
-
-            // 显示成功消息（可选，通过 errorMessage 复用）
-            // errorMessage 可以用来显示成功提示
 
             // 刷新列表以确保数据同步
             await loadRequests()

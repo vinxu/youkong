@@ -18,6 +18,7 @@ class LocationDataCollector: NSObject, ObservableObject {
     // 反向地理编码缓存
     private var lastGeocodedLocation: CLLocation?
     private var lastGeocodedPlaceName: String?
+    private var lastGeocodedCity: String?
 
     // 学习到的地点（公开给调试视图）
     private(set) var homeLocation: CLLocation?
@@ -25,6 +26,12 @@ class LocationDataCollector: NSObject, ObservableObject {
 
     private let homeLocationKey = "learnedHomeLocation"
     private let workLocationKey = "learnedWorkLocation"
+
+    // 多夜确认制：候选 home 位置（Phase 3a）
+    private let homeCandidateKey = "homeCandidateLocation"
+    private let homeCandidateNightCountKey = "homeCandidateNightCount"
+    private let homeCandidateLastDateKey = "homeCandidateLastDate"
+    private let requiredNightsForHome = 3 // 连续 3 夜才确认为 home
 
     override private init() {
         super.init()
@@ -49,8 +56,24 @@ class LocationDataCollector: NSObject, ObservableObject {
         locationManager.stopUpdatingLocation()
     }
 
+    var isLocationAuthorized: Bool {
+        let status = locationManager.authorizationStatus
+        return status == .authorizedAlways || status == .authorizedWhenInUse
+    }
+
     func getCurrentStatus() -> LocationStatus {
+        guard isLocationAuthorized else {
+            return .unknown
+        }
         return currentStatus
+    }
+
+    /// 刷新当前位置（请求一次性位置更新）
+    func refreshLocation() async -> CLLocation? {
+        locationManager.requestLocation()
+        // 等待一小段时间让位置更新回调触发
+        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
+        return currentLocation
     }
 
     // MARK: - Place Classification
@@ -83,15 +106,69 @@ class LocationDataCollector: NSObject, ObservableObject {
 
     // MARK: - Learn Places
 
-    /// 学习家的位置（通常在晚上10点到早上7点停留的地方）
+    /// 学习家的位置（多夜确认制：连续 3 夜在同一位置才确认为 home）
     func learnHomeLocation() {
         guard let location = currentLocation else { return }
 
         let hour = Calendar.current.component(.hour, from: Date())
-        if hour >= 22 || hour <= 7 {
-            homeLocation = location
-            saveLearnedPlace(location, forKey: homeLocationKey)
+        guard hour >= 22 || hour <= 7 else { return }
+
+        // 如果仍在已确认的 home 200m 范围内，不触发学习
+        if let home = homeLocation, location.distance(from: home) < 200 {
+            return
         }
+
+        let today = Calendar.current.startOfDay(for: Date())
+        let todayStr = ISO8601DateFormatter().string(from: today)
+
+        // 加载候选位置
+        let candidateLocation = loadCandidateLocation()
+        let candidateNightCount = UserDefaults.standard.integer(forKey: homeCandidateNightCountKey)
+        let candidateLastDate = UserDefaults.standard.string(forKey: homeCandidateLastDateKey) ?? ""
+
+        // 今天已经记录过，跳过（每天只计一次）
+        if candidateLastDate == todayStr {
+            return
+        }
+
+        if let candidate = candidateLocation, location.distance(from: candidate) < 200 {
+            // 在候选位置 200m 范围内 → 累加过夜计数
+            let newCount = candidateNightCount + 1
+            UserDefaults.standard.set(newCount, forKey: homeCandidateNightCountKey)
+            UserDefaults.standard.set(todayStr, forKey: homeCandidateLastDateKey)
+
+            if newCount >= requiredNightsForHome {
+                // 达到阈值 → 确认为 home
+                homeLocation = candidate
+                saveLearnedPlace(candidate, forKey: homeLocationKey)
+                // 清除候选
+                UserDefaults.standard.removeObject(forKey: homeCandidateKey)
+                UserDefaults.standard.removeObject(forKey: homeCandidateNightCountKey)
+                UserDefaults.standard.removeObject(forKey: homeCandidateLastDateKey)
+            }
+        } else {
+            // 新位置 → 重置候选
+            saveCandidateLocation(location)
+            UserDefaults.standard.set(1, forKey: homeCandidateNightCountKey)
+            UserDefaults.standard.set(todayStr, forKey: homeCandidateLastDateKey)
+        }
+    }
+
+    private func saveCandidateLocation(_ location: CLLocation) {
+        let data: [String: Double] = [
+            "latitude": location.coordinate.latitude,
+            "longitude": location.coordinate.longitude
+        ]
+        UserDefaults.standard.set(data, forKey: homeCandidateKey)
+    }
+
+    private func loadCandidateLocation() -> CLLocation? {
+        guard let data = UserDefaults.standard.dictionary(forKey: homeCandidateKey) as? [String: Double],
+              let lat = data["latitude"],
+              let lng = data["longitude"] else {
+            return nil
+        }
+        return CLLocation(latitude: lat, longitude: lng)
     }
 
     /// 学习公司位置（通常在工作日白天停留的地方）
@@ -155,7 +232,8 @@ class LocationDataCollector: NSObject, ObservableObject {
             atPlaceSinceMinutes: atPlaceSinceMinutes,
             placeName: lastGeocodedPlaceName,
             latitude: location.coordinate.latitude,
-            longitude: location.coordinate.longitude
+            longitude: location.coordinate.longitude,
+            city: lastGeocodedCity
         )
 
         currentLocation = location
@@ -201,6 +279,7 @@ class LocationDataCollector: NSObject, ObservableObject {
 
             DispatchQueue.main.async {
                 self.lastGeocodedPlaceName = placeName.isEmpty ? nil : placeName
+                self.lastGeocodedCity = placemark.locality
 
                 // 更新状态包含地点名称
                 self.currentStatus = LocationStatus(
@@ -208,7 +287,8 @@ class LocationDataCollector: NSObject, ObservableObject {
                     atPlaceSinceMinutes: self.currentStatus.atPlaceSinceMinutes,
                     placeName: self.lastGeocodedPlaceName,
                     latitude: location.coordinate.latitude,
-                    longitude: location.coordinate.longitude
+                    longitude: location.coordinate.longitude,
+                    city: self.lastGeocodedCity
                 )
             }
         }

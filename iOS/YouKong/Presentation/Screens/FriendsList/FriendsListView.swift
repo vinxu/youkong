@@ -1,7 +1,4 @@
 import SwiftUI
-#if canImport(FamilyControls)
-import FamilyControls
-#endif
 
 // MARK: - Friends List View
 
@@ -1074,7 +1071,8 @@ struct MyAgentDataSheet: View {
 
         let locationData = LocationRequestData(
             placeType: locationStatus.placeType.rawValue,
-            atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes
+            atPlaceSinceMinutes: locationStatus.atPlaceSinceMinutes,
+            city: locationStatus.city
         )
 
         let extendedLocationData = ExtendedLocationRequestData(
@@ -1229,54 +1227,6 @@ struct TerminalLineView: View {
         }
     }
 }
-
-// MARK: - Family Activity Picker View
-
-#if canImport(FamilyControls)
-import FamilyControls
-
-@available(iOS 16.0, *)
-struct FamilyActivityPickerView: View {
-    @Binding var selection: FamilyActivitySelection
-    let onSave: () -> Void
-
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // 说明文字
-            VStack(spacing: 8) {
-                Text("选择要监控的应用")
-                    .font(.headline)
-                Text("选择后，我们可以了解你的屏幕使用情况来判断你是否有空")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            .padding()
-            .background(Color(.systemGroupedBackground))
-
-            // FamilyActivityPicker
-            FamilyActivityPicker(selection: $selection)
-        }
-        .navigationTitle("选择应用")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("取消") {
-                    dismiss()
-                }
-            }
-            ToolbarItem(placement: .confirmationAction) {
-                Button("保存") {
-                    onSave()
-                }
-                .fontWeight(.semibold)
-            }
-        }
-    }
-}
-#endif
 
 #Preview {
     FriendsListView()

@@ -122,6 +122,55 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
         return try await apiClient.request(endpoint)
     }
 
+    func getUserSchedule(userId: String) async throws -> MyScheduleHistoryResponse {
+        let endpoint = APIEndpoint.getUserSchedule(userId: userId)
+        return try await apiClient.request(endpoint)
+    }
+
+    func updateScheduleItem(date: String, oldStartTime: String, oldEndTime: String, newStartTime: String, newEndTime: String, emoji: String, status: String, highlight: Bool? = nil, remindBefore: Int? = nil) async throws {
+        let endpoint = APIEndpoint.updateScheduleItem(
+            date: date,
+            oldStartTime: oldStartTime, oldEndTime: oldEndTime,
+            newStartTime: newStartTime, newEndTime: newEndTime,
+            emoji: emoji, status: status,
+            highlight: highlight,
+            remindBefore: remindBefore
+        )
+        try await apiClient.requestWithEmptyResponse(endpoint)
+    }
+
+    func deleteScheduleItem(date: String, startTime: String, endTime: String) async throws {
+        let endpoint = APIEndpoint.deleteScheduleItem(date: date, startTime: startTime, endTime: endTime)
+        try await apiClient.requestWithEmptyResponse(endpoint)
+    }
+
+    // MARK: - AI Status Inference V2
+
+    func inferStatus(sensorData: StatusReportRequest) async throws -> CurrentStatusInference {
+        let endpoint = APIEndpoint.inferStatusV2(request: sensorData)
+        return try await apiClient.request(endpoint)
+    }
+
+    func inferStatusV2(sensorData: StatusReportRequest) async throws -> CurrentStatusInference {
+        let endpoint = APIEndpoint.inferStatusV2(request: sensorData)
+        return try await apiClient.request(endpoint)
+    }
+
+    func inferStatusV3Respond(sessionId: String, selectedIndex: Int) async throws -> InferenceResponse {
+        let endpoint = APIEndpoint.inferStatusV3Respond(sessionId: sessionId, selectedIndex: selectedIndex)
+        return try await apiClient.request(endpoint)
+    }
+
+    func submitStatusFeedback(request: StatusFeedbackRequest) async throws {
+        let endpoint = APIEndpoint.submitStatusFeedback(request: request)
+        let _: GenericSuccessResponse = try await apiClient.request(endpoint)
+    }
+
+    func getSTSCredentials() async throws -> STSResponse {
+        let endpoint = APIEndpoint.stsCredentials
+        return try await apiClient.request(endpoint)
+    }
+
     // MARK: - User Settings
 
     func getUserSettings() async throws -> UserSettingsResponse {
@@ -139,4 +188,13 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
 
 struct MyAnalysisResponse: Codable {
     let analysis: AnalysisData?
+}
+
+struct InferStatusResponse: Codable {
+    let inference: CurrentStatusInference
+}
+
+struct GenericSuccessResponse: Codable {
+    let success: Bool?
+    let message: String?
 }
