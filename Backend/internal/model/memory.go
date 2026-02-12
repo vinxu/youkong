@@ -23,6 +23,17 @@ type CoreMemory struct {
 	// 例："响应速度快，平均5分钟内回复"，"晚上比较愿意社交"
 	SocialTendency string `json:"social_tendency" db:"social_tendency"`
 
+	// 个性化人设描述（由每日 LLM 总结生成）
+	// 例："互联网产品经理，工作日9点到公司，中午外卖，回家追剧到23点。周末睡到10点，偏宅。"
+	PersonaText string `json:"persona_text" db:"persona_text"`
+
+	// 时间模式频率表（JSON）
+	// 格式: {"weekday":{"9":{"工作":5},"20":{"追剧":3}},"weekend":{"10":{"赖床":2}},"stats":{...}}
+	TimePatternStats string `json:"time_pattern_stats" db:"time_pattern_stats"`
+
+	// persona 最近生成时间
+	PersonaGeneratedAt *time.Time `json:"persona_generated_at" db:"persona_generated_at"`
+
 	// 置信度（数据量越大越高，0-100）
 	ConfidenceScore int `json:"confidence_score" db:"confidence_score"`
 

@@ -103,6 +103,30 @@ func (r *MemoryRepository) UpsertCoreMemory(ctx context.Context, memory *model.C
 	return err
 }
 
+// UpdatePersonaFields 更新 persona 相关字段（每日凌晨生成）
+func (r *MemoryRepository) UpdatePersonaFields(ctx context.Context, userID, personaText, timePatternStats string) error {
+	query := `INSERT INTO core_memories (user_id, persona_text, time_pattern_stats, persona_generated_at, created_at, updated_at)
+              VALUES (?, ?, ?, NOW(), NOW(), NOW())
+              ON DUPLICATE KEY UPDATE
+              persona_text = VALUES(persona_text),
+              time_pattern_stats = VALUES(time_pattern_stats),
+              persona_generated_at = NOW(),
+              updated_at = NOW()`
+	_, err := r.db.ExecContext(ctx, query, userID, personaText, timePatternStats)
+	return err
+}
+
+// GetActiveUsersWithRecentHistory 获取近 N 天有 status_histories 记录的活跃用户 ID
+func (r *MemoryRepository) GetActiveUsersWithRecentHistory(ctx context.Context, days int) ([]string, error) {
+	var userIDs []string
+	query := `SELECT DISTINCT user_id FROM status_histories WHERE created_at > DATE_SUB(NOW(), INTERVAL ? DAY)`
+	err := r.db.SelectContext(ctx, &userIDs, query, days)
+	if err != nil {
+		return nil, err
+	}
+	return userIDs, nil
+}
+
 // IncrementSampleCount 增加样本数量并更新置信度
 func (r *MemoryRepository) IncrementSampleCount(ctx context.Context, userID string) error {
 	// 置信度 = min(100, 样本数 * 2)
@@ -276,6 +300,13 @@ func strPtrOrNull(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+// ClearAnalysisCache 清除用户的分析缓存（用户清除日程时调用）
+func (r *MemoryRepository) ClearAnalysisCache(ctx context.Context, userID string) error {
+	query := `DELETE FROM user_analysis_cache WHERE user_id = ?`
+	_, err := r.db.ExecContext(ctx, query, userID)
+	return err
 }
 
 // GetAnalysisCache 获取分析缓存

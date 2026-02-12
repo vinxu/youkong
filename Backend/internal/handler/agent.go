@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,8 +17,13 @@ import (
 	"youkong/internal/pkg/agent"
 	"youkong/internal/pkg/response"
 	"youkong/internal/pkg/tencent"
+	"youkong/internal/repository"
 	"youkong/internal/service"
 )
+
+// v3InferRunning 在飞去重：防止同一用户并发触发 V3 推断
+// key=userID, value=struct{}
+var v3InferRunning sync.Map
 
 // FriendshipChecker 好友关系检查接口
 type FriendshipChecker interface {
@@ -35,6 +41,10 @@ type AgentHandler struct {
 	friendshipRepo         FriendshipChecker              // 好友关系检查
 	inferenceAgent         *service.StatusInferenceAgent // V2 推断 Agent
 	bookingService         *service.BookingService       // 预约服务（可见性过滤）
+	redisClient            *tencent.RedisClient           // Redis（用于权限追踪等）
+	userSettingsRepo       *repository.UserSettingsRepository // 用户设置（自动推测开关）
+	inferencePersonaService *service.InferencePersonaService // Persona 生成服务（测试用）
+	memoryRepo              *repository.MemoryRepository      // Memory repo（persona 查询）
 	// STS 配置
 	stsSecretID  string
 	stsSecretKey string
@@ -81,6 +91,164 @@ func (h *AgentHandler) SetBookingService(bs *service.BookingService) {
 	h.bookingService = bs
 }
 
+// SetRedisClient 设置 Redis 客户端（用于权限追踪）
+func (h *AgentHandler) SetRedisClient(rc *tencent.RedisClient) {
+	h.redisClient = rc
+}
+
+// SetUserSettingsRepo 设置用户设置 Repository（自动推测需要）
+func (h *AgentHandler) SetUserSettingsRepo(repo *repository.UserSettingsRepository) {
+	h.userSettingsRepo = repo
+}
+
+// trackPermissions 追踪数据权限授权状态（持久化到 Redis，90天 TTL）
+// 每次上报时根据数据是否存在来设置或清除对应权限标记
+func (h *AgentHandler) trackPermissions(ctx context.Context, userID string, req *model.ExtendedStatusReportRequest) {
+	if h.redisClient == nil || req == nil {
+		return
+	}
+	permTTL := 90 * 24 * time.Hour // 90 天
+
+	locKey := fmt.Sprintf("ai:perm:location:%s", userID)
+	if req.Location != nil || req.ExtendedLocation != nil {
+		_ = h.redisClient.Set(ctx, locKey, "1", permTTL)
+	} else {
+		_ = h.redisClient.Del(ctx, locKey)
+	}
+
+	motionKey := fmt.Sprintf("ai:perm:motion:%s", userID)
+	if req.Movement != nil {
+		_ = h.redisClient.Set(ctx, motionKey, "1", permTTL)
+	} else {
+		_ = h.redisClient.Del(ctx, motionKey)
+	}
+
+	calKey := fmt.Sprintf("ai:perm:calendar:%s", userID)
+	if req.Calendar != nil {
+		_ = h.redisClient.Set(ctx, calKey, "1", permTTL)
+	} else {
+		_ = h.redisClient.Del(ctx, calKey)
+	}
+}
+
+// maybeAutoFillSchedule 检查是否需要用推断结果自动填充 schedule 空隙
+// 条件：auto_predict 开启 + 当前时间不在任何 schedule item 内
+// 复用 ReportStatus 的推断结果，不额外调 LLM
+func (h *AgentHandler) maybeAutoFillSchedule(userID string, inference *model.CurrentStatusInference) {
+	if h.userSettingsRepo == nil || h.scheduleRepo == nil || h.redisClient == nil || inference == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 1. 检查开关
+	settings, err := h.userSettingsRepo.Get(ctx, userID)
+	if err != nil || !settings.AutoPredictEnabled {
+		return
+	}
+
+	// 2. 防重复（10 分钟内不重复触发）
+	lockKey := fmt.Sprintf("auto_infer:lock:%s", userID)
+	if v, _ := h.redisClient.Get(ctx, lockKey); v != "" {
+		return
+	}
+
+	// 3. 获取今天的 schedule，没有则自动创建
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	schedule, err := h.scheduleRepo.GetActiveByUserAndDate(ctx, userID, now)
+	if err != nil || schedule == nil {
+		// 没有今天的 schedule → 自动创建一个空 schedule，后面填入推测结果
+		schedule = &model.StatusSchedule{
+			UserID:       userID,
+			ScheduleDate: today,
+			Status:       model.ScheduleStatusActive,
+		}
+		if createErr := h.scheduleRepo.Create(ctx, schedule); createErr != nil {
+			return
+		}
+		fmt.Printf("[AutoInfer] 为用户自动创建 schedule: user=%s date=%s\n", userID, today.Format("2006-01-02"))
+	}
+
+	// 4. 检查当前时间是否在某个 item 内（含边界）
+	currentTime := now.Format("15:04")
+	for _, item := range schedule.Items {
+		if item.EndTime > item.StartTime {
+			if currentTime >= item.StartTime && currentTime <= item.EndTime {
+				return // 当前有状态，不需要推测
+			}
+		} else {
+			if currentTime >= item.StartTime || currentTime <= item.EndTime {
+				return
+			}
+		}
+	}
+
+	// 5. 当前无状态 → 用推断结果创建 AI 推测 item
+	_ = h.redisClient.Set(ctx, lockKey, "1", 10*time.Minute)
+
+	// 计算 endTime：+2h，但不超过下一个手动 item 的 startTime
+	endTime := addTimeStr(currentTime, 120)
+	for _, item := range schedule.Items {
+		if item.StartTime > currentTime && !item.IsAIGuess {
+			if item.StartTime < endTime {
+				endTime = item.StartTime
+			}
+			break
+		}
+	}
+
+	// 防止零时长 item（如 23:59-23:59）
+	if endTime <= currentTime {
+		fmt.Printf("[AutoInfer] 跳过零时长: user=%s time=%s-%s\n", userID, currentTime, endTime)
+		return
+	}
+
+	newItem := model.ScheduleItem{
+		StartTime: currentTime,
+		EndTime:   endTime,
+		Emoji:     inference.Emoji,
+		Status:    inference.Activity,
+		IsAIGuess: true,
+		Executed:  true,
+	}
+
+	// 清除未来的旧 AI 推测项，追加新项
+	var cleaned []model.ScheduleItem
+	for _, item := range schedule.Items {
+		if item.IsAIGuess && item.StartTime >= currentTime {
+			continue
+		}
+		cleaned = append(cleaned, item)
+	}
+	cleaned = append(cleaned, newItem)
+	sort.Slice(cleaned, func(i, j int) bool { return cleaned[i].StartTime < cleaned[j].StartTime })
+	schedule.Items = cleaned
+
+	if err := h.scheduleRepo.Update(ctx, schedule); err != nil {
+		fmt.Printf("[AutoInfer] 保存失败: user=%s err=%v\n", userID, err)
+		return
+	}
+
+	fmt.Printf("[AutoInfer] 上报触发推测成功: user=%s emoji=%s status=%s time=%s-%s\n",
+		userID, newItem.Emoji, newItem.Status, newItem.StartTime, newItem.EndTime)
+}
+
+// addTimeStr 在 HH:MM 上加 minutes 分钟，上限 23:59
+func addTimeStr(t string, minutes int) string {
+	if len(t) < 5 {
+		return "23:59"
+	}
+	h := int(t[0]-'0')*10 + int(t[1]-'0')
+	m := int(t[3]-'0')*10 + int(t[4]-'0')
+	total := h*60 + m + minutes
+	if total >= 24*60 {
+		total = 23*60 + 59
+	}
+	return fmt.Sprintf("%02d:%02d", total/60, total%60)
+}
+
 // SetSTSConfig 设置 STS 配置
 func (h *AgentHandler) SetSTSConfig(secretID, secretKey, bucket, region string) {
 	h.stsSecretID = secretID
@@ -102,14 +270,47 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 	var req model.ExtendedStatusReportRequest
 	c.ShouldBindJSON(&req)
 
+	// 追踪权限授权状态（用于 AI 就绪检查，持久化到 Redis 90天）
+	h.trackPermissions(c.Request.Context(), userID, &req)
+
 	// 使用 Agent 推断
 	if h.inferenceAgent == nil {
 		response.InternalError(c, "推断服务未初始化")
 		return
 	}
 
+	// 在飞去重：如果该用户已有推断在进行中，返回缓存结果
+	if _, loaded := v3InferRunning.LoadOrStore(userID, struct{}{}); loaded {
+		fmt.Printf("[上报] 推断去重，跳过 user=%s\n", userID)
+		// 尝试返回缓存的分析结果
+		if h.memoryService != nil {
+			cached, _ := h.memoryService.GetCachedAnalysisByUserIDs(context.Background(), []string{userID})
+			if result := cached[userID]; result != nil {
+				response.Success(c, gin.H{
+					"success":  true,
+					"message":  "推断进行中（返回缓存）",
+					"analysis": result,
+				})
+				return
+			}
+		}
+		response.Success(c, gin.H{
+			"success": true,
+			"message": "推断进行中",
+		})
+		return
+	}
+	defer v3InferRunning.Delete(userID)
+
 	fmt.Printf("[上报] 开始 V3 推断 user=%s\n", userID)
-	inference, err := h.inferenceAgent.InferWithAgent(c.Request.Context(), userID, &req)
+
+	// 使用独立 context，不受客户端断连影响
+	// 场景：用户上报状态后切到后台，iOS/Android 可能立即断开 HTTP 连接
+	// 使用 background context 确保 LLM 推断完成并缓存结果
+	inferCtx, inferCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer inferCancel()
+
+	inference, err := h.inferenceAgent.InferWithAgent(inferCtx, userID, &req)
 	if err != nil {
 		fmt.Printf("[上报] 推断失败 user=%s error=%v\n", userID, err)
 		response.InternalError(c, "推断失败")
@@ -121,7 +322,7 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 
 	// 持久化城市信息到 Redis（agent:status key）和 MySQL（users.city）
 	if h.agentService != nil {
-		h.agentService.PersistCityFromExtendedReport(c.Request.Context(), userID, &req)
+		h.agentService.PersistCityFromExtendedReport(inferCtx, userID, &req)
 	}
 
 	// 转换为 AnalysisResult 格式（兼容现有前端）
@@ -130,7 +331,7 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 	// 保留用户手动设置的 GIF 显示模式
 	// 自动推断只更新 emoji/status，不覆盖用户的 GIF 选择
 	if h.memoryService != nil {
-		existingMap, _ := h.memoryService.GetCachedAnalysisByUserIDs(c.Request.Context(), []string{userID})
+		existingMap, _ := h.memoryService.GetCachedAnalysisByUserIDs(inferCtx, []string{userID})
 		if existing := existingMap[userID]; existing != nil && !existing.IsAIGuess && existing.LifeStatus.UseGif {
 			analysisResult.LifeStatus.UseGif = true
 			if analysisResult.LifeStatus.GifURL == "" {
@@ -142,10 +343,19 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 		}
 	}
 
-	// 缓存分析结果
+	// 缓存分析结果：如果用户已手动确认过状态（is_ai_guess=false），不覆盖
+	// 只有当缓存为空或上次也是自动推断时才更新
 	if h.memoryService != nil {
-		_ = h.memoryService.CacheAnalysisResult(c.Request.Context(), userID, analysisResult)
+		existingCache, _ := h.memoryService.GetCachedAnalysisByUserIDs(inferCtx, []string{userID})
+		if existing := existingCache[userID]; existing != nil && !existing.IsAIGuess {
+			fmt.Printf("[上报] 跳过缓存更新：用户已手动确认状态 user=%s\n", userID)
+		} else {
+			_ = h.memoryService.CacheAnalysisResult(inferCtx, userID, analysisResult)
+		}
 	}
+
+	// 自动推测：如果用户开启了自动推测且当前无状态，用推断结果填充 schedule
+	go h.maybeAutoFillSchedule(userID, inference)
 
 	response.Success(c, gin.H{
 		"success":  true,
@@ -573,8 +783,12 @@ func (h *AgentHandler) ReportStatusStream(c *gin.Context) {
 	// 获取 ResponseWriter 用于 flush
 	w := c.Writer
 
+	// 使用独立 context，不受客户端断连影响
+	sseCtx, sseCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer sseCancel()
+
 	// 流式执行福尔摩斯推理
-	result, err := h.agentService.ReportExtendedStatusStream(c.Request.Context(), userID, &req, func(event interface{}) {
+	result, err := h.agentService.ReportExtendedStatusStream(sseCtx, userID, &req, func(event interface{}) {
 		// 将事件序列化为 JSON
 		data, err := json.Marshal(event)
 		if err != nil {
@@ -615,9 +829,14 @@ func (h *AgentHandler) ReportStatusStream(c *gin.Context) {
 			UpdatedAt: time.Now(),
 		}
 
-		// 异步缓存，不阻塞响应
+		// 异步缓存，不阻塞响应（不覆盖用户手动确认的状态）
 		go func() {
 			ctx := context.Background()
+			existingCache, _ := h.memoryService.GetCachedAnalysisByUserIDs(ctx, []string{userID})
+			if existing := existingCache[userID]; existing != nil && !existing.IsAIGuess {
+				fmt.Printf("[Holmes 缓存] 跳过：用户已手动确认状态 user=%s\n", userID)
+				return
+			}
 			err := h.memoryService.CacheAnalysisResult(ctx, userID, analysisResult)
 			if err != nil {
 				fmt.Printf("[Holmes 缓存] 失败 user=%s error=%v\n", userID, err)
@@ -661,8 +880,12 @@ func (h *AgentHandler) ReportStatus2Stream(c *gin.Context) {
 
 	w := c.Writer
 
+	// 使用独立 context，不受客户端断连影响
+	sse2Ctx, sse2Cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer sse2Cancel()
+
 	// 流式执行 Holmes 2.0 推理
-	result, err := h.agentService.ReportExtendedStatus2Stream(c.Request.Context(), userID, &req, func(event interface{}) {
+	result, err := h.agentService.ReportExtendedStatus2Stream(sse2Ctx, userID, &req, func(event interface{}) {
 		data, err := json.Marshal(event)
 		if err != nil {
 			return
@@ -714,9 +937,14 @@ func (h *AgentHandler) ReportStatus2Stream(c *gin.Context) {
 			}
 		}
 
-		// 异步缓存
+		// 异步缓存（不覆盖用户手动确认的状态）
 		go func() {
 			ctx := context.Background()
+			existingCache, _ := h.memoryService.GetCachedAnalysisByUserIDs(ctx, []string{userID})
+			if existing := existingCache[userID]; existing != nil && !existing.IsAIGuess {
+				fmt.Printf("[Holmes 2.0 缓存] 跳过：用户已手动确认状态 user=%s\n", userID)
+				return
+			}
 			err := h.memoryService.CacheAnalysisResult(ctx, userID, analysisResult)
 			if err != nil {
 				fmt.Printf("[Holmes 2.0 缓存] 失败 user=%s error=%v\n", userID, err)
@@ -771,14 +999,18 @@ func (h *AgentHandler) GenerateStatusOptionsStream(c *gin.Context) {
 
 	w := c.Writer
 
+	// 使用独立 context，不受客户端断连影响
+	optCtx, optCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer optCancel()
+
 	// 获取用户最近的状态记忆（用于推理）
 	var recentMemory []*model.UserStatusMemory
 	if h.memoryService != nil {
-		recentMemory, _ = h.memoryService.GetRecentUserStatusMemory(c.Request.Context(), userID, 10)
+		recentMemory, _ = h.memoryService.GetRecentUserStatusMemory(optCtx, userID, 10)
 	}
 
 	// 流式执行状态选项生成
-	result, err := h.agentService.GenerateStatusOptionsStream(c.Request.Context(), userID, &req, recentMemory, func(event interface{}) {
+	result, err := h.agentService.GenerateStatusOptionsStream(optCtx, userID, &req, recentMemory, func(event interface{}) {
 		data, err := json.Marshal(event)
 		if err != nil {
 			return
@@ -877,12 +1109,81 @@ func (h *AgentHandler) SelectStatus(c *gin.Context) {
 		return
 	}
 
-	// 选择状态并记录
+	// 选择状态并记录到记忆
 	err := h.memoryService.SelectStatus(c.Request.Context(), userID, &req)
 	if err != nil {
 		fmt.Printf("[选择状态] 失败 user=%s error=%v\n", userID, err)
 		response.InternalError(c, "保存失败")
 		return
+	}
+
+	// V3 推断结果智能合并到已有 schedule：
+	// - 截断包含当前时刻的 V4 item（endTime → now）
+	// - V3 item 的 endTime = 下一个 item 的 startTime（或 23:59）
+	// - 不新建记录，避免同天多条冲突
+	if h.scheduleRepo != nil {
+		now := time.Now()
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		currentTime := now.Format("15:04")
+
+		existing, _ := h.scheduleRepo.GetLatestByUserAndDate(c.Request.Context(), userID, today)
+		if existing != nil {
+			// 1. 截断包含当前时刻的 item
+			for i := range existing.Items {
+				it := &existing.Items[i]
+				if it.StartTime <= currentTime && currentTime < it.EndTime {
+					fmt.Printf("[选择状态] 截断 V4 item %s-%s → %s-%s\n",
+						it.StartTime, it.EndTime, it.StartTime, currentTime)
+					it.EndTime = currentTime
+					break
+				}
+			}
+
+			// 2. 找 now 之后最近 item 的 startTime 作为 V3 的 endTime
+			v3EndTime := "23:59"
+			for _, it := range existing.Items {
+				if it.StartTime > currentTime {
+					v3EndTime = it.StartTime
+					break
+				}
+			}
+
+			// 3. 追加 V3 item
+			v3Item := model.ScheduleItem{
+				StartTime: currentTime,
+				EndTime:   v3EndTime,
+				Emoji:     req.Emoji,
+				Status:    req.Status,
+				Executed:  true,
+			}
+			existing.Items = append(existing.Items, v3Item)
+
+			if updateErr := h.scheduleRepo.Update(c.Request.Context(), existing); updateErr != nil {
+				fmt.Printf("[选择状态] 更新时刻表失败 user=%s error=%v\n", userID, updateErr)
+			} else {
+				fmt.Printf("[选择状态] 时刻表已更新 user=%s V3 item %s-%s\n", userID, currentTime, v3EndTime)
+			}
+		} else {
+			// 无已有 schedule，创建新记录
+			schedule := &model.StatusSchedule{
+				UserID:       userID,
+				ScheduleDate: now,
+				Items: model.ScheduleItems{{
+					StartTime: currentTime,
+					EndTime:   "23:59",
+					Emoji:     req.Emoji,
+					Status:    req.Status,
+					Executed:  true,
+				}},
+				CurrentIndex: 0,
+				Status:       model.ScheduleStatusActive,
+			}
+			if createErr := h.scheduleRepo.Create(c.Request.Context(), schedule); createErr != nil {
+				fmt.Printf("[选择状态] 创建时刻表失败 user=%s error=%v\n", userID, createErr)
+			} else {
+				fmt.Printf("[选择状态] 时刻表已创建 user=%s schedule_id=%d\n", userID, schedule.ID)
+			}
+		}
 	}
 
 	fmt.Printf("[选择状态] 成功 user=%s emoji=%s status=%s\n", userID, req.Emoji, req.Status)
@@ -953,8 +1254,26 @@ func (h *AgentHandler) VoiceScheduleStream(c *gin.Context) {
 
 	w := c.Writer
 
+	// defer 保证 [DONE] 必达（无论成功/失败/panic）
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("[VoiceScheduleV4] panic recovered: %v\n", r)
+			errEvent := model.V4Event{Type: model.V4EventTypeError, Message: "服务异常，请重试"}
+			data, _ := json.Marshal(errEvent)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			w.Flush()
+		}
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		w.Flush()
+	}()
+
+	// 使用独立 context，不受客户端断连影响
+	// V4 流程包含 ASR + LLM + 工具执行，即使客户端断开也应完成操作并保存状态
+	v4Ctx, v4Cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer v4Cancel()
+
 	// 使用 V4 服务处理语音输入
-	_, err = h.voiceScheduleServiceV4.ProcessVoiceInput(c.Request.Context(), userID, sessionID, audioData, audioFormat, func(event *model.V4Event) {
+	_, err = h.voiceScheduleServiceV4.ProcessVoiceInput(v4Ctx, userID, sessionID, audioData, audioFormat, func(event *model.V4Event) {
 		data, err := json.Marshal(event)
 		if err != nil {
 			return
@@ -971,12 +1290,7 @@ func (h *AgentHandler) VoiceScheduleStream(c *gin.Context) {
 		data, _ := json.Marshal(errEvent)
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		w.Flush()
-		return
 	}
-
-	// 发送完成信号
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	w.Flush()
 }
 
 // VoiceScheduleInteract 语音时刻表后续交互
@@ -1036,6 +1350,19 @@ func (h *AgentHandler) VoiceScheduleInteract(c *gin.Context) {
 
 	w := c.Writer
 
+	// defer 保证 [DONE] 必达
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("[VoiceScheduleInteract] panic recovered: %v\n", r)
+			errEvent := model.VoiceScheduleEvent{Type: model.VSEventError, Message: "服务异常，请重试"}
+			data, _ := json.Marshal(errEvent)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			w.Flush()
+		}
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		w.Flush()
+	}()
+
 	// 处理交互
 	err := h.voiceScheduleService.ProcessInteraction(c.Request.Context(), userID, &req, audioData, func(event *model.VoiceScheduleEvent) {
 		data, err := json.Marshal(event)
@@ -1054,12 +1381,7 @@ func (h *AgentHandler) VoiceScheduleInteract(c *gin.Context) {
 		data, _ := json.Marshal(errEvent)
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		w.Flush()
-		return
 	}
-
-	// 发送完成信号（VoiceScheduleInteract）
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	w.Flush()
 }
 
 // VoiceScheduleText 语音时刻表文本测试接口（V4 版本，跳过语音识别）
@@ -1098,8 +1420,25 @@ func (h *AgentHandler) VoiceScheduleText(c *gin.Context) {
 
 	w := c.Writer
 
+	// defer 保证 [DONE] 必达
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("[VoiceScheduleTextV4] panic recovered: %v\n", r)
+			errEvent := model.V4Event{Type: model.V4EventTypeError, Message: "服务异常，请重试"}
+			data, _ := json.Marshal(errEvent)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			w.Flush()
+		}
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		w.Flush()
+	}()
+
+	// 使用独立 context，不受客户端断连影响
+	textCtx, textCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer textCancel()
+
 	// 使用 V4 服务处理文本输入
-	_, err := h.voiceScheduleServiceV4.ProcessTextInput(c.Request.Context(), userID, req.SessionID, req.Text, req.SensorData, func(event *model.V4Event) {
+	_, err := h.voiceScheduleServiceV4.ProcessTextInput(textCtx, userID, req.SessionID, req.Text, req.SensorData, func(event *model.V4Event) {
 		data, err := json.Marshal(event)
 		if err != nil {
 			return
@@ -1116,11 +1455,7 @@ func (h *AgentHandler) VoiceScheduleText(c *gin.Context) {
 		data, _ := json.Marshal(errEvent)
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		w.Flush()
-		return
 	}
-
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	w.Flush()
 }
 
 // VoiceScheduleTextV4 V4 版本语音时刻表文本接口
@@ -1159,8 +1494,25 @@ func (h *AgentHandler) VoiceScheduleTextV4(c *gin.Context) {
 
 	w := c.Writer
 
+	// defer 保证 [DONE] 必达
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("[VoiceScheduleTextV4-v4] panic recovered: %v\n", r)
+			errEvent := model.V4Event{Type: model.V4EventTypeError, Message: "服务异常，请重试"}
+			data, _ := json.Marshal(errEvent)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			w.Flush()
+		}
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		w.Flush()
+	}()
+
+	// 使用独立 context，不受客户端断连影响
+	v4TextCtx, v4TextCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer v4TextCancel()
+
 	// 使用 V4 服务处理
-	_, err := h.voiceScheduleServiceV4.ProcessTextInput(c.Request.Context(), userID, req.SessionID, req.Text, req.SensorData, func(event *model.V4Event) {
+	_, err := h.voiceScheduleServiceV4.ProcessTextInput(v4TextCtx, userID, req.SessionID, req.Text, req.SensorData, func(event *model.V4Event) {
 		data, err := json.Marshal(event)
 		if err != nil {
 			return
@@ -1177,11 +1529,7 @@ func (h *AgentHandler) VoiceScheduleTextV4(c *gin.Context) {
 		data, _ := json.Marshal(errEvent)
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		w.Flush()
-		return
 	}
-
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	w.Flush()
 }
 
 // AgentChatStream Agent 聊天流式接口（Tool Use Loop）
@@ -1544,7 +1892,8 @@ type UpdateScheduleItemRequest struct {
 	NewEndTime   string `json:"new_end_time" binding:"required"`
 	Emoji        string `json:"emoji" binding:"required"`
 	Status       string `json:"status" binding:"required"`
-	Highlight    *bool  `json:"highlight,omitempty"` // 高亮状态（有空），nil 表示不修改
+	Highlight    *bool `json:"highlight,omitempty"`      // 高亮状态（有空），nil 表示不修改
+	RemindBefore *int  `json:"remind_before,omitempty"` // 提前提醒分钟数，nil=不修改，0=取消，>0=设置
 }
 
 // UpdateScheduleItem 更新时刻表条目
@@ -1569,6 +1918,7 @@ func (h *AgentHandler) UpdateScheduleItem(c *gin.Context) {
 
 	var req UpdateScheduleItemRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		fmt.Printf("[UpdateScheduleItem] 参数绑定失败: %v\n", err)
 		response.ParamError(c, "参数错误")
 		return
 	}
@@ -1596,16 +1946,26 @@ func (h *AgentHandler) UpdateScheduleItem(c *gin.Context) {
 			if req.Highlight != nil {
 				highlight = *req.Highlight
 			}
+			remindBefore := item.RemindBefore // 默认保留原值
+			if req.RemindBefore != nil {
+				remindBefore = *req.RemindBefore
+			}
+			// 仅当 emoji 或 status 实际变更时才清除 AI 标记
+			isAIGuess := item.IsAIGuess
+			if req.Emoji != item.Emoji || req.Status != item.Status {
+				isAIGuess = false
+			}
 			schedule.Items[i] = model.ScheduleItem{
-				StartTime: req.NewStartTime,
-				EndTime:   req.NewEndTime,
-				Emoji:     req.Emoji,
-				Status:    req.Status,
-				Executed:  item.Executed,
-				IsAIGuess: false, // 用户编辑后不再是 AI 推测
-				GifURL:    item.GifURL,
-				GiphyQuery: item.GiphyQuery,
-				Highlight: highlight,
+				StartTime:    req.NewStartTime,
+				EndTime:      req.NewEndTime,
+				Emoji:        req.Emoji,
+				Status:       req.Status,
+				Executed:     item.Executed,
+				IsAIGuess:    isAIGuess,
+				GifURL:       item.GifURL,
+				GiphyQuery:   item.GiphyQuery,
+				Highlight:    highlight,
+				RemindBefore: remindBefore,
 			}
 			found = true
 			foundIdx = i
@@ -1618,16 +1978,24 @@ func (h *AgentHandler) UpdateScheduleItem(c *gin.Context) {
 		return
 	}
 
-	// 检测时间冲突（排除当前编辑的 item，即已被替换的那个 index）
-	for j, other := range schedule.Items {
-		if j == foundIdx {
-			continue
-		}
-		if timesOverlap(req.NewStartTime, req.NewEndTime, other.StartTime, other.EndTime) {
-			response.ParamError(c, fmt.Sprintf("与 %s-%s %s 时间冲突", other.StartTime, other.EndTime, other.Status))
-			return
+	// 检测时间冲突（仅在时间实际变更时检查，避免跨午夜等既有时段的虚假冲突）
+	timeChanged := req.NewStartTime != req.OldStartTime || req.NewEndTime != req.OldEndTime
+	if timeChanged {
+		for j, other := range schedule.Items {
+			if j == foundIdx {
+				continue
+			}
+			if timesOverlap(req.NewStartTime, req.NewEndTime, other.StartTime, other.EndTime) {
+				response.ParamError(c, fmt.Sprintf("与 %s-%s %s 时间冲突", other.StartTime, other.EndTime, other.Status))
+				return
+			}
 		}
 	}
+
+	// 按 StartTime 重新排序（编辑时间后顺序可能错乱，影响首页 overlay 查找）
+	sort.Slice(schedule.Items, func(i, j int) bool {
+		return schedule.Items[i].StartTime < schedule.Items[j].StartTime
+	})
 
 	// 保存更新
 	if err := h.scheduleRepo.Update(c.Request.Context(), schedule); err != nil {
@@ -1679,33 +2047,46 @@ func (h *AgentHandler) DeleteScheduleItem(c *gin.Context) {
 		return
 	}
 
-	// 获取当天的时刻表（不限 status，允许编辑已完成的时刻表）
-	schedule, err := h.scheduleRepo.GetLatestByUserAndDate(c.Request.Context(), userID, scheduleDate)
-	if err != nil || schedule == nil {
+	// 获取当天所有非取消的时刻表（同一天可能有多条记录）
+	schedules, err := h.scheduleRepo.GetAllByUserAndDate(c.Request.Context(), userID, scheduleDate)
+	if err != nil || len(schedules) == 0 {
 		response.NotFound(c, "未找到该日期的时刻表")
 		return
 	}
 
-	// 查找并删除条目
-	found := false
-	newItems := make(model.ScheduleItems, 0, len(schedule.Items))
-	for _, item := range schedule.Items {
-		if item.StartTime == startTime && item.EndTime == endTime {
-			found = true
-			continue
+	// 在所有 schedule 中查找并删除条目
+	var targetSchedule *model.StatusSchedule
+	for _, sch := range schedules {
+		for _, item := range sch.Items {
+			if item.StartTime == startTime && item.EndTime == endTime {
+				targetSchedule = sch
+				break
+			}
 		}
-		newItems = append(newItems, item)
+		if targetSchedule != nil {
+			break
+		}
 	}
 
-	if !found {
+	if targetSchedule == nil {
 		response.NotFound(c, "未找到该时段")
 		return
 	}
 
-	schedule.Items = newItems
+	newItems := make(model.ScheduleItems, 0, len(targetSchedule.Items))
+	for _, item := range targetSchedule.Items {
+		if item.StartTime == startTime && item.EndTime == endTime {
+			continue
+		}
+		newItems = append(newItems, item)
+	}
+	targetSchedule.Items = newItems
 
-	// 保存更新
-	if err := h.scheduleRepo.Update(c.Request.Context(), schedule); err != nil {
+	// 保存更新（如果没有条目了，标记为 cancelled）
+	if len(newItems) == 0 {
+		targetSchedule.Status = model.ScheduleStatusCancelled
+	}
+	if err := h.scheduleRepo.Update(c.Request.Context(), targetSchedule); err != nil {
 		fmt.Printf("[DeleteScheduleItem] 保存失败 user=%s error=%v\n", userID, err)
 		response.InternalError(c, "保存失败")
 		return
@@ -2057,6 +2438,89 @@ func (h *AgentHandler) TestModelByCategory(c *gin.Context) {
 	})
 }
 
+// ========== Persona 生成测试接口 ==========
+
+// SetInferencePersonaService 设置 Persona 生成服务（测试用）
+func (h *AgentHandler) SetInferencePersonaService(svc *service.InferencePersonaService, memRepo *repository.MemoryRepository) {
+	h.inferencePersonaService = svc
+	h.memoryRepo = memRepo
+}
+
+// TestPersonaGenerate 手动触发 persona 生成（测试端点）
+// POST /api/v1/agent/test/persona-generate
+func (h *AgentHandler) TestPersonaGenerate(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.inferencePersonaService == nil {
+		response.InternalError(c, "Persona 服务未配置")
+		return
+	}
+
+	// 1. 查看生成前的 core_memories 状态
+	var beforePersona, beforeStats string
+	if h.memoryRepo != nil {
+		before, err := h.memoryRepo.GetCoreMemory(c.Request.Context(), userID)
+		if err == nil && before != nil {
+			beforePersona = before.PersonaText
+			beforeStats = before.TimePatternStats
+		}
+	}
+
+	// 2. 执行 persona 生成
+	startTime := time.Now()
+	err := h.inferencePersonaService.GeneratePersona(c.Request.Context(), userID)
+	elapsed := time.Since(startTime)
+
+	if err != nil {
+		response.InternalError(c, fmt.Sprintf("Persona 生成失败: %v", err))
+		return
+	}
+
+	// 3. 读取生成后的结果
+	var afterPersona, afterStats string
+	var generatedAt *time.Time
+	if h.memoryRepo != nil {
+		after, err := h.memoryRepo.GetCoreMemory(c.Request.Context(), userID)
+		if err == nil && after != nil {
+			afterPersona = after.PersonaText
+			afterStats = after.TimePatternStats
+			generatedAt = after.PersonaGeneratedAt
+		}
+	}
+
+	// 4. 解析 stats JSON 为可读格式
+	var statsObj interface{}
+	if afterStats != "" {
+		json.Unmarshal([]byte(afterStats), &statsObj)
+	}
+
+	// 5. 模拟推断注入效果：提取当前时段分布
+	currentSlot := service.ExtractCurrentSlotDistribution(afterStats, time.Now())
+
+	response.Success(c, gin.H{
+		"user_id":     userID,
+		"elapsed_ms":  elapsed.Milliseconds(),
+		"before": gin.H{
+			"persona_text":       beforePersona,
+			"time_pattern_stats": beforeStats,
+		},
+		"after": gin.H{
+			"persona_text":        afterPersona,
+			"time_pattern_stats":  statsObj,
+			"persona_generated_at": generatedAt,
+		},
+		"inference_injection": gin.H{
+			"persona":              afterPersona,
+			"current_slot_history": currentSlot,
+			"note":                 "以上两个字段会在 V3 推断时注入到 LLM prompt 中",
+		},
+	})
+}
+
 // ========== 当下状态推理接口 ==========
 
 // InferStatus AI 推断当下状态
@@ -2223,33 +2687,23 @@ func (h *AgentHandler) InferStatusV2(c *gin.Context) {
 	var req model.ExtendedStatusReportRequest
 	c.ShouldBindJSON(&req)
 
+	// 使用独立 context，不受客户端断连影响
+	v3Ctx, v3Cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer v3Cancel()
+
 	// 使用 V3 接口返回完整 InferenceResponse
-	inferResp, err := h.inferenceAgent.InferWithAgentV3(c.Request.Context(), userID, &req)
+	inferResp, err := h.inferenceAgent.InferWithAgentV3(v3Ctx, userID, &req)
 	if err != nil {
 		fmt.Printf("[InferStatusV3] 推断失败 user=%s error=%v\n", userID, err)
 		response.InternalError(c, "推断失败")
 		return
 	}
 
-	// 如果直接完成（非选项交互），更新首页状态
+	// 只返回推断结果，不自动保存到首页
+	// 用户在客户端确认后通过 /api/v1/agent/status-feedback 接口保存
 	if inferResp.Phase == model.InferencePhaseCompleted && inferResp.Result != nil {
-		fmt.Printf("[InferStatusV3] 推断成功 user=%s emoji=%s activity=%s confidence=%s\n",
+		fmt.Printf("[InferStatusV3] 推断成功(预览) user=%s emoji=%s activity=%s confidence=%s\n",
 			userID, inferResp.Result.Emoji, inferResp.Result.Activity, inferResp.Result.Confidence)
-
-		if h.agentService != nil {
-			feedbackReq := &model.StatusFeedbackRequest{
-				CorrectedEmoji:       inferResp.Result.Emoji,
-				CorrectedActivity:    inferResp.Result.Activity,
-				CorrectedPlace:       inferResp.Result.Place,
-				CorrectedIsAvailable: &inferResp.Result.IsAvailable,
-				GifURL:               inferResp.Result.GifURL,
-				GiphyQuery:           inferResp.Result.GiphyQuery,
-			}
-			h.agentService.MergeExistingGifInfo(c.Request.Context(), userID, feedbackReq)
-			if err := h.agentService.SaveStatusFeedback(c.Request.Context(), userID, feedbackReq); err != nil {
-				fmt.Printf("[InferStatusV3] 更新首页状态失败 user=%s error=%v\n", userID, err)
-			}
-		}
 	} else {
 		fmt.Printf("[InferStatusV3] 等待用户选择 user=%s session=%s options=%d\n",
 			userID, inferResp.SessionID, len(inferResp.Options))
@@ -2301,8 +2755,12 @@ func (h *AgentHandler) InferStatusV2Stream(c *gin.Context) {
 		}
 	}()
 
+	// 使用独立 context，不受客户端断连影响
+	streamCtx, streamCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer streamCancel()
+
 	// 流式推断
-	result, err := h.inferenceAgent.InferWithAgentStream(c.Request.Context(), userID, &req, func(event *service.InferenceStreamEvent) {
+	result, err := h.inferenceAgent.InferWithAgentStream(streamCtx, userID, &req, func(event *service.InferenceStreamEvent) {
 		data, err := json.Marshal(event)
 		if err != nil {
 			return
@@ -2376,21 +2834,10 @@ func (h *AgentHandler) InferStatusRespond(c *gin.Context) {
 		return
 	}
 
-	// 更新首页状态（保留用户手动设置的 GIF）
-	if h.agentService != nil && result != nil {
-		feedbackReq := &model.StatusFeedbackRequest{
-			CorrectedEmoji:       result.Emoji,
-			CorrectedActivity:    result.Activity,
-			CorrectedPlace:       result.Place,
-			CorrectedIsAvailable: &result.IsAvailable,
-			GifURL:               result.GifURL,
-			GiphyQuery:           result.GiphyQuery,
-		}
-		h.agentService.MergeExistingGifInfo(c.Request.Context(), userID, feedbackReq)
-		if err := h.agentService.SaveStatusFeedback(c.Request.Context(), userID, feedbackReq); err != nil {
-			fmt.Printf("[InferStatusRespond] 更新首页状态失败 user=%s error=%v\n", userID, err)
-		}
-	}
+	// 只返回结果，不自动保存到首页
+	// 用户在客户端确认后通过 /api/v1/agent/status-feedback 接口保存
+	fmt.Printf("[InferStatusRespond] 选择完成(预览) user=%s emoji=%s activity=%s\n",
+		userID, result.Emoji, result.Activity)
 
 	response.Success(c, &model.InferenceResponse{
 		Phase:  model.InferencePhaseCompleted,

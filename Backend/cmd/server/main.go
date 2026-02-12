@@ -135,6 +135,7 @@ func main() {
 	scheduleRepo := repository.NewScheduleRepository(db)
 	userSettingsRepo := repository.NewUserSettingsRepository(db)
 	predictionRepo := repository.NewPredictionRepository(db)
+	bookingRepo := repository.NewBookingRepository(db)
 
 	// 初始化微信客户端
 	var wechatClient *wechat.Client
@@ -191,7 +192,7 @@ func main() {
 	conversationService := service.NewConversationService(messageRepo, userRepo, notificationService, wsManager)
 	wechatService := service.NewWechatService(wechatRepo, userRepo, invitationRepo, friendshipRepo, circleRepo, wechatClient, jwtManager)
 	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
-	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo, friendRequestRepo)
+	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo, friendRequestRepo, notificationService)
 	userProfileService := service.NewUserProfileService(userProfileRepo)
 	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, memoryRepo, scheduleRepo, userProfileService, llmClient)
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
@@ -205,6 +206,8 @@ func main() {
 		contactService,
 	)
 	predictionService := service.NewPredictionService(predictionRepo, scheduleRepo, memoryRepo, userProfileService, llmClient)
+	bookingService := service.NewBookingService(bookingRepo, scheduleRepo, conversationService, userRepo, notificationService, messageRepo)
+	voiceScheduleServiceV4.SetBookingService(bookingService)
 
 	// 初始化 Agent Chat Service（Tool Agent 框架）
 	var agentChatService *service.AgentChatService
@@ -229,12 +232,24 @@ func main() {
 	// 初始化Handler
 	authHandler := handler.NewAuthHandler(authService, wechatService)
 	userHandler := handler.NewUserHandler(userService, posterGenerator, cfg.Invitation.BaseURL, messageRepo, userSettingsRepo, scheduleRepo)
+	userHandler.SetAIReadinessDeps(friendshipRepo, redisClient)
 	circleHandler := handler.NewCircleHandler(circleService)
 	conversationHandler := handler.NewConversationHandler(conversationService)
 	invitationHandler := handler.NewInvitationHandler(invitationService, posterGenerator)
 	friendshipHandler := handler.NewFriendshipHandler(friendshipService)
 	agentHandler := handler.NewAgentHandler(agentService, memoryService, voiceScheduleService, agentChatService, scheduleRepo, friendshipRepo)
 	agentHandler.SetVoiceScheduleServiceV4(voiceScheduleServiceV4) // 设置 V4 服务
+	// Persona 生成测试端点依赖
+	if cfg.LLM.APIKey != "" {
+		testPersonaService := service.NewInferencePersonaService(
+			memoryRepo, scheduleRepo, userProfileService,
+			cfg.LLM.APIKey, cfg.LLM.Model,
+		)
+		agentHandler.SetInferencePersonaService(testPersonaService, memoryRepo)
+	}
+	agentHandler.SetBookingService(bookingService)                 // 设置预约服务（可见性过滤）
+	agentHandler.SetRedisClient(redisClient)                       // 设置 Redis（权限追踪）
+	agentHandler.SetUserSettingsRepo(userSettingsRepo)             // 设置用户设置（自动推测）
 	// 设置 STS 配置（用于客户端直传 COS）
 	// COS 密钥：优先使用 COS 专用密钥，回退到通用密钥
 	cosSecretID := cfg.Tencent.COSSecretID
@@ -272,6 +287,10 @@ func main() {
 	giphyClient := giphy.NewClient("Ned8bTKUTSlYen6oZXmacc1sLmlLn9U8", cosClient, redisClient)
 	logger.Info("Giphy 客户端初始化成功", zap.Bool("cos_enabled", cosClient != nil))
 
+	// 初始化位置聚类服务（Phase 4: 服务端位置分类）
+	locationService := service.NewLocationService(db.DB)
+	logger.Info("位置聚类服务初始化成功")
+
 	// 初始化 V2 推断 Agent
 	if cfg.LLM.APIKey != "" {
 		inferenceAgent := service.NewStatusInferenceAgent(
@@ -282,6 +301,7 @@ func main() {
 			inferenceAgent.SetGiphyClient(giphyClient, llmClient)
 			logger.Info("V2 推断 Agent 已启用 Giphy GIF 集成")
 		}
+		inferenceAgent.SetLocationService(locationService)
 		agentHandler.SetInferenceAgent(inferenceAgent)
 		logger.Info("V2 推断 Agent 初始化成功")
 	}
@@ -302,6 +322,7 @@ func main() {
 	homeHandler := handler.NewHomeHandler(homeService)
 	userProfileHandler := handler.NewUserProfileHandler(userProfileService)
 	predictionHandler := handler.NewPredictionHandler(predictionService)
+	bookingHandler := handler.NewBookingHandler(bookingService)
 
 	// 设置Gin模式
 	gin.SetMode(cfg.Server.Mode)
@@ -432,6 +453,15 @@ func main() {
 				friends.GET("/requests/count", friendshipHandler.GetPendingRequestCount)
 			}
 
+			// 预约模块
+			bookings := authorized.Group("/bookings")
+			{
+				bookings.GET("", bookingHandler.GetBookings)
+				bookings.GET("/:id", bookingHandler.GetBooking)
+				bookings.POST("/:id/respond", bookingHandler.RespondToBooking)
+				bookings.DELETE("/:id", bookingHandler.CancelBooking)
+			}
+
 			// Agent 模块
 			agent := authorized.Group("/agent")
 			{
@@ -485,6 +515,7 @@ func main() {
 				agent.POST("/test/model/category", agentHandler.TestModelByCategory)        // 按分类测试
 				agent.POST("/test/model/comparison", agentHandler.TestModelComparison)      // 完整对比测试
 				agent.POST("/test/model/report", agentHandler.TestModelReport)              // 生成 Markdown 报告
+				agent.POST("/test/persona-generate", agentHandler.TestPersonaGenerate)    // 手动触发 persona 生成
 			}
 
 			// 通讯录模块
@@ -544,25 +575,37 @@ func main() {
 
 	// 初始化并启动状态时刻表调度器
 	statusScheduler := job.NewStatusScheduler(scheduleRepo, memoryRepo, redisClient)
+	statusScheduler.SetBookingRepo(bookingRepo)
+	statusScheduler.SetNotificationSender(notificationService)
+	statusScheduler.SetUserSettingsRepo(userSettingsRepo)
+	// 注入个性化 persona 生成服务
+	if cfg.LLM.APIKey != "" {
+		inferencePersonaService := service.NewInferencePersonaService(
+			memoryRepo, scheduleRepo, userProfileService,
+			cfg.LLM.APIKey, cfg.LLM.Model,
+		)
+		statusScheduler.SetPersonaService(inferencePersonaService)
+		logger.Info("StatusScheduler 个性化 Persona 服务已注入")
+	}
+	// 注入推断 Agent（用于自动推测下一状态）
+	if cfg.LLM.APIKey != "" {
+		autoInferAgent := service.NewStatusInferenceAgent(
+			redisClient, memoryRepo, scheduleRepo, userProfileService,
+			cfg.LLM.APIKey, cfg.LLM.Model,
+		)
+		if llmClient != nil && giphyClient != nil {
+			autoInferAgent.SetGiphyClient(giphyClient, llmClient)
+		}
+		autoInferAgent.SetLocationService(locationService)
+		statusScheduler.SetInferenceAgent(autoInferAgent)
+		logger.Info("StatusScheduler 自动推测 Agent 已注入")
+	}
 	statusScheduler.Start()
 	defer statusScheduler.Stop()
 	logger.Info("状态时刻表调度器已启动")
 
-	// 初始化并启动每日状态推测任务
-	if llmClient != nil {
-		dailyPredictionJob := job.NewDailyPredictionJob(
-			userSettingsRepo,
-			scheduleRepo,
-			memoryRepo,
-			userProfileService,
-			llmClient,
-		)
-		dailyPredictionJob.Start()
-		defer dailyPredictionJob.Stop()
-		logger.Info("每日状态推测任务已启动")
-	} else {
-		logger.Warn("LLM 未配置，每日状态推测任务未启动")
-	}
+	// DailyPredictionJob 已废弃，改为 StatusScheduler 按需逐个推测
+	// 保留代码以备回滚，但不再启动
 
 	// 启动服务器
 	addr := fmt.Sprintf(":%s", cfg.Server.Port)

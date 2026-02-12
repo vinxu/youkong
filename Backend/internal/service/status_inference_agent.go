@@ -21,6 +21,7 @@ type StatusInferenceAgent struct {
 	memoryRepo         *repository.MemoryRepository
 	scheduleRepo       *repository.ScheduleRepository
 	userProfileService *UserProfileService
+	locationService    *LocationService // Phase 4: 服务端位置聚类（可选）
 	llmAPIKey          string
 	llmModel           string
 	giphyClient        *giphy.Client
@@ -58,6 +59,11 @@ func NewStatusInferenceAgent(
 func (s *StatusInferenceAgent) SetGiphyClient(giphyClient *giphy.Client, llmClient *llm.OpenRouterClient) {
 	s.giphyClient = giphyClient
 	s.llmClient = llmClient
+}
+
+// SetLocationService 设置位置聚类服务（Phase 4，可选）
+func (s *StatusInferenceAgent) SetLocationService(locationService *LocationService) {
+	s.locationService = locationService
 }
 
 // InferenceStreamEvent 推断流式事件
@@ -441,13 +447,21 @@ func (s *StatusInferenceAgent) buildInferenceSystemPrompt(contextText string) st
 3. 用户修正历史中纠正过的推断不能再犯
 4. 历史记录和时刻表仅作为辅助参考，不能覆盖实时信号的判断
 
+# 位置判断
+- place_type 是客户端的粗略估计（可能错误），place_name 是逆地理编码的实际地点名称
+- 当 place_name 存在时，优先根据 place_name 判断用户实际在什么地方
+- 不要盲目信任 place_type，用常识判断：place_name 包含"酒店""宾馆"就是酒店，不是"家"
+- 如果有 location_confidence 字段，参考其置信度：low 表示位置分类不可靠
+- 如果 is_new_location=true，说明用户可能在出差/旅行，不要按"在家"推断
+- emoji 应匹配实际场所（酒店用🏨，不是🏠），而不是 place_type 标签
+
 # 信号→活动映射
-- screen.activity_type=entertainment + home → 刷手机/刷剧/打游戏（具体取决于 session_duration）
-- screen.activity_type=productivity + work → 工作/办公
+- screen.activity_type=entertainment + 在家 → 刷手机/刷剧/打游戏（具体取决于 session_duration）
+- screen.activity_type=productivity + 办公场所 → 工作/办公
 - screen.activity_type=communication → 聊天/微信
 - location=transit → 在路上/通勤
-- screen.is_active=false + home + 深夜/凌晨 → 睡觉/休息
-- screen.is_active=false + home + last_active_minutes_ago>60 → 休息/小憩/睡觉
+- screen.is_active=false + 在家 + 深夜/凌晨 → 睡觉/休息
+- screen.is_active=false + 在家 + last_active_minutes_ago>60 → 休息/小憩/睡觉
 - movement.activity=running → 跑步/运动
 - calendar.has_current_event=true → 参考日历事件名称
 - location=leisure → 外出/休闲（不是"在家"）
@@ -456,10 +470,15 @@ func (s *StatusInferenceAgent) buildInferenceSystemPrompt(contextText string) st
 - true: 在家+娱乐/休闲/通讯、在家+空闲、充电中无事、已完成工作
 - false: 工作中、开会、通勤、睡觉、专注模式、运动中
 
+# 个性化推断
+- 如果提供了用户画像(persona)，参考画像理解用户习惯（如"习惯追剧到23点" → 晚上在家看手机应推断为"追剧"而非泛化的"刷手机"）
+- 如果提供了当前时段历史(current_slot_history)，参考历史高频活动选择最可能的表达
+- 画像和历史仅作为偏好参考，当前传感器信号仍是直接证据
+
 # 输出规则
 - 默认用 finalize_status（绝大多数情况）
 - activity 2-6字口语化
-- emoji 应匹配地点和活动（在家用🏠，公司用🏢，路上用🚗）
+- emoji 应匹配实际地点和活动（根据 place_name 判断实际场所）
 - 只在实时传感器信号本身矛盾且无法判断时才用 ask_user_choice
 - 历史记录与当前信号不一致时，以当前信号为准`,
 		now.Format("2006-01-02"),
@@ -472,13 +491,17 @@ func (s *StatusInferenceAgent) buildInferenceSystemPrompt(contextText string) st
 
 // buildDeps 构建工具依赖
 func (s *StatusInferenceAgent) buildDeps(userID string) *agent.InferenceToolDeps {
-	return &agent.InferenceToolDeps{
+	deps := &agent.InferenceToolDeps{
 		RedisClient:        s.redisClient,
 		MemoryRepo:         s.memoryRepo,
 		ScheduleRepo:       s.scheduleRepo,
 		UserProfileService: s.userProfileService,
 		UserID:             userID,
 	}
+	if s.locationService != nil {
+		deps.LocationService = s.locationService
+	}
+	return deps
 }
 
 // convertInferenceResult 从 finalize_status 的工具结果中提取 CurrentStatusInference
@@ -604,7 +627,7 @@ func (s *StatusInferenceAgent) setInferenceLock(ctx context.Context, userID stri
 	s.redisClient.Set(ctx, key, "1", 10*time.Minute)
 }
 
-// cacheSensorData 缓存传感器数据到 Redis
+// cacheSensorData 缓存传感器数据到 Redis，并追加位置历史
 func (s *StatusInferenceAgent) cacheSensorData(ctx context.Context, userID string, data *model.ExtendedStatusReportRequest) {
 	if s.redisClient == nil || data == nil {
 		return
@@ -615,6 +638,27 @@ func (s *StatusInferenceAgent) cacheSensorData(ctx context.Context, userID strin
 		return
 	}
 	s.redisClient.Set(ctx, extKey, jsonData, 30*time.Minute)
+
+	// 追加位置历史（Phase 2: Redis 短期，Phase 4: MySQL 长期）
+	if data.ExtendedLocation != nil && (data.ExtendedLocation.Latitude != 0 || data.ExtendedLocation.Longitude != 0) {
+		lat, lng := data.ExtendedLocation.Latitude, data.ExtendedLocation.Longitude
+		placeName := data.ExtendedLocation.PlaceName
+		placeType := string(data.ExtendedLocation.PlaceType)
+		// Phase 2: Redis 短期历史
+		agent.AppendLocationHistory(ctx, s.redisClient, userID, lat, lng, placeName, placeType)
+		// Phase 4: MySQL 长期聚类（异步，不阻塞上报）
+		if s.locationService != nil {
+			go s.locationService.RecordVisit(context.Background(), userID, lat, lng, placeName)
+		}
+	} else if data.Location != nil && (data.Location.Latitude != 0 || data.Location.Longitude != 0) {
+		lat, lng := data.Location.Latitude, data.Location.Longitude
+		// Phase 2: Redis 短期历史
+		agent.AppendLocationHistory(ctx, s.redisClient, userID, lat, lng, "", string(data.Location.PlaceType))
+		// Phase 4: MySQL 长期聚类（异步）
+		if s.locationService != nil {
+			go s.locationService.RecordVisit(context.Background(), userID, lat, lng, "")
+		}
+	}
 }
 
 // savePrevInference 保存上次推断结果（用于时间连续性）

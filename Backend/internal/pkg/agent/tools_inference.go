@@ -12,12 +12,19 @@ import (
 	"youkong/internal/repository"
 )
 
+// LocationClassifier 位置分类接口（避免循环依赖）
+type LocationClassifier interface {
+	ClassifyLocation(ctx context.Context, userID string, lat, lng float64) interface{}
+	RecordVisit(ctx context.Context, userID string, lat, lng float64, placeName string)
+}
+
 // InferenceToolDeps 推断工具依赖
 type InferenceToolDeps struct {
 	RedisClient        *tencent.RedisClient
 	MemoryRepo         *repository.MemoryRepository
 	ScheduleRepo       *repository.ScheduleRepository
 	UserProfileService UserProfileProvider
+	LocationService    LocationClassifier // Phase 4: 服务端位置聚类（可选）
 	UserID             string
 }
 
@@ -354,19 +361,29 @@ func gatherDeviceSignals(ctx context.Context, deps *InferenceToolDeps) map[strin
 	if sensorData.ExtendedLocation != nil {
 		loc := map[string]interface{}{
 			"place_type":             sensorData.ExtendedLocation.PlaceType,
+			"place_type_source":      "client_guess",
 			"at_place_since_minutes": sensorData.ExtendedLocation.AtPlaceSinceMinutes,
 		}
 		if sensorData.ExtendedLocation.PlaceName != "" {
 			loc["place_name"] = sensorData.ExtendedLocation.PlaceName
 		}
+		lat := sensorData.ExtendedLocation.Latitude
+		lng := sensorData.ExtendedLocation.Longitude
+		enrichLocationWithConfidence(ctx, deps, loc, lat, lng, string(sensorData.ExtendedLocation.PlaceType))
 		result["location"] = loc
 	} else if sensorData.Location != nil {
 		loc := map[string]interface{}{
 			"place_type":             sensorData.Location.PlaceType,
+			"place_type_source":      "client_guess",
 			"at_place_since_minutes": sensorData.Location.AtPlaceSinceMinutes,
 		}
 		if sensorData.Location.City != "" {
 			loc["city"] = sensorData.Location.City
+		}
+		lat := sensorData.Location.Latitude
+		lng := sensorData.Location.Longitude
+		if lat != 0 || lng != 0 {
+			enrichLocationWithConfidence(ctx, deps, loc, lat, lng, string(sensorData.Location.PlaceType))
 		}
 		result["location"] = loc
 	}
@@ -538,7 +555,7 @@ func gatherProfileData(ctx context.Context, deps *InferenceToolDeps, ic *model.V
 		}
 	}
 
-	// 核心记忆
+	// 核心记忆 + persona + 时段分布
 	if deps.MemoryRepo != nil {
 		coreMemory, err := deps.MemoryRepo.GetCoreMemory(ctx, deps.UserID)
 		if err == nil && coreMemory != nil {
@@ -554,6 +571,25 @@ func gatherProfileData(ctx context.Context, deps *InferenceToolDeps, ic *model.V
 			}
 			if len(memoryData) > 0 {
 				ic.CoreMemory = memoryData
+			}
+
+			// 注入个性化 persona 描述
+			if coreMemory.PersonaText != "" {
+				if ic.Profile == nil {
+					ic.Profile = make(map[string]interface{})
+				}
+				ic.Profile["persona"] = coreMemory.PersonaText
+			}
+
+			// 注入当前时段的历史分布
+			if coreMemory.TimePatternStats != "" {
+				slotDist := extractCurrentSlotDistribution(coreMemory.TimePatternStats, time.Now())
+				if slotDist != "" {
+					if ic.Profile == nil {
+						ic.Profile = make(map[string]interface{})
+					}
+					ic.Profile["current_slot_history"] = slotDist
+				}
 			}
 		}
 	}
@@ -591,7 +627,105 @@ func gatherPreferences(ctx context.Context, deps *InferenceToolDeps) []string {
 	return pref.Preferences
 }
 
+// enrichLocationWithConfidence 为 location map 注入置信度和服务端分类
+// 优先使用 Phase 4 MySQL 聚类（更精确），回退到 Phase 2 Redis 历史
+func enrichLocationWithConfidence(ctx context.Context, deps *InferenceToolDeps, loc map[string]interface{}, lat, lng float64, clientPlaceType string) {
+	if lat == 0 && lng == 0 {
+		return
+	}
+
+	// Phase 4: 尝试 MySQL 聚类分类（如果 LocationService 可用）
+	if deps.LocationService != nil {
+		classification := deps.LocationService.ClassifyLocation(ctx, deps.UserID, lat, lng)
+		if classification != nil {
+			// 通过类型断言获取字段
+			if classMap, ok := toMap(classification); ok {
+				if pt, ok := classMap["place_type"].(string); ok && pt != "" {
+					loc["place_type"] = pt
+				}
+				if pts, ok := classMap["place_type_source"].(string); ok && pts != "" {
+					loc["place_type_source"] = pts
+				}
+				if conf, ok := classMap["confidence"].(string); ok && conf != "" {
+					loc["location_confidence"] = conf
+				}
+				if isNew, ok := classMap["is_new_location"].(bool); ok {
+					loc["is_new_location"] = isNew
+				}
+				return // MySQL 分类成功，不需要 Redis 回退
+			}
+		}
+	}
+
+	// Phase 2: 回退到 Redis 历史置信度
+	conf := EvaluateLocationConfidence(ctx, deps.RedisClient, deps.UserID, lat, lng, clientPlaceType)
+	if conf != nil {
+		loc["location_confidence"] = conf.Confidence
+		loc["night_stays_7d"] = conf.NightStays7d
+		loc["is_new_location"] = conf.IsNewLocation
+		if conf.OverrideType != "" {
+			loc["place_type"] = conf.OverrideType
+			loc["place_type_source"] = "server_history"
+		}
+	}
+}
+
+// toMap 将 struct/interface 转为 map（通过 JSON 序列化）
+func toMap(v interface{}) (map[string]interface{}, bool) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, false
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(data, &m) != nil {
+		return nil, false
+	}
+	return m, true
+}
+
 // ========== 辅助函数 ==========
+
+// extractCurrentSlotDistribution 从 time_pattern_stats JSON 提取当前时段历史分布
+func extractCurrentSlotDistribution(statsJSON string, now time.Time) string {
+	if statsJSON == "" {
+		return ""
+	}
+
+	type slotStats struct {
+		Weekday map[string]map[string]int `json:"weekday"`
+		Weekend map[string]map[string]int `json:"weekend"`
+	}
+
+	var stats slotStats
+	if json.Unmarshal([]byte(statsJSON), &stats) != nil {
+		return ""
+	}
+
+	weekday := now.Weekday()
+	hour := now.Hour()
+	hourStr := fmt.Sprintf("%d", hour)
+	weekdays := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
+
+	isWeekend := weekday == time.Saturday || weekday == time.Sunday
+	var dist map[string]int
+	if isWeekend {
+		dist = stats.Weekend[hourStr]
+	} else {
+		dist = stats.Weekday[hourStr]
+	}
+
+	if len(dist) == 0 {
+		return ""
+	}
+
+	var parts []string
+	for activity, count := range dist {
+		parts = append(parts, fmt.Sprintf("%s(%d次)", activity, count))
+	}
+
+	return fmt.Sprintf("%s %d:00-%d:00 历史分布: %s",
+		weekdays[weekday], hour, hour+1, strings.Join(parts, ", "))
+}
 
 // getCachedSensorForInference 从 Redis 获取推断用的传感器数据
 func getCachedSensorForInference(ctx context.Context, redisClient *tencent.RedisClient, userID string) *model.ExtendedStatusReportRequest {
