@@ -52,6 +52,7 @@ type AgentHandler struct {
 	userSettingsRepo       *repository.UserSettingsRepository // 用户设置（自动推测开关）
 	inferencePersonaService *service.InferencePersonaService // Persona 生成服务（测试用）
 	memoryRepo              *repository.MemoryRepository      // Memory repo（persona 查询）
+	scenarioEngine          *service.ScenarioEngine           // 场景测试引擎
 	// STS 配置
 	stsSecretID  string
 	stsSecretKey string
@@ -3171,5 +3172,115 @@ func (h *AgentHandler) TestInferenceABReport(c *gin.Context) {
 
 	c.Header("Content-Type", "text/markdown; charset=utf-8")
 	c.String(http.StatusOK, markdown)
+}
+
+// ========== 场景测试端点 ==========
+
+// SetScenarioEngine 设置场景测试引擎
+func (h *AgentHandler) SetScenarioEngine(engine *service.ScenarioEngine) {
+	h.scenarioEngine = engine
+}
+
+// TestScenarioFull 运行完整场景测试（30 画像 × 30 天）
+// POST /api/v1/agent/test/scenario-full
+func (h *AgentHandler) TestScenarioFull(c *gin.Context) {
+	if h.scenarioEngine == nil {
+		response.InternalError(c, "场景测试引擎未配置")
+		return
+	}
+
+	fmt.Printf("[Scenario] 开始全量场景测试（30画像×30天）\n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+
+	report, err := h.scenarioEngine.RunFullScenario(ctx)
+	if err != nil {
+		response.InternalError(c, fmt.Sprintf("场景测试失败: %v", err))
+		return
+	}
+
+	markdown := service.GenerateScenarioReport(report)
+
+	fmt.Printf("[Scenario] 完成: 总通过率=%.1f%% 耗时=%s\n",
+		report.Summary.OverallPassRate, report.Duration.Round(time.Second))
+
+	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	c.String(http.StatusOK, markdown)
+}
+
+// TestScenarioSingle 运行单画像场景测试
+// POST /api/v1/agent/test/scenario-single
+func (h *AgentHandler) TestScenarioSingle(c *gin.Context) {
+	if h.scenarioEngine == nil {
+		response.InternalError(c, "场景测试引擎未配置")
+		return
+	}
+
+	var req struct {
+		PersonaID string   `json:"persona_id" binding:"required"`
+		Days      int      `json:"days"`
+		Scenarios []string `json:"scenarios"` // "oneclick", "autoinfer", "conversation"
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, fmt.Sprintf("参数错误: %v", err))
+		return
+	}
+
+	if req.Days <= 0 {
+		req.Days = 5
+	}
+
+	fmt.Printf("[Scenario] 开始单画像测试: %s days=%d\n", req.PersonaID, req.Days)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	report, err := h.scenarioEngine.RunSinglePersonaScenario(ctx, req.PersonaID, req.Days)
+	if err != nil {
+		response.InternalError(c, fmt.Sprintf("场景测试失败: %v", err))
+		return
+	}
+
+	markdown := service.GenerateScenarioReport(report)
+
+	fmt.Printf("[Scenario] %s 完成: 总通过率=%.1f%% 耗时=%s\n",
+		req.PersonaID, report.Summary.OverallPassRate, report.Duration.Round(time.Second))
+
+	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	c.String(http.StatusOK, markdown)
+}
+
+// TestScenarioJSON 运行单画像场景测试（返回 JSON）
+// POST /api/v1/agent/test/scenario-json
+func (h *AgentHandler) TestScenarioJSON(c *gin.Context) {
+	if h.scenarioEngine == nil {
+		response.InternalError(c, "场景测试引擎未配置")
+		return
+	}
+
+	var req struct {
+		PersonaID string `json:"persona_id" binding:"required"`
+		Days      int    `json:"days"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ParamError(c, fmt.Sprintf("参数错误: %v", err))
+		return
+	}
+
+	if req.Days <= 0 {
+		req.Days = 3
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	report, err := h.scenarioEngine.RunSinglePersonaScenario(ctx, req.PersonaID, req.Days)
+	if err != nil {
+		response.InternalError(c, fmt.Sprintf("场景测试失败: %v", err))
+		return
+	}
+
+	response.Success(c, report)
 }
 

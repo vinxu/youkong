@@ -307,6 +307,13 @@ func main() {
 		agentHandler.SetInferenceABConfig(cfg.LLM.APIKey, cfg.LLM.Model)
 		logger.Info("V3/V4 推断 A/B 对比测试已启用")
 	}
+	// 初始化场景测试引擎
+	scenarioEngine := service.NewScenarioEngine(
+		voiceScheduleServiceV4, agentService, scheduleRepo, memoryRepo, redisClient,
+		service.ScenarioConfig{DaysToSimulate: 30, Concurrency: 3},
+	)
+	agentHandler.SetScenarioEngine(scenarioEngine)
+	logger.Info("V4 场景测试引擎已初始化")
 	contactHandler := handler.NewContactHandler(contactService)
 	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
 	wsHandler := handler.NewWSHandler(wsManager, jwtManager)
@@ -515,6 +522,9 @@ func main() {
 				agent.POST("/test/persona-generate", agentHandler.TestPersonaGenerate)    // 手动触发 persona 生成
 				agent.POST("/test/inference-ab", agentHandler.TestInferenceAB)             // V3/V4 推断全面 A/B 对比
 				agent.POST("/test/inference-ab/report", agentHandler.TestInferenceABReport) // V3/V4 对比 Markdown 报告
+				agent.POST("/test/scenario-full", agentHandler.TestScenarioFull)       // V4 全量场景测试（30画像×30天）
+				agent.POST("/test/scenario-single", agentHandler.TestScenarioSingle)   // V4 单画像场景测试
+				agent.POST("/test/scenario-json", agentHandler.TestScenarioJSON)       // V4 单画像场景测试（JSON）
 			}
 
 			// 通讯录模块
