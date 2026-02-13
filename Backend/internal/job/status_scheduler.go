@@ -316,8 +316,21 @@ func (s *StatusScheduler) updateUserStatus(ctx context.Context, userID string, i
 		IsAIGuess: item.IsAIGuess, // 保留原始的 AI 推测标记
 	}
 
-	// 缓存到 Redis
+	// 缓存到 Redis（如果是 AI 猜测，先检查是否会覆盖用户手动状态）
 	key := fmt.Sprintf("analysis_cache:%s", userID)
+
+	if item.IsAIGuess && s.redisClient != nil {
+		existingData, err := s.redisClient.GetBytes(ctx, key)
+		if err == nil && len(existingData) > 0 {
+			var existing model.AnalysisResult
+			if err := json.Unmarshal(existingData, &existing); err == nil && !existing.IsAIGuess {
+				fmt.Printf("[StatusScheduler] 跳过状态更新：用户已手动确认状态 user=%s (现有=%s, 推测=%s)\n",
+					userID, existing.LifeStatus.Label, item.Status)
+				return nil
+			}
+		}
+	}
+
 	data, err := json.Marshal(analysisResult)
 	if err != nil {
 		return err

@@ -91,8 +91,8 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 	// 6. 批量获取用户的城市显示设置
 	showCityMap := s.getUserShowCitySettings(ctx, friendIDs)
 
-	// 7. 批量检查时刻表状态（当前时段 highlight + 此刻是否有状态）
-	highlightMap, hasCurrentStatusMap := s.getUserScheduleStatus(ctx, friendIDs)
+	// 7. 批量获取时刻表当前时段状态（作为首页展示的权威数据源）
+	currentItemMap, hasCurrentStatusMap := s.getUserScheduleStatus(ctx, friendIDs)
 
 	// 8. 构建宫格数据
 	friends := make([]FriendGridItem, 0, len(friendIDs))
@@ -107,29 +107,42 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 		status := "未知"
 		updatedAt := time.Now()
 		isAvailable := false
+		gifURL := ""
+		giphyQuery := ""
+		useGif := false
 
-		if analysis != nil {
+		// 时间表当前时段优先：确保首页和时间表显示一致
+		if schedItem, ok := currentItemMap[fid]; ok {
+			emoji = schedItem.Emoji
+			status = schedItem.Status
+			isAvailable = schedItem.Highlight
+			gifURL = schedItem.GifURL
+			giphyQuery = schedItem.GiphyQuery
+			useGif = gifURL != ""
+			// 从 analysis 中补充 updatedAt
+			if analysis != nil {
+				updatedAt = analysis.UpdatedAt
+			}
+		} else if analysis != nil {
+			// 没有当前时段时，回退到 analysis_cache
 			emoji = analysis.LifeStatus.Emoji
 			status = analysis.LifeStatus.Label
 			updatedAt = analysis.UpdatedAt
+			gifURL = analysis.LifeStatus.GifURL
+			giphyQuery = analysis.LifeStatus.GiphyQuery
+			useGif = analysis.LifeStatus.UseGif
 
-			// 如果 emoji 为空，使用默认值
-			if emoji == "" {
-				emoji = "🤔"
-			}
-			if status == "" {
-				status = "未知"
-			}
-
-			// 判断是否有空（Availability.Status == "有空"）
 			if analysis.Availability.Status == "有空" {
 				isAvailable = true
 			}
 		}
 
-		// 时刻表 highlight 优先：用户手动设置的"有空"状态实时生效
-		if hl, ok := highlightMap[fid]; ok {
-			isAvailable = hl
+		// 如果 emoji/status 为空，使用默认值
+		if emoji == "" {
+			emoji = "🤔"
+		}
+		if status == "" {
+			status = "未知"
 		}
 
 		isSelf := fid == userID
@@ -143,16 +156,6 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 		city := ""
 		if showCityMap[fid] {
 			city = cityMap[fid]
-		}
-
-		// 获取 GIF 信息
-		gifURL := ""
-		giphyQuery := ""
-		useGif := false
-		if analysis != nil {
-			gifURL = analysis.LifeStatus.GifURL
-			giphyQuery = analysis.LifeStatus.GiphyQuery
-			useGif = analysis.LifeStatus.UseGif
 		}
 
 		// 自己此刻没有时刻表条目时，标记为需要设置行程
@@ -287,8 +290,17 @@ func formatRelativeTime(t time.Time) string {
 // 返回:
 //   - highlightMap: 当前时段 highlight=true 的用户
 //   - hasCurrentStatusMap: 此刻有时刻表条目覆盖的用户（"此刻有状态"）
-func (s *HomeService) getUserScheduleStatus(ctx context.Context, userIDs []string) (highlightMap map[string]bool, hasCurrentStatusMap map[string]bool) {
-	highlightMap = make(map[string]bool)
+// scheduleStatusInfo 时间表当前时段的状态信息
+type scheduleStatusInfo struct {
+	Emoji      string
+	Status     string
+	Highlight  bool
+	GifURL     string
+	GiphyQuery string
+}
+
+func (s *HomeService) getUserScheduleStatus(ctx context.Context, userIDs []string) (currentItemMap map[string]*scheduleStatusInfo, hasCurrentStatusMap map[string]bool) {
+	currentItemMap = make(map[string]*scheduleStatusInfo)
 	hasCurrentStatusMap = make(map[string]bool)
 	if s.scheduleRepo == nil {
 		return
@@ -308,7 +320,13 @@ func (s *HomeService) getUserScheduleStatus(ctx context.Context, userIDs []strin
 		for _, item := range schedule.Items {
 			if item.StartTime <= currentTime && currentTime < item.EndTime {
 				hasCurrentStatusMap[uid] = true
-				highlightMap[uid] = item.Highlight
+				currentItemMap[uid] = &scheduleStatusInfo{
+					Emoji:      item.Emoji,
+					Status:     item.Status,
+					Highlight:  item.Highlight,
+					GifURL:     item.GifURL,
+					GiphyQuery: item.GiphyQuery,
+				}
 				break
 			}
 		}
