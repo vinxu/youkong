@@ -97,6 +97,11 @@ func NewVoiceScheduleServiceV4(
 // getToolsForSession 根据 session 状态动态选择工具集
 // 基础 8 工具始终加载，其余工具按条件加载（LLM 看不到的工具不会误选）
 func (s *VoiceScheduleServiceV4) getToolsForSession(session *model.V4Session) []*agent.Tool {
+	// 推断模式：使用推断专用版 set_status（优化描述引导具体输出）
+	if session.InferenceMode {
+		return []*agent.Tool{agent.V4InferenceSetStatusTool()}
+	}
+
 	tools := agent.V4BaseTools() // 基础 8 个
 
 	// 条件加载：有安排时暴露删除工具
@@ -139,6 +144,99 @@ func (s *VoiceScheduleServiceV4) ProcessTextInput(
 		defer s.releaseSessionLock(ctx, sessionID)
 	}
 	return s.processTextInputInternal(ctx, userID, sessionID, text, sensorData, callback)
+}
+
+// InferStatus V4 推断模式入口（替代 V3 StatusInferenceAgent）
+// 创建临时 session，只暴露 set_status 工具，强制 LLM 根据数据推断状态
+func (s *VoiceScheduleServiceV4) InferStatus(
+	ctx context.Context,
+	userID string,
+	sensorData *model.ExtendedStatusReportRequest,
+	inferenceContext string,
+	callback func(event *model.V4Event),
+) (*model.InferenceResponse, error) {
+	if s.llmAdapter == nil {
+		return nil, fmt.Errorf("LLM 未配置")
+	}
+
+	// 检查推断锁（防止过于频繁的推断覆盖用户主动设置）
+	if s.redisClient != nil {
+		lockKey := fmt.Sprintf("infer:lock:%s", userID)
+		if locked, _ := s.redisClient.Get(ctx, lockKey); locked != "" {
+			return &model.InferenceResponse{
+				Phase: model.InferencePhaseCompleted,
+				Result: &model.CurrentStatusInference{
+					Emoji:      "⏳",
+					Activity:   "状态保持中",
+					Confidence: "low",
+					Reasoning:  "推断锁生效中，跳过本次推断",
+					InferredAt: time.Now().UnixMilli(),
+				},
+			}, nil
+		}
+	}
+
+	// 缓存传感器数据
+	if sensorData != nil {
+		s.cacheSensorDataForInference(ctx, userID, sensorData)
+	}
+
+	// 创建临时推断 session（不持久化到 Redis）
+	session := &model.V4Session{
+		UserID:           userID,
+		SessionID:        fmt.Sprintf("infer_%s_%d", userID, time.Now().UnixMilli()),
+		CreatedAt:        time.Now(),
+		InferenceMode:    true,
+		InferenceContext: inferenceContext,
+		SensorData:       sensorData,
+	}
+
+	// 加载今日安排到 session（供系统提示词展示）
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	if schedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, userID, today); err == nil && schedule != nil {
+		session.CurrentSchedule = schedule.Items
+	}
+
+	// 添加推断请求作为用户消息
+	session.AddMessage("user", "请根据上述数据推断我此刻的状态")
+
+	// 运行 V4 主循环（只有 set_status 工具可用）
+	// executeUpdateCurrentStatus 会将结果保存到 session.InferenceResult
+	if err := s.processLoopWithTools(ctx, session, callback); err != nil {
+		return nil, fmt.Errorf("推断循环失败: %w", err)
+	}
+
+	// 从 session 获取推断结果
+	inferResult := session.InferenceResult
+	if inferResult == nil {
+		// LLM 没有调用 set_status，返回默认结果
+		inferResult = &model.CurrentStatusInference{
+			Emoji:      "🤔",
+			Activity:   "状态未知",
+			Confidence: "low",
+			Reasoning:  "推断循环未产出结果",
+			InferredAt: time.Now().UnixMilli(),
+			Source:     model.InferenceSourceAIOneclick,
+		}
+	}
+
+	// 设置来源标记
+	inferResult.Source = model.InferenceSourceAIOneclick
+
+	// GIF 翻译
+	s.enrichInferenceWithGif(ctx, inferResult)
+
+	// 设置推断锁（10 分钟内不会被 StatusScheduler 覆盖）
+	s.setInferenceLock(ctx, userID)
+
+	// 保存本次推断结果（供下次推断参考）
+	s.savePrevInference(ctx, userID, inferResult)
+
+	return &model.InferenceResponse{
+		Phase:  model.InferencePhaseCompleted,
+		Result: inferResult,
+	}, nil
 }
 
 // processTextInputInternal 处理文本输入（内部方法，调用方已持有锁）
@@ -273,12 +371,17 @@ func (s *VoiceScheduleServiceV4) processLoopWithTools(
 		tools := s.getToolsForSession(session)
 
 		// 3. 调用 LLM（启用 thinking mode，精确决策低温度）
+		// 推断模式是后台任务，给更多思考空间让模型自主推理
+		thinkingBudget := 2048
+		if session.InferenceMode {
+			thinkingBudget = 6144
+		}
 		response, err := s.llmAdapter.ChatWithTools(ctx, &agent.LLMRequest{
 			Messages:       messages,
 			Tools:          tools,
 			Temperature:    0.3,
 			EnableThinking: true,
-			ThinkingBudget: 2048,
+			ThinkingBudget: thinkingBudget,
 		})
 		if err != nil {
 			return fmt.Errorf("LLM 调用失败: %w", err)
@@ -603,6 +706,40 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 		}
 	}
 
+	// ========== 推断模式（V4 替代 V3 StatusInferenceAgent）==========
+	// 设计原则：prompt 引导思考方向，不硬编码规则；推理在 thinking tokens 中完成
+	if session.InferenceMode {
+		sb.WriteString(`【推断模式】
+你是「有空」状态推断引擎。分析实时设备信号，推断用户此刻的具体活动，然后调用 set_status 工具。不要输出文字给用户。
+
+# 你的思考过程应该覆盖：
+1. **信号优先级**：实时设备信号（屏幕、位置、运动、日历）是此刻状态的直接证据，优先级最高。时刻表和历史记录是辅助参考。AI 推测与实时信号矛盾时忽略。
+2. **具体化**：用户状态应该是具体的日常活动（2-4字），不要使用"娱乐中""在家休息""居家休闲"等笼统描述。想象你是用户的朋友，你会怎样用最简短的口语描述他现在在做什么？比如"刷手机""工作""睡觉""刷剧""聊微信""开车上班"。
+3. **时间语境**：工作日和周末的同一信号可能意味着不同活动。深夜、清晨、午间有各自的合理推断。
+4. **is_available 含义**：表示用户此刻是否方便被打扰/有空社交。工作、开会、通勤、睡觉、运动等通常为 false；在家休闲、空闲、午休等通常为 true。
+5. **用户修正**：修正历史中纠正过的推断不能再犯。
+
+# status 格式
+- 2-4字，口语化动词短语。如：刷手机、工作、睡觉、刷剧、聊微信、开车上班、午休、散步
+- 不要加地点前缀（如"在家""居家"）和修饰词（如"专注""深夜"），这些信息已在 emoji 中体现
+
+# emoji 选择
+用 1-3 个 emoji 组合反映地点+活动，例如 📱🏠 表示在家用手机、💼💻 表示在办公。
+
+`)
+		if session.InferenceContext != "" {
+			sb.WriteString("【多维上下文数据】\n")
+			sb.WriteString(session.InferenceContext)
+			sb.WriteString("\n\n")
+		}
+		if session.SensorData != nil {
+			sb.WriteString("【实时设备数据】\n")
+			sb.WriteString(formatSensorData(session.SensorData))
+			sb.WriteString("\n\n")
+		}
+		return sb.String()
+	}
+
 	// ========== AI 推断状态（V3 近期结果）==========
 	if session.RecentInference != "" {
 		sb.WriteString(fmt.Sprintf("【当前 AI 推断状态】%s（用户可能想修改）\n\n", session.RecentInference))
@@ -622,80 +759,45 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 func formatSensorData(data *model.ExtendedStatusReportRequest) string {
 	var sb strings.Builder
 
+	// 屏幕（最关键的推断信号）
+	if data.Screen != nil {
+		s := data.Screen
+		if s.IsActive {
+			sb.WriteString(fmt.Sprintf("- screen: is_active=true, activity_type=%s, session_duration_minutes=%d\n",
+				s.ActivityType, s.SessionDurationMinutes))
+		} else {
+			sb.WriteString(fmt.Sprintf("- screen: is_active=false, last_active_minutes_ago=%d\n",
+				s.LastActiveMinutesAgo))
+		}
+	}
+
 	// 位置
 	if data.ExtendedLocation != nil {
 		loc := data.ExtendedLocation
-		placeNames := map[string]string{
-			"home": "家", "work": "公司", "leisure": "休闲场所", "transit": "路上", "unknown": "未知",
-		}
-		placeName := placeNames[string(loc.PlaceType)]
+		sb.WriteString(fmt.Sprintf("- location: place_type=%s, at_place_since_minutes=%d",
+			loc.PlaceType, loc.AtPlaceSinceMinutes))
 		if loc.PlaceName != "" {
-			placeName = loc.PlaceName
-		}
-		sb.WriteString(fmt.Sprintf("- 位置: %s", placeName))
-		if loc.AtPlaceSinceMinutes > 0 {
-			sb.WriteString(fmt.Sprintf("，已停留%d分钟", loc.AtPlaceSinceMinutes))
+			sb.WriteString(fmt.Sprintf(", place_name=%s", loc.PlaceName))
 		}
 		sb.WriteString("\n")
 	} else if data.Location != nil {
 		loc := data.Location
-		placeNames := map[string]string{
-			"home": "家", "work": "公司", "leisure": "休闲场所", "transit": "路上",
-		}
-		placeName := placeNames[string(loc.PlaceType)]
-		if placeName == "" {
-			placeName = string(loc.PlaceType)
-		}
-		sb.WriteString(fmt.Sprintf("- 位置: %s", placeName))
-		if loc.AtPlaceSinceMinutes > 0 {
-			sb.WriteString(fmt.Sprintf("，已停留%d分钟", loc.AtPlaceSinceMinutes))
-		}
-		sb.WriteString("\n")
-	}
-
-	// 电池
-	if data.Battery != nil {
-		b := data.Battery
-		charging := "未充电"
-		if b.IsCharging {
-			charging = "充电中"
-		}
-		sb.WriteString(fmt.Sprintf("- 电池: %d%%, %s\n", b.BatteryLevel, charging))
+		sb.WriteString(fmt.Sprintf("- location: place_type=%s, at_place_since_minutes=%d\n",
+			loc.PlaceType, loc.AtPlaceSinceMinutes))
 	}
 
 	// 运动
 	if data.Movement != nil {
 		m := data.Movement
 		if m.IsMoving {
-			movTypes := map[string]string{"walking": "步行中", "driving": "驾车中", "running": "跑步中"}
-			if t, ok := movTypes[m.MovementType]; ok {
-				sb.WriteString(fmt.Sprintf("- 运动: %s\n", t))
-			} else {
-				sb.WriteString("- 运动: 移动中\n")
+			sb.WriteString(fmt.Sprintf("- movement: is_moving=true, activity=%s", m.MovementType))
+			if m.MovingDirection != "" {
+				sb.WriteString(fmt.Sprintf(", direction=%s", m.MovingDirection))
 			}
+			sb.WriteString("\n")
 		} else {
-			sb.WriteString("- 运动: 静止\n")
-		}
-	}
-
-	// 网络/耳机
-	if data.Connection != nil {
-		c := data.Connection
-		sb.WriteString(fmt.Sprintf("- 网络: %s", c.NetworkType))
-		if c.IsHeadphonesConnected {
-			sb.WriteString("，耳机已连接")
-		}
-		sb.WriteString("\n")
-	}
-
-	// 模式
-	if data.Mode != nil {
-		m := data.Mode
-		if m.IsFocusModeOn {
-			sb.WriteString("- 模式: 专注模式开启\n")
-		}
-		if m.IsLowPowerMode {
-			sb.WriteString("- 模式: 低电量模式\n")
+			sb.WriteString(fmt.Sprintf("- movement: is_moving=false, stationary_minutes=%d\n",
+				m.StationaryMinutes))
 		}
 	}
 
@@ -703,14 +805,38 @@ func formatSensorData(data *model.ExtendedStatusReportRequest) string {
 	if data.Calendar != nil {
 		cal := data.Calendar
 		if cal.HasCurrentEvent {
-			sb.WriteString(fmt.Sprintf("- 日历: 当前有事件「%s」", cal.CurrentEventTitle))
-			if cal.EventEndMinutes > 0 {
-				sb.WriteString(fmt.Sprintf("，还有%d分钟结束", cal.EventEndMinutes))
-			}
-			sb.WriteString("\n")
+			sb.WriteString(fmt.Sprintf("- calendar: has_current_event=true, title=%s, ends_in_minutes=%d\n",
+				cal.CurrentEventTitle, cal.EventEndMinutes))
 		} else if cal.NextEventInMinutes > 0 {
-			sb.WriteString(fmt.Sprintf("- 日历: 下个事件在%d分钟后\n", cal.NextEventInMinutes))
+			sb.WriteString(fmt.Sprintf("- calendar: has_current_event=false, next_event_in_minutes=%d\n",
+				cal.NextEventInMinutes))
 		}
+		if cal.TodayRemainingCount > 0 {
+			sb.WriteString(fmt.Sprintf("- calendar: today_remaining_events=%d\n", cal.TodayRemainingCount))
+		}
+	}
+
+	// 电池
+	if data.Battery != nil {
+		b := data.Battery
+		sb.WriteString(fmt.Sprintf("- battery: level=%d%%, is_charging=%v\n",
+			b.BatteryLevel, b.IsCharging))
+	}
+
+	// 模式
+	if data.Mode != nil {
+		m := data.Mode
+		if m.IsFocusModeOn || m.IsLowPowerMode {
+			sb.WriteString(fmt.Sprintf("- mode: focus_mode=%v, low_power=%v\n",
+				m.IsFocusModeOn, m.IsLowPowerMode))
+		}
+	}
+
+	// 连接
+	if data.Connection != nil {
+		c := data.Connection
+		sb.WriteString(fmt.Sprintf("- connection: network=%s, headphones=%v\n",
+			c.NetworkType, c.IsHeadphonesConnected))
 	}
 
 	return sb.String()
@@ -1374,19 +1500,47 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 		return map[string]string{"error": "保存失败: " + saveErr.Error()}, false
 	}
 
-	// 同步更新首页分析缓存，让首页 grid 立即显示新状态
-	analysisResult := &model.AnalysisResult{
-		LifeStatus: model.LifeStatus{
-			Emoji: emoji,
-			Label: status,
-		},
-		Availability: model.AvailabilityAnalysis{
-			Status: "有空",
-		},
-		IsAIGuess: false, // 用户主动设置，非 AI 猜测
-	}
-	if cacheErr := s.memoryRepo.SaveAnalysisCache(ctx, session.UserID, analysisResult); cacheErr != nil {
-		fmt.Printf("[V4] 更新分析缓存失败: %v\n", cacheErr)
+	// 推断模式：将完整结果保存到 session（供 InferStatus 提取）
+	if session.InferenceMode {
+		// V4 原则：不做代码层语义覆盖，thinking mode 的推理结果即最终输出
+		session.InferenceResult = &model.CurrentStatusInference{
+			Emoji:       emoji,
+			Activity:    status,
+			IsAvailable: highlight,
+			Confidence:  "high",
+			InferredAt:  time.Now().UnixMilli(),
+		}
+		// 推断模式下标记为 AI 猜测
+		isAIGuess := true
+		// 同步更新首页分析缓存
+		analysisResult := &model.AnalysisResult{
+			LifeStatus: model.LifeStatus{
+				Emoji: emoji,
+				Label: status,
+			},
+			Availability: model.AvailabilityAnalysis{
+				Status: "有空",
+			},
+			IsAIGuess: isAIGuess,
+		}
+		if cacheErr := s.memoryRepo.SaveAnalysisCache(ctx, session.UserID, analysisResult); cacheErr != nil {
+			fmt.Printf("[V4] 更新分析缓存失败: %v\n", cacheErr)
+		}
+	} else {
+		// 同步更新首页分析缓存，让首页 grid 立即显示新状态
+		analysisResult := &model.AnalysisResult{
+			LifeStatus: model.LifeStatus{
+				Emoji: emoji,
+				Label: status,
+			},
+			Availability: model.AvailabilityAnalysis{
+				Status: "有空",
+			},
+			IsAIGuess: false, // 用户主动设置，非 AI 猜测
+		}
+		if cacheErr := s.memoryRepo.SaveAnalysisCache(ctx, session.UserID, analysisResult); cacheErr != nil {
+			fmt.Printf("[V4] 更新分析缓存失败: %v\n", cacheErr)
+		}
 	}
 
 	// 构造消息（若覆盖了 V3 推断，告知用户）
@@ -2985,3 +3139,113 @@ func (s *VoiceScheduleServiceV4) executeAddFriend(
 
 // [已删除] executeQueryDeviceData, executeQueryMemory, executeUpdateMemory, executeGetBehaviorSuggestion
 // Phase 5: 设备数据通过系统提示词注入，记忆通过 buildSystemPromptWithMemory 注入，行为建议是 LLM 自身能力
+
+// ========== 推断模式：实现 StatusInferrer 接口 ==========
+
+// InferWithAgent 实现 job.StatusInferrer 接口，供 StatusScheduler 自动推断使用
+// sensorData 可为 nil，此时从 Redis 缓存读取
+func (s *VoiceScheduleServiceV4) InferWithAgent(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest) (*model.CurrentStatusInference, error) {
+	// 聚合推断上下文（复用 V3 的 PreGatherContext）
+	deps := &agent.InferenceToolDeps{
+		RedisClient:        s.redisClient,
+		MemoryRepo:         s.memoryRepo,
+		ScheduleRepo:       s.scheduleRepo,
+		UserProfileService: s.userProfileService,
+		UserID:             userID,
+	}
+	inferCtx := agent.PreGatherContext(ctx, deps)
+	inferenceContext := agent.FormatContextForPrompt(inferCtx)
+
+	// 调用 V4 推断
+	resp, err := s.InferStatus(ctx, userID, sensorData, inferenceContext, nil)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result, nil
+}
+
+// ========== 推断模式辅助方法 ==========
+
+// enrichInferenceWithGif 为推断结果生成 GIF 搜索词
+func (s *VoiceScheduleServiceV4) enrichInferenceWithGif(ctx context.Context, result *model.CurrentStatusInference) {
+	if result == nil || result.Activity == "" {
+		return
+	}
+
+	// 先查缓存
+	cacheKey := fmt.Sprintf("giphy:query:%s", result.Activity)
+	if s.redisClient != nil {
+		if cached, err := s.redisClient.Get(ctx, cacheKey); err == nil && cached != "" {
+			result.GiphyQuery = cached
+			return
+		}
+	}
+
+	// 用 LLM 翻译中文活动为英文 Giphy 搜索词
+	if s.llmAdapter == nil {
+		return
+	}
+
+	prompt := fmt.Sprintf(`You are generating a Giphy GIF search query. Given a user's current activity, output 2-4 English keywords that would find a relevant, visually matching animated GIF on Giphy.
+
+Rules:
+- Focus on the ACTION or SCENE, not greetings or time of day
+- Use concrete visual words (e.g. "sleeping cozy bed" not "chill at home")
+- Prefer verbs and objects that show up well in animations
+- Do NOT include words like "good morning", "hello", "hi" etc.
+- Only output the search query, nothing else
+
+Activity: %s`, result.Activity)
+
+	query, err := s.llmAdapter.Chat(ctx, prompt)
+	if err != nil {
+		fmt.Printf("[V4 Infer] GIF 翻译失败: %v\n", err)
+		return
+	}
+
+	query = strings.TrimSpace(query)
+	query = strings.Trim(query, "\"'`")
+
+	if query != "" {
+		result.GiphyQuery = query
+		// 缓存翻译结果
+		if s.redisClient != nil {
+			s.redisClient.Set(ctx, cacheKey, query, 24*time.Hour)
+		}
+	}
+}
+
+// setInferenceLock 设置推断锁（防止 StatusScheduler 立即覆盖用户/AI 的推断）
+func (s *VoiceScheduleServiceV4) setInferenceLock(ctx context.Context, userID string) {
+	if s.redisClient == nil {
+		return
+	}
+	key := fmt.Sprintf("infer:lock:%s", userID)
+	s.redisClient.Set(ctx, key, "1", 10*time.Minute)
+}
+
+// savePrevInference 保存推断结果（供下次推断参考时间连续性）
+func (s *VoiceScheduleServiceV4) savePrevInference(ctx context.Context, userID string, result *model.CurrentStatusInference) {
+	if s.redisClient == nil || result == nil {
+		return
+	}
+	key := fmt.Sprintf("infer:prev:%s", userID)
+	data, err := json.Marshal(result)
+	if err != nil {
+		return
+	}
+	s.redisClient.Set(ctx, key, data, 2*time.Hour)
+}
+
+// cacheSensorDataForInference 缓存传感器数据到 Redis（推断模式用）
+func (s *VoiceScheduleServiceV4) cacheSensorDataForInference(ctx context.Context, userID string, data *model.ExtendedStatusReportRequest) {
+	if s.redisClient == nil || data == nil {
+		return
+	}
+	extKey := fmt.Sprintf("agent:extended:%s", userID)
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	s.redisClient.Set(ctx, extKey, jsonData, 30*time.Minute)
+}

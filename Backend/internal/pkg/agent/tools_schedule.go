@@ -35,6 +35,41 @@ func V4ScheduleTools() []*Tool {
 	}
 }
 
+// V4SetStatusTool 导出 set_status 工具（推断模式下单独使用）
+func V4SetStatusTool() *Tool { return v4SetStatusTool() }
+
+// V4InferenceSetStatusTool 推断专用版 set_status
+// 设计原则：tool schema 保持中立，推理在 thinking tokens 中完成
+func V4InferenceSetStatusTool() *Tool {
+	return &Tool{
+		Name: "set_status",
+		Description: `根据思考分析的结果设置用户当前状态。`,
+		Parameters: ToolParameters{
+			Type: "object",
+			Properties: map[string]ToolParam{
+				"emoji": {
+					Type:        "string",
+					Description: "1-3个emoji，匹配地点+活动",
+				},
+				"status": {
+					Type:        "string",
+					Description: "具体活动描述，2-6字",
+				},
+				"available": {
+					Type:        "boolean",
+					Description: "用户此刻是否有空被打扰/社交",
+				},
+				"confidence": {
+					Type:        "string",
+					Description: "推断置信度",
+					Enum:        []string{"high", "medium", "low"},
+				},
+			},
+			Required: []string{"emoji", "status", "available", "confidence"},
+		},
+	}
+}
+
 // V4DeleteScheduleTool 条件加载：删除日程（仅在有安排时暴露）
 func V4DeleteScheduleTool() *Tool { return v4DeleteScheduleTool() }
 
