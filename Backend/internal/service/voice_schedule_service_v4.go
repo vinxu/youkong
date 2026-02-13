@@ -132,6 +132,10 @@ func (s *VoiceScheduleServiceV4) ProcessTextInput(
 	sensorData *model.ExtendedStatusReportRequest,
 	callback func(event *model.V4Event),
 ) (*model.V4Session, error) {
+	// 安全化 callback
+	if callback == nil {
+		callback = func(event *model.V4Event) {}
+	}
 	// 获取 session 锁（防止同一 session 并发处理导致状态丢失）
 	if sessionID != "" && !s.acquireSessionLock(ctx, sessionID) {
 		callback(&model.V4Event{
@@ -157,6 +161,11 @@ func (s *VoiceScheduleServiceV4) InferStatus(
 ) (*model.InferenceResponse, error) {
 	if s.llmAdapter == nil {
 		return nil, fmt.Errorf("LLM 未配置")
+	}
+
+	// 安全化 callback：nil 转为 noop，避免下游 nil pointer panic
+	if callback == nil {
+		callback = func(event *model.V4Event) {}
 	}
 
 	// 检查推断锁（防止过于频繁的推断覆盖用户主动设置）
@@ -3162,6 +3171,19 @@ func (s *VoiceScheduleServiceV4) InferWithAgent(ctx context.Context, userID stri
 		return nil, err
 	}
 	return resp.Result, nil
+}
+
+// GatherInferenceContext 聚合推断上下文并格式化为文本
+func (s *VoiceScheduleServiceV4) GatherInferenceContext(ctx context.Context, userID string) string {
+	deps := &agent.InferenceToolDeps{
+		RedisClient:        s.redisClient,
+		MemoryRepo:         s.memoryRepo,
+		ScheduleRepo:       s.scheduleRepo,
+		UserProfileService: s.userProfileService,
+		UserID:             userID,
+	}
+	inferCtx := agent.PreGatherContext(ctx, deps)
+	return agent.FormatContextForPrompt(inferCtx)
 }
 
 // ========== 推断模式辅助方法 ==========

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/go-sql-driver/mysql"
@@ -18,7 +19,6 @@ import (
 	"youkong/internal/job"
 	"youkong/internal/middleware"
 	"youkong/internal/pkg/asr"
-	"youkong/internal/pkg/giphy"
 	"youkong/internal/pkg/jwt"
 	"youkong/internal/pkg/llm"
 	"youkong/internal/pkg/poster"
@@ -36,6 +36,15 @@ var (
 	Commit    = "unknown"
 	BuildTime = "unknown"
 )
+
+func init() {
+	// 强制设置时区为北京时间，避免服务器 UTC 导致日期计算错误
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		loc = time.FixedZone("CST", 8*3600)
+	}
+	time.Local = loc
+}
 
 func main() {
 	// 加载配置
@@ -283,29 +292,6 @@ func main() {
 		logger.Info("AgentService 已启用 GIF COS 缓存")
 	}
 
-	// 初始化 Giphy 客户端（用于状态 GIF 展示，COS 可选）
-	giphyClient := giphy.NewClient("Ned8bTKUTSlYen6oZXmacc1sLmlLn9U8", cosClient, redisClient)
-	logger.Info("Giphy 客户端初始化成功", zap.Bool("cos_enabled", cosClient != nil))
-
-	// 初始化位置聚类服务（Phase 4: 服务端位置分类）
-	locationService := service.NewLocationService(db.DB)
-	logger.Info("位置聚类服务初始化成功")
-
-	// 初始化 V2 推断 Agent
-	if cfg.LLM.APIKey != "" {
-		inferenceAgent := service.NewStatusInferenceAgent(
-			redisClient, memoryRepo, scheduleRepo, userProfileService,
-			cfg.LLM.APIKey, cfg.LLM.Model,
-		)
-		if llmClient != nil {
-			inferenceAgent.SetGiphyClient(giphyClient, llmClient)
-			logger.Info("V2 推断 Agent 已启用 Giphy GIF 集成")
-		}
-		inferenceAgent.SetLocationService(locationService)
-		agentHandler.SetInferenceAgent(inferenceAgent)
-		logger.Info("V2 推断 Agent 初始化成功")
-	}
-
 	// 初始化模型测试服务（用于 Qwen vs Kimi vs Claude 对比测试）
 	if cfg.LLM.APIKey != "" || cfg.LLM.KimiAPIKey != "" || cfg.LLM.ClaudeAPIKey != "" {
 		modelTestService := service.NewModelTestService(cfg.LLM.APIKey, cfg.LLM.KimiAPIKey, cfg.LLM.ClaudeAPIKey)
@@ -314,6 +300,12 @@ func main() {
 			zap.Bool("qwen_enabled", cfg.LLM.APIKey != ""),
 			zap.Bool("kimi_enabled", cfg.LLM.KimiAPIKey != ""),
 			zap.Bool("claude_enabled", cfg.LLM.ClaudeAPIKey != ""))
+	}
+
+	// 初始化 V3/V4 推断 A/B 对比测试配置
+	if cfg.LLM.APIKey != "" {
+		agentHandler.SetInferenceABConfig(cfg.LLM.APIKey, cfg.LLM.Model)
+		logger.Info("V3/V4 推断 A/B 对比测试已启用")
 	}
 	contactHandler := handler.NewContactHandler(contactService)
 	deployHandler := handler.NewDeployHandler(&cfg.Deploy, logger)
@@ -498,6 +490,8 @@ func main() {
 				agent.POST("/infer-status-v2", agentHandler.InferStatusV2)              // 同步版
 				agent.POST("/infer-status-v2/stream", agentHandler.InferStatusV2Stream) // SSE 流式版
 				agent.POST("/infer-status-v2/respond", agentHandler.InferStatusRespond) // 用户确认回答
+				agent.POST("/infer-status-v2/ab-compare", agentHandler.InferStatusABCompare) // V3/V4 A/B 单次对比
+				agent.POST("/infer-status-v2/ab-batch", agentHandler.InferStatusABBatch)     // V3/V4 A/B 批量对比
 				agent.POST("/upload-gif", agentHandler.UploadGif)                       // 客户端上传 GIF 到 COS
 				agent.GET("/sts", agentHandler.GetSTSCredentials)                       // 获取 COS 临时上传凭证
 
@@ -519,6 +513,8 @@ func main() {
 				agent.POST("/test/model/comparison", agentHandler.TestModelComparison)      // 完整对比测试
 				agent.POST("/test/model/report", agentHandler.TestModelReport)              // 生成 Markdown 报告
 				agent.POST("/test/persona-generate", agentHandler.TestPersonaGenerate)    // 手动触发 persona 生成
+				agent.POST("/test/inference-ab", agentHandler.TestInferenceAB)             // V3/V4 推断全面 A/B 对比
+				agent.POST("/test/inference-ab/report", agentHandler.TestInferenceABReport) // V3/V4 对比 Markdown 报告
 			}
 
 			// 通讯录模块
@@ -590,19 +586,9 @@ func main() {
 		statusScheduler.SetPersonaService(inferencePersonaService)
 		logger.Info("StatusScheduler 个性化 Persona 服务已注入")
 	}
-	// 注入推断 Agent（用于自动推测下一状态）
-	if cfg.LLM.APIKey != "" {
-		autoInferAgent := service.NewStatusInferenceAgent(
-			redisClient, memoryRepo, scheduleRepo, userProfileService,
-			cfg.LLM.APIKey, cfg.LLM.Model,
-		)
-		if llmClient != nil && giphyClient != nil {
-			autoInferAgent.SetGiphyClient(giphyClient, llmClient)
-		}
-		autoInferAgent.SetLocationService(locationService)
-		statusScheduler.SetInferenceAgent(autoInferAgent)
-		logger.Info("StatusScheduler 自动推测 Agent 已注入")
-	}
+	// 注入 V4 推断服务（用于自动推测下一状态）
+	statusScheduler.SetInferenceAgent(voiceScheduleServiceV4)
+	logger.Info("StatusScheduler V4 推断服务已注入")
 	statusScheduler.Start()
 	defer statusScheduler.Stop()
 	logger.Info("状态时刻表调度器已启动")

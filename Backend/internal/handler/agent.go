@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,7 +22,7 @@ import (
 	"youkong/internal/service"
 )
 
-// v3InferRunning 在飞去重：防止同一用户并发触发 V3 推断
+// v3InferRunning 在飞去重：防止同一用户并发触发推断
 // key=userID, value=struct{}
 var v3InferRunning sync.Map
 
@@ -39,7 +40,6 @@ type AgentHandler struct {
 	agentChatService       *service.AgentChatService
 	scheduleRepo           ScheduleRepositoryInterface
 	friendshipRepo         FriendshipChecker              // 好友关系检查
-	inferenceAgent         *service.StatusInferenceAgent // V2 推断 Agent
 	bookingService         *service.BookingService       // 预约服务（可见性过滤）
 	redisClient            *tencent.RedisClient           // Redis（用于权限追踪等）
 	userSettingsRepo       *repository.UserSettingsRepository // 用户设置（自动推测开关）
@@ -79,11 +79,6 @@ func NewAgentHandler(agentService *service.AgentService, memoryService *service.
 // SetVoiceScheduleServiceV4 设置 V4 版本语音时刻表服务
 func (h *AgentHandler) SetVoiceScheduleServiceV4(svc *service.VoiceScheduleServiceV4) {
 	h.voiceScheduleServiceV4 = svc
-}
-
-// SetInferenceAgent 设置 V2 推断 Agent
-func (h *AgentHandler) SetInferenceAgent(agent *service.StatusInferenceAgent) {
-	h.inferenceAgent = agent
 }
 
 // SetBookingService 设置预约服务（用于时刻表可见性过滤）
@@ -273,8 +268,8 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 	// 追踪权限授权状态（用于 AI 就绪检查，持久化到 Redis 90天）
 	h.trackPermissions(c.Request.Context(), userID, &req)
 
-	// 使用 Agent 推断
-	if h.inferenceAgent == nil {
+	// 使用 V4 推断
+	if h.voiceScheduleServiceV4 == nil {
 		response.InternalError(c, "推断服务未初始化")
 		return
 	}
@@ -302,22 +297,22 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 	}
 	defer v3InferRunning.Delete(userID)
 
-	fmt.Printf("[上报] 开始 V3 推断 user=%s\n", userID)
+	fmt.Printf("[上报] 开始 V4 推断 user=%s\n", userID)
 
 	// 使用独立 context，不受客户端断连影响
 	// 场景：用户上报状态后切到后台，iOS/Android 可能立即断开 HTTP 连接
 	// 使用 background context 确保 LLM 推断完成并缓存结果
-	inferCtx, inferCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	inferCtx, inferCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer inferCancel()
 
-	inference, err := h.inferenceAgent.InferWithAgent(inferCtx, userID, &req)
+	inference, err := h.voiceScheduleServiceV4.InferWithAgent(inferCtx, userID, &req)
 	if err != nil {
 		fmt.Printf("[上报] 推断失败 user=%s error=%v\n", userID, err)
 		response.InternalError(c, "推断失败")
 		return
 	}
 
-	fmt.Printf("[上报] 推断完成 user=%s emoji=%s activity=%s confidence=%s\n",
+	fmt.Printf("[上报] V4 推断完成 user=%s emoji=%s activity=%s confidence=%s\n",
 		userID, inference.Emoji, inference.Activity, inference.Confidence)
 
 	// 持久化城市信息到 Redis（agent:status key）和 MySQL（users.city）
@@ -1140,10 +1135,13 @@ func (h *AgentHandler) SelectStatus(c *gin.Context) {
 			}
 
 			// 2. 找 now 之后最近 item 的 startTime 作为 V3 的 endTime
-			v3EndTime := "23:59"
+			//    默认 2 小时，不超过 23:59，也不超过下一个 item
+			v3EndTime := addTimeStr(currentTime, 120)
 			for _, it := range existing.Items {
 				if it.StartTime > currentTime {
-					v3EndTime = it.StartTime
+					if it.StartTime < v3EndTime {
+						v3EndTime = it.StartTime
+					}
 					break
 				}
 			}
@@ -1164,13 +1162,13 @@ func (h *AgentHandler) SelectStatus(c *gin.Context) {
 				fmt.Printf("[选择状态] 时刻表已更新 user=%s V3 item %s-%s\n", userID, currentTime, v3EndTime)
 			}
 		} else {
-			// 无已有 schedule，创建新记录
+			// 无已有 schedule，创建新记录（默认 2 小时）
 			schedule := &model.StatusSchedule{
 				UserID:       userID,
 				ScheduleDate: now,
 				Items: model.ScheduleItems{{
 					StartTime: currentTime,
-					EndTime:   "23:59",
+					EndTime:   addTimeStr(currentTime, 120),
 					Emoji:     req.Emoji,
 					Status:    req.Status,
 					Executed:  true,
@@ -2670,7 +2668,7 @@ func (h *AgentHandler) GetSTSCredentials(c *gin.Context) {
 
 // ========== V2 Agent-based 状态推断接口 ==========
 
-// InferStatusV2 Agent-based AI 推断当下状态（V3 架构：支持选项交互）
+// InferStatusV2 AI 推断当下状态（V4 全量）
 // POST /api/v1/agent/infer-status-v2
 func (h *AgentHandler) InferStatusV2(c *gin.Context) {
 	userID := middleware.GetUserID(c)
@@ -2679,50 +2677,42 @@ func (h *AgentHandler) InferStatusV2(c *gin.Context) {
 		return
 	}
 
-	if h.inferenceAgent == nil {
-		response.InternalError(c, "推断服务未启用")
-		return
-	}
-
 	var req model.ExtendedStatusReportRequest
 	c.ShouldBindJSON(&req)
 
-	// 使用独立 context，不受客户端断连影响
-	v3Ctx, v3Cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer v3Cancel()
+	h.inferStatusV4Sync(c, userID, &req)
+}
 
-	// 使用 V3 接口返回完整 InferenceResponse
-	inferResp, err := h.inferenceAgent.InferWithAgentV3(v3Ctx, userID, &req)
+// inferStatusV4Sync V4 同步推断（返回 InferenceResponse 格式，兼容客户端）
+func (h *AgentHandler) inferStatusV4Sync(c *gin.Context, userID string, req *model.ExtendedStatusReportRequest) {
+	v4Ctx, v4Cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer v4Cancel()
+
+	// V4 InferWithAgent 内部已包含上下文聚合
+	inference, err := h.voiceScheduleServiceV4.InferWithAgent(v4Ctx, userID, req)
 	if err != nil {
-		fmt.Printf("[InferStatusV3] 推断失败 user=%s error=%v\n", userID, err)
+		fmt.Printf("[InferStatusV4] 推断失败 user=%s error=%v\n", userID, err)
 		response.InternalError(c, "推断失败")
 		return
 	}
 
-	// 只返回推断结果，不自动保存到首页
-	// 用户在客户端确认后通过 /api/v1/agent/status-feedback 接口保存
-	if inferResp.Phase == model.InferencePhaseCompleted && inferResp.Result != nil {
-		fmt.Printf("[InferStatusV3] 推断成功(预览) user=%s emoji=%s activity=%s confidence=%s\n",
-			userID, inferResp.Result.Emoji, inferResp.Result.Activity, inferResp.Result.Confidence)
-	} else {
-		fmt.Printf("[InferStatusV3] 等待用户选择 user=%s session=%s options=%d\n",
-			userID, inferResp.SessionID, len(inferResp.Options))
+	if inference != nil {
+		fmt.Printf("[InferStatusV4] 推断成功 user=%s emoji=%s activity=%s\n",
+			userID, inference.Emoji, inference.Activity)
 	}
 
-	response.Success(c, inferResp)
+	response.Success(c, &model.InferenceResponse{
+		Phase:  model.InferencePhaseCompleted,
+		Result: inference,
+	})
 }
 
-// InferStatusV2Stream Agent-based AI 推断当下状态（SSE 流式版）
+// InferStatusV2Stream Agent-based AI 推断当下状态（SSE 流式版，支持 V3/V4 灰度切换）
 // POST /api/v1/agent/infer-status-v2/stream
 func (h *AgentHandler) InferStatusV2Stream(c *gin.Context) {
 	userID := middleware.GetUserID(c)
 	if userID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权"})
-		return
-	}
-
-	if h.inferenceAgent == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "推断服务未启用"})
 		return
 	}
 
@@ -2748,40 +2738,90 @@ func (h *AgentHandler) InferStatusV2Stream(c *gin.Context) {
 			case <-done:
 				return
 			case <-ticker.C:
-				// SSE 注释行，客户端会忽略，但保持连接活跃
 				fmt.Fprintf(w, ":keepalive\n\n")
 				w.Flush()
 			}
 		}
 	}()
 
-	// 使用独立 context，不受客户端断连影响
-	streamCtx, streamCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer streamCancel()
+	// 全量走 V4 流式推断
+	h.inferStatusV4Stream(c, w, userID, &req)
+}
 
-	// 流式推断
-	result, err := h.inferenceAgent.InferWithAgentStream(streamCtx, userID, &req, func(event *service.InferenceStreamEvent) {
-		data, err := json.Marshal(event)
-		if err != nil {
+// inferStatusV4Stream V4 流式推断（SSE，将 V4Event 转换为 InferenceStreamEvent 格式）
+func (h *AgentHandler) inferStatusV4Stream(_ *gin.Context, w http.ResponseWriter, userID string, req *model.ExtendedStatusReportRequest) {
+	flusher, _ := w.(http.Flusher)
+	flush := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	// defer 保证 [DONE] 必达
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("[InferStatusV4Stream] panic recovered: %v\n", r)
+			errEvent := service.InferenceStreamEvent{Type: "error", Message: "服务异常，请重试"}
+			data, _ := json.Marshal(errEvent)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flush()
+		}
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flush()
+	}()
+
+	// 聚合推断上下文
+	inferenceContext := h.voiceScheduleServiceV4.GatherInferenceContext(context.Background(), userID)
+
+	v4Ctx, v4Cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer v4Cancel()
+
+	// V4 推断，将 V4Event 转为 InferenceStreamEvent
+	inferResp, err := h.voiceScheduleServiceV4.InferStatus(v4Ctx, userID, req, inferenceContext, func(event *model.V4Event) {
+		var streamEvent *service.InferenceStreamEvent
+		switch event.Type {
+		case model.V4EventTypePhase:
+			streamEvent = &service.InferenceStreamEvent{
+				Type:    "phase",
+				Message: event.Message,
+			}
+		case model.V4EventTypeStatusUpdated:
+			streamEvent = &service.InferenceStreamEvent{
+				Type: "result",
+				Data: map[string]interface{}{
+					"result": &model.CurrentStatusInference{
+						Emoji:    event.Emoji,
+						Activity: event.Status,
+					},
+				},
+				Message: event.Message,
+			}
+		case model.V4EventTypeToolStart:
+			streamEvent = &service.InferenceStreamEvent{
+				Type:    "tool",
+				Message: "正在推断状态...",
+			}
+		default:
 			return
 		}
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		w.Flush()
+		if streamEvent != nil {
+			data, _ := json.Marshal(streamEvent)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flush()
+		}
 	})
 
 	if err != nil {
-		errEvent := service.InferenceStreamEvent{
-			Type:    "error",
-			Message: err.Error(),
-		}
+		errEvent := service.InferenceStreamEvent{Type: "error", Message: err.Error()}
 		data, _ := json.Marshal(errEvent)
 		fmt.Fprintf(w, "data: %s\n\n", data)
-		w.Flush()
+		flush()
 		return
 	}
 
-	// 推断成功后更新首页状态（保留 GIF 信息）
-	if result != nil && h.agentService != nil {
+	// 推断成功后更新首页状态
+	if inferResp != nil && inferResp.Result != nil && h.agentService != nil {
+		result := inferResp.Result
 		go func() {
 			ctx := context.Background()
 			feedbackReq := &model.StatusFeedbackRequest{
@@ -2796,52 +2836,338 @@ func (h *AgentHandler) InferStatusV2Stream(c *gin.Context) {
 			h.agentService.SaveStatusFeedback(ctx, userID, feedbackReq)
 		}()
 	}
-
-	// 发送完成信号
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	w.Flush()
 }
 
-// InferStatusRespond 接收用户选择（V3: 从 session 完成推断）
+// InferStatusRespond 接收用户选择（V4 已废弃此流程，保留接口兼容客户端）
 // POST /api/v1/agent/infer-status-v2/respond
 func (h *AgentHandler) InferStatusRespond(c *gin.Context) {
+	// V4 推断始终返回 Phase=completed，不再有 awaiting_choice 流程
+	// 保留此接口避免旧版客户端调用时崩溃
+	fmt.Printf("[InferStatusRespond] 已废弃（V4 无 awaiting_choice 流程）\n")
+	response.Success(c, gin.H{
+		"message": "V4 推断不需要用户选择，此接口已废弃",
+	})
+}
+
+// ========== V3/V4 推断 A/B 对比测试 ==========
+
+// InferenceABResult 单次 A/B 对比结果
+type InferenceABResult struct {
+	Version    string                         `json:"version"`     // "v3" 或 "v4"
+	Result     *model.InferenceResponse       `json:"result"`      // 推断结果
+	DurationMs int64                          `json:"duration_ms"` // 耗时（毫秒）
+	Error      string                         `json:"error,omitempty"`
+}
+
+// InferenceABComparisonResponse A/B 对比完整响应
+type InferenceABComparisonResponse struct {
+	UserID    string              `json:"user_id"`
+	Timestamp string              `json:"timestamp"`
+	V3        *InferenceABResult  `json:"v3"`
+	V4        *InferenceABResult  `json:"v4"`
+	// 差异摘要
+	Diff      *InferenceABDiff    `json:"diff"`
+}
+
+// InferenceABDiff 推断差异分析
+type InferenceABDiff struct {
+	EmojiMatch    bool   `json:"emoji_match"`    // emoji 是否一致
+	ActivityMatch bool   `json:"activity_match"` // activity 是否一致
+	AvailMatch    bool   `json:"avail_match"`    // is_available 是否一致
+	V3Faster      bool   `json:"v3_faster"`      // V3 是否更快
+	TimeDiffMs    int64  `json:"time_diff_ms"`   // 耗时差（V4 - V3，正数表示 V4 慢）
+	Summary       string `json:"summary"`        // 一句话摘要
+}
+
+// InferStatusABCompare V3/V4 推断 A/B 对比（已废弃，V3 已下线，仅运行 V4）
+// POST /api/v1/agent/infer-status-v2/ab-compare
+func (h *AgentHandler) InferStatusABCompare(c *gin.Context) {
 	userID := middleware.GetUserID(c)
 	if userID == "" {
 		response.Unauthorized(c)
 		return
 	}
 
-	if h.inferenceAgent == nil {
-		response.InternalError(c, "推断服务未启用")
+	var req model.ExtendedStatusReportRequest
+	c.ShouldBindJSON(&req)
+
+	if h.voiceScheduleServiceV4 == nil {
+		response.InternalError(c, "V4 推断服务未启用")
+		return
+	}
+
+	// V3 已下线，仅运行 V4
+	start := time.Now()
+	v4Ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	inference, err := h.voiceScheduleServiceV4.InferWithAgent(v4Ctx, userID, &req)
+	v4Result := &InferenceABResult{
+		Version:    "v4",
+		DurationMs: time.Since(start).Milliseconds(),
+	}
+	if err != nil {
+		v4Result.Error = err.Error()
+	} else {
+		v4Result.Result = &model.InferenceResponse{
+			Phase:  model.InferencePhaseCompleted,
+			Result: inference,
+		}
+	}
+
+	response.Success(c, &InferenceABComparisonResponse{
+		UserID:    userID,
+		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
+		V3:        &InferenceABResult{Version: "v3", Error: "V3 已下线"},
+		V4:        v4Result,
+		Diff:      &InferenceABDiff{Summary: "V3 已下线，仅展示 V4 结果"},
+	})
+}
+
+// InferStatusABBatch V3/V4 推断 A/B 批量对比（连续多轮对比，统计一致率）
+// POST /api/v1/agent/infer-status-v2/ab-batch
+func (h *AgentHandler) InferStatusABBatch(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
 		return
 	}
 
 	var req struct {
-		SessionID     string `json:"session_id" binding:"required"`
-		SelectedIndex int    `json:"selected_index"` // 用户选择的选项索引
+		SensorData model.ExtendedStatusReportRequest `json:"sensor_data"`
+		Rounds     int                               `json:"rounds"` // 对比轮数（默认 3）
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.ParamError(c, "参数错误: session_id 必填")
+		response.ParamError(c, "参数错误")
+		return
+	}
+	if req.Rounds <= 0 {
+		req.Rounds = 3
+	}
+	if req.Rounds > 10 {
+		req.Rounds = 10
+	}
+
+	if h.voiceScheduleServiceV4 == nil {
+		response.InternalError(c, "推断服务未启用")
 		return
 	}
 
-	fmt.Printf("[InferStatusRespond] user=%s session=%s selected=%d\n", userID, req.SessionID, req.SelectedIndex)
+	fmt.Printf("[AB Batch] 开始 V4 多轮测试 user=%s rounds=%d\n", userID, req.Rounds)
 
-	result, err := h.inferenceAgent.HandleUserResponse(c.Request.Context(), userID, req.SessionID, req.SelectedIndex)
-	if err != nil {
-		fmt.Printf("[InferStatusRespond] 处理失败 user=%s error=%v\n", userID, err)
-		response.InternalError(c, err.Error())
-		return
+	type roundResult struct {
+		Round int                `json:"round"`
+		V4    *InferenceABResult `json:"v4"`
 	}
 
-	// 只返回结果，不自动保存到首页
-	// 用户在客户端确认后通过 /api/v1/agent/status-feedback 接口保存
-	fmt.Printf("[InferStatusRespond] 选择完成(预览) user=%s emoji=%s activity=%s\n",
-		userID, result.Emoji, result.Activity)
+	var rounds []roundResult
+	var totalV4Ms int64
 
-	response.Success(c, &model.InferenceResponse{
-		Phase:  model.InferencePhaseCompleted,
-		Result: result,
+	for i := 0; i < req.Rounds; i++ {
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		inference, err := h.voiceScheduleServiceV4.InferWithAgent(ctx, userID, &req.SensorData)
+		cancel()
+
+		r := &InferenceABResult{Version: "v4", DurationMs: time.Since(start).Milliseconds()}
+		if err != nil {
+			r.Error = err.Error()
+		} else {
+			r.Result = &model.InferenceResponse{
+				Phase:  model.InferencePhaseCompleted,
+				Result: inference,
+			}
+		}
+		totalV4Ms += r.DurationMs
+
+		rounds = append(rounds, roundResult{
+			Round: i + 1,
+			V4:    r,
+		})
+	}
+
+	n := req.Rounds
+	summary := map[string]interface{}{
+		"rounds":    n,
+		"avg_v4_ms": totalV4Ms / int64(n),
+		"note":      "V3 已下线，仅展示 V4 结果",
+	}
+
+	fmt.Printf("[AB Batch] V4 多轮完成 user=%s rounds=%d avg=%dms\n",
+		userID, n, totalV4Ms/int64(n))
+
+	response.Success(c, map[string]interface{}{
+		"user_id":   userID,
+		"timestamp": time.Now().Format("2006-01-02 15:04:05"),
+		"summary":   summary,
+		"rounds":    rounds,
 	})
+}
+
+// analyzeInferenceDiff 分析 V3 和 V4 推断结果的差异
+func analyzeInferenceDiff(v3, v4 *InferenceABResult) *InferenceABDiff {
+	diff := &InferenceABDiff{
+		V3Faster:   v3.DurationMs < v4.DurationMs,
+		TimeDiffMs: v4.DurationMs - v3.DurationMs,
+	}
+
+	// 任一出错时
+	if v3.Error != "" || v4.Error != "" {
+		diff.Summary = fmt.Sprintf("V3: %s | V4: %s",
+			inferErrOrOk(v3), inferErrOrOk(v4))
+		return diff
+	}
+
+	// 提取两边的 result
+	var v3r, v4r *model.CurrentStatusInference
+	if v3.Result != nil {
+		v3r = v3.Result.Result
+	}
+	if v4.Result != nil {
+		v4r = v4.Result.Result
+	}
+
+	if v3r == nil || v4r == nil {
+		diff.Summary = "至少一方无推断结果"
+		return diff
+	}
+
+	diff.EmojiMatch = v3r.Emoji == v4r.Emoji
+	diff.ActivityMatch = v3r.Activity == v4r.Activity
+	diff.AvailMatch = v3r.IsAvailable == v4r.IsAvailable
+
+	// 生成摘要
+	if diff.EmojiMatch && diff.ActivityMatch {
+		diff.Summary = fmt.Sprintf("一致: %s%s", v3r.Emoji, v3r.Activity)
+	} else {
+		diff.Summary = fmt.Sprintf("V3=%s%s V4=%s%s", v3r.Emoji, v3r.Activity, v4r.Emoji, v4r.Activity)
+	}
+
+	// 追加耗时信息
+	faster := "V3"
+	if !diff.V3Faster {
+		faster = "V4"
+	}
+	diff.Summary += fmt.Sprintf(" | %s快%dms", faster, abs64(diff.TimeDiffMs))
+
+	return diff
+}
+
+func inferErrOrOk(r *InferenceABResult) string {
+	if r.Error != "" {
+		return "错误:" + r.Error
+	}
+	if r.Result != nil && r.Result.Result != nil {
+		return r.Result.Result.Emoji + r.Result.Result.Activity
+	}
+	return "无结果"
+}
+
+func abs64(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// ========== V3/V4 推断全面 A/B 对比测试 ==========
+
+// inferenceABLLMKey 存储 LLM API Key（由 main.go 注入）
+var inferenceABLLMKey string
+var inferenceABLLMModel string
+
+// SetInferenceABConfig 设置 A/B 对比测试的 LLM 配置
+func (h *AgentHandler) SetInferenceABConfig(apiKey, modelName string) {
+	inferenceABLLMKey = apiKey
+	inferenceABLLMModel = modelName
+}
+
+// TestInferenceAB V3/V4 全面对比测试（返回 JSON 报告）
+// POST /api/v1/agent/test/inference-ab
+func (h *AgentHandler) TestInferenceAB(c *gin.Context) {
+	if inferenceABLLMKey == "" {
+		response.InternalError(c, "LLM 未配置，无法运行对比测试")
+		return
+	}
+
+	var req struct {
+		PersonaIDs  []string `json:"persona_ids"`  // 为空=全部 25 个
+		Concurrency int      `json:"concurrency"`  // 默认 3
+	}
+	c.ShouldBindJSON(&req)
+
+	config := service.InferenceABConfig{
+		PersonaIDs:  req.PersonaIDs,
+		Concurrency: req.Concurrency,
+	}
+
+	engine := service.NewInferenceABEngine(inferenceABLLMKey, inferenceABLLMModel, config)
+
+	personaDesc := "全部"
+	if len(req.PersonaIDs) > 0 {
+		personaDesc = strings.Join(req.PersonaIDs, ",")
+	}
+	fmt.Printf("[InferenceAB] 开始全面对比 personas=%s\n", personaDesc)
+
+	// 长超时（25 画像可能需要 15 分钟）
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	report, err := engine.RunFullComparison(ctx)
+	if err != nil {
+		response.InternalError(c, fmt.Sprintf("对比测试失败: %v", err))
+		return
+	}
+
+	fmt.Printf("[InferenceAB] 完成: V3=%.1f%% V4=%.1f%% 一致=%.1f%% 耗时=%s\n",
+		report.V3Accuracy, report.V4Accuracy, report.EmojiMatchRate,
+		report.Duration.Round(time.Second))
+
+	response.Success(c, report)
+}
+
+// TestInferenceABReport V3/V4 全面对比测试（返回 Markdown 报告）
+// POST /api/v1/agent/test/inference-ab/report
+func (h *AgentHandler) TestInferenceABReport(c *gin.Context) {
+	if inferenceABLLMKey == "" {
+		response.InternalError(c, "LLM 未配置，无法运行对比测试")
+		return
+	}
+
+	var req struct {
+		PersonaIDs  []string `json:"persona_ids"`
+		Concurrency int      `json:"concurrency"`
+	}
+	c.ShouldBindJSON(&req)
+
+	config := service.InferenceABConfig{
+		PersonaIDs:  req.PersonaIDs,
+		Concurrency: req.Concurrency,
+	}
+
+	engine := service.NewInferenceABEngine(inferenceABLLMKey, inferenceABLLMModel, config)
+
+	personaDesc := "全部"
+	if len(req.PersonaIDs) > 0 {
+		personaDesc = strings.Join(req.PersonaIDs, ",")
+	}
+	fmt.Printf("[InferenceAB Report] 开始全面对比 personas=%s\n", personaDesc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	report, err := engine.RunFullComparison(ctx)
+	if err != nil {
+		response.InternalError(c, fmt.Sprintf("对比测试失败: %v", err))
+		return
+	}
+
+	markdown := service.GenerateInferenceABReport(report)
+
+	fmt.Printf("[InferenceAB Report] 完成: V3=%.1f%% V4=%.1f%% 耗时=%s\n",
+		report.V3Accuracy, report.V4Accuracy, report.Duration.Round(time.Second))
+
+	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	c.String(http.StatusOK, markdown)
 }
 
