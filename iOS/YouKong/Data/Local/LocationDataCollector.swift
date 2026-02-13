@@ -33,6 +33,12 @@ class LocationDataCollector: NSObject, ObservableObject {
     private let homeCandidateLastDateKey = "homeCandidateLastDate"
     private let requiredNightsForHome = 3 // 连续 3 夜才确认为 home
 
+    // 多日确认制：候选 work 位置
+    private let workCandidateKey = "workCandidateLocation"
+    private let workCandidateDayCountKey = "workCandidateDayCount"
+    private let workCandidateLastDateKey = "workCandidateLastDate"
+    private let requiredDaysForWork = 3 // 3 个工作日白天在同一位置才确认为 work
+
     override private init() {
         super.init()
         locationManager.delegate = self
@@ -171,7 +177,7 @@ class LocationDataCollector: NSObject, ObservableObject {
         return CLLocation(latitude: lat, longitude: lng)
     }
 
-    /// 学习公司位置（通常在工作日白天停留的地方）
+    /// 学习公司位置（多日确认制：连续 3 个工作日白天在同一位置才确认为 work）
     func learnWorkLocation() {
         guard let location = currentLocation else { return }
 
@@ -180,14 +186,69 @@ class LocationDataCollector: NSObject, ObservableObject {
         let hour = calendar.component(.hour, from: Date())
 
         // 周一到周五，上午9点到下午6点
-        if weekday >= 2 && weekday <= 6 && hour >= 9 && hour <= 18 {
-            // 确保不是家的位置
-            if let home = homeLocation, location.distance(from: home) < 500 {
-                return
-            }
-            workLocation = location
-            saveLearnedPlace(location, forKey: workLocationKey)
+        guard weekday >= 2 && weekday <= 6 && hour >= 9 && hour <= 18 else { return }
+
+        // 确保不是家的位置
+        if let home = homeLocation, location.distance(from: home) < 500 {
+            return
         }
+
+        // 如果已在确认的 work 200m 范围内，不触发学习
+        if let work = workLocation, location.distance(from: work) < 200 {
+            return
+        }
+
+        let today = calendar.startOfDay(for: Date())
+        let todayStr = ISO8601DateFormatter().string(from: today)
+
+        // 今天已经记录过，跳过（每天只计一次）
+        let candidateLastDate = UserDefaults.standard.string(forKey: workCandidateLastDateKey) ?? ""
+        if candidateLastDate == todayStr {
+            return
+        }
+
+        // 加载候选位置
+        let candidateLocation = loadWorkCandidateLocation()
+        let candidateDayCount = UserDefaults.standard.integer(forKey: workCandidateDayCountKey)
+
+        if let candidate = candidateLocation, location.distance(from: candidate) < 300 {
+            // 在候选位置 300m 范围内 → 累加天数
+            let newCount = candidateDayCount + 1
+            UserDefaults.standard.set(newCount, forKey: workCandidateDayCountKey)
+            UserDefaults.standard.set(todayStr, forKey: workCandidateLastDateKey)
+
+            if newCount >= requiredDaysForWork {
+                // 达到阈值 → 确认为 work
+                workLocation = candidate
+                saveLearnedPlace(candidate, forKey: workLocationKey)
+                // 清除候选
+                UserDefaults.standard.removeObject(forKey: workCandidateKey)
+                UserDefaults.standard.removeObject(forKey: workCandidateDayCountKey)
+                UserDefaults.standard.removeObject(forKey: workCandidateLastDateKey)
+            }
+        } else {
+            // 新位置 → 重置候选
+            saveWorkCandidateLocation(location)
+            UserDefaults.standard.set(1, forKey: workCandidateDayCountKey)
+            UserDefaults.standard.set(todayStr, forKey: workCandidateLastDateKey)
+        }
+    }
+
+    private func saveWorkCandidateLocation(_ location: CLLocation) {
+        let data: [String: Double] = [
+            "latitude": location.coordinate.latitude,
+            "longitude": location.coordinate.longitude
+        ]
+        UserDefaults.standard.set(data, forKey: workCandidateKey)
+    }
+
+    private func loadWorkCandidateLocation() -> CLLocation? {
+        guard let data = UserDefaults.standard.dictionary(forKey: workCandidateKey) as? [String: Double],
+              let lat = data["latitude"],
+              let lng = data["longitude"] else {
+            return nil
+        }
+        return CLLocation(latitude: lat, longitude: lng)
     }
 
     // MARK: - Persistence
@@ -205,6 +266,18 @@ class LocationDataCollector: NSObject, ObservableObject {
            let lat = homeData["latitude"],
            let lng = homeData["longitude"] {
             homeLocation = CLLocation(latitude: lat, longitude: lng)
+        }
+
+        // 迁移：旧版本的 work 位置不可靠（单次就学习），清除并要求重新学习
+        let workMigrationKey = "workLocationMigratedV2"
+        if !UserDefaults.standard.bool(forKey: workMigrationKey) {
+            UserDefaults.standard.removeObject(forKey: workLocationKey)
+            UserDefaults.standard.removeObject(forKey: workCandidateKey)
+            UserDefaults.standard.removeObject(forKey: workCandidateDayCountKey)
+            UserDefaults.standard.removeObject(forKey: workCandidateLastDateKey)
+            UserDefaults.standard.set(true, forKey: workMigrationKey)
+            workLocation = nil
+            return
         }
 
         if let workData = UserDefaults.standard.dictionary(forKey: workLocationKey) as? [String: Double],

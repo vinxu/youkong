@@ -168,23 +168,6 @@ func (s *VoiceScheduleServiceV4) InferStatus(
 		callback = func(event *model.V4Event) {}
 	}
 
-	// 检查推断锁（防止过于频繁的推断覆盖用户主动设置）
-	if s.redisClient != nil {
-		lockKey := fmt.Sprintf("infer:lock:%s", userID)
-		if locked, _ := s.redisClient.Get(ctx, lockKey); locked != "" {
-			return &model.InferenceResponse{
-				Phase: model.InferencePhaseCompleted,
-				Result: &model.CurrentStatusInference{
-					Emoji:      "⏳",
-					Activity:   "状态保持中",
-					Confidence: "low",
-					Reasoning:  "推断锁生效中，跳过本次推断",
-					InferredAt: time.Now().UnixMilli(),
-				},
-			}, nil
-		}
-	}
-
 	// 缓存传感器数据
 	if sensorData != nil {
 		s.cacheSensorDataForInference(ctx, userID, sensorData)
@@ -780,10 +763,10 @@ func formatSensorData(data *model.ExtendedStatusReportRequest) string {
 		}
 	}
 
-	// 位置
+	// 位置（place_type 由客户端猜测，不一定准确）
 	if data.ExtendedLocation != nil {
 		loc := data.ExtendedLocation
-		sb.WriteString(fmt.Sprintf("- location: place_type=%s, at_place_since_minutes=%d",
+		sb.WriteString(fmt.Sprintf("- location: place_type=%s (client_guess, may be inaccurate), at_place_since_minutes=%d",
 			loc.PlaceType, loc.AtPlaceSinceMinutes))
 		if loc.PlaceName != "" {
 			sb.WriteString(fmt.Sprintf(", place_name=%s", loc.PlaceName))
@@ -791,7 +774,7 @@ func formatSensorData(data *model.ExtendedStatusReportRequest) string {
 		sb.WriteString("\n")
 	} else if data.Location != nil {
 		loc := data.Location
-		sb.WriteString(fmt.Sprintf("- location: place_type=%s, at_place_since_minutes=%d\n",
+		sb.WriteString(fmt.Sprintf("- location: place_type=%s (client_guess, may be inaccurate), at_place_since_minutes=%d\n",
 			loc.PlaceType, loc.AtPlaceSinceMinutes))
 	}
 
@@ -3154,6 +3137,21 @@ func (s *VoiceScheduleServiceV4) executeAddFriend(
 // InferWithAgent 实现 job.StatusInferrer 接口，供 StatusScheduler 自动推断使用
 // sensorData 可为 nil，此时从 Redis 缓存读取
 func (s *VoiceScheduleServiceV4) InferWithAgent(ctx context.Context, userID string, sensorData *model.ExtendedStatusReportRequest) (*model.CurrentStatusInference, error) {
+	// 检查推断锁（防止自动推断过于频繁地覆盖用户主动设置）
+	// 注：一键生成直接调用 InferStatus，不经过此方法，不受锁限制
+	if s.redisClient != nil {
+		lockKey := fmt.Sprintf("infer:lock:%s", userID)
+		if locked, _ := s.redisClient.Get(ctx, lockKey); locked != "" {
+			return &model.CurrentStatusInference{
+				Emoji:      "⏳",
+				Activity:   "状态保持中",
+				Confidence: "low",
+				Reasoning:  "推断锁生效中，跳过本次自动推断",
+				InferredAt: time.Now().UnixMilli(),
+			}, nil
+		}
+	}
+
 	// 聚合推断上下文（复用 V3 的 PreGatherContext）
 	deps := &agent.InferenceToolDeps{
 		RedisClient:        s.redisClient,

@@ -2683,28 +2683,26 @@ func (h *AgentHandler) InferStatusV2(c *gin.Context) {
 	h.inferStatusV4Sync(c, userID, &req)
 }
 
-// inferStatusV4Sync V4 同步推断（返回 InferenceResponse 格式，兼容客户端）
+// inferStatusV4Sync V4 同步推断（一键生成，用户主动触发，不受推断锁限制）
 func (h *AgentHandler) inferStatusV4Sync(c *gin.Context, userID string, req *model.ExtendedStatusReportRequest) {
 	v4Ctx, v4Cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer v4Cancel()
 
-	// V4 InferWithAgent 内部已包含上下文聚合
-	inference, err := h.voiceScheduleServiceV4.InferWithAgent(v4Ctx, userID, req)
+	// 聚合上下文后直接调用 InferStatus（绕过 InferWithAgent 的推断锁）
+	inferenceContext := h.voiceScheduleServiceV4.GatherInferenceContext(v4Ctx, userID)
+	inferResp, err := h.voiceScheduleServiceV4.InferStatus(v4Ctx, userID, req, inferenceContext, nil)
 	if err != nil {
 		fmt.Printf("[InferStatusV4] 推断失败 user=%s error=%v\n", userID, err)
 		response.InternalError(c, "推断失败")
 		return
 	}
 
-	if inference != nil {
+	if inferResp != nil && inferResp.Result != nil {
 		fmt.Printf("[InferStatusV4] 推断成功 user=%s emoji=%s activity=%s\n",
-			userID, inference.Emoji, inference.Activity)
+			userID, inferResp.Result.Emoji, inferResp.Result.Activity)
 	}
 
-	response.Success(c, &model.InferenceResponse{
-		Phase:  model.InferencePhaseCompleted,
-		Result: inference,
-	})
+	response.Success(c, inferResp)
 }
 
 // InferStatusV2Stream Agent-based AI 推断当下状态（SSE 流式版，支持 V3/V4 灰度切换）
