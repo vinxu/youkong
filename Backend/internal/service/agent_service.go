@@ -1409,6 +1409,10 @@ func (s *AgentService) SaveStatusFeedback(ctx context.Context, userID string, re
 		if prevData, err := json.Marshal(prevInference); err == nil {
 			s.redisClient.Set(ctx, prevKey, prevData, 2*time.Hour)
 		}
+
+		// 设置推断锁（10 分钟内 StatusScheduler 不会覆盖用户确认的状态）
+		lockKey := fmt.Sprintf("infer:lock:%s", userID)
+		s.redisClient.Set(ctx, lockKey, "user_confirmed", 10*time.Minute)
 	}
 
 	return nil

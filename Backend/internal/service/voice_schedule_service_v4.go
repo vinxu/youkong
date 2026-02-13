@@ -219,11 +219,8 @@ func (s *VoiceScheduleServiceV4) InferStatus(
 	// GIF 翻译
 	s.enrichInferenceWithGif(ctx, inferResult)
 
-	// 设置推断锁（10 分钟内不会被 StatusScheduler 覆盖）
-	s.setInferenceLock(ctx, userID)
-
-	// 保存本次推断结果（供下次推断参考）
-	s.savePrevInference(ctx, userID, inferResult)
+	// 注意：一键生成推断不设置推断锁、不保存推断历史
+	// 等用户通过 status-feedback 确认发布后，由 SaveStatusFeedback 处理入库
 
 	return &model.InferenceResponse{
 		Phase:  model.InferencePhaseCompleted,
@@ -1411,6 +1408,35 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 		return map[string]string{"error": "emoji 和 status 不能为空"}, false
 	}
 
+	// 推断模式（一键生成）：只保存结果到 session，不入库
+	// 用户确认发布后，通过 status-feedback 接口才真正写入时刻表和分析缓存
+	if session.InferenceMode {
+		session.InferenceResult = &model.CurrentStatusInference{
+			Emoji:       emoji,
+			Activity:    status,
+			IsAvailable: highlight,
+			Confidence:  "high",
+			InferredAt:  time.Now().UnixMilli(),
+		}
+		fmt.Printf("[V4] 推断模式：结果暂存 session（未入库），等待用户确认发布 user=%s %s%s\n",
+			session.UserID, emoji, status)
+
+		callback(&model.V4Event{
+			Type:    model.V4EventTypeStatusUpdated,
+			Emoji:   emoji,
+			Status:  status,
+			Message: "推断完成，等待确认发布",
+		})
+
+		return map[string]interface{}{
+			"message": "推断完成，等待用户确认发布",
+			"emoji":   emoji,
+			"status":  status,
+		}, false
+	}
+
+	// === 以下为非推断模式（用户主动设置 / 语音设置）：立即入库 ===
+
 	// 检查 V3 推断锁：用户主动设置时覆盖 AI 推断
 	var prevInferEmoji, prevInferActivity string
 	if s.redisClient != nil {
@@ -1492,33 +1518,7 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 		return map[string]string{"error": "保存失败: " + saveErr.Error()}, false
 	}
 
-	// 推断模式：将完整结果保存到 session（供 InferStatus 提取）
-	if session.InferenceMode {
-		// V4 原则：不做代码层语义覆盖，thinking mode 的推理结果即最终输出
-		session.InferenceResult = &model.CurrentStatusInference{
-			Emoji:       emoji,
-			Activity:    status,
-			IsAvailable: highlight,
-			Confidence:  "high",
-			InferredAt:  time.Now().UnixMilli(),
-		}
-		// 推断模式下标记为 AI 猜测
-		isAIGuess := true
-		// 同步更新首页分析缓存
-		analysisResult := &model.AnalysisResult{
-			LifeStatus: model.LifeStatus{
-				Emoji: emoji,
-				Label: status,
-			},
-			Availability: model.AvailabilityAnalysis{
-				Status: "有空",
-			},
-			IsAIGuess: isAIGuess,
-		}
-		if cacheErr := s.memoryRepo.SaveAnalysisCache(ctx, session.UserID, analysisResult); cacheErr != nil {
-			fmt.Printf("[V4] 更新分析缓存失败: %v\n", cacheErr)
-		}
-	} else {
+	{
 		// 同步更新首页分析缓存，让首页 grid 立即显示新状态
 		analysisResult := &model.AnalysisResult{
 			LifeStatus: model.LifeStatus{

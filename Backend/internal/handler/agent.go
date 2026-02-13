@@ -31,6 +31,13 @@ type FriendshipChecker interface {
 	AreFriends(ctx context.Context, userID, friendID string) (bool, error)
 }
 
+// inferenceStreamEvent SSE 流式推断事件（V4 流式输出格式）
+type inferenceStreamEvent struct {
+	Type    string      `json:"type"`              // phase, tool, result, error
+	Data    interface{} `json:"data,omitempty"`
+	Message string      `json:"message,omitempty"`
+}
+
 // AgentHandler Agent 处理器
 type AgentHandler struct {
 	agentService           *service.AgentService
@@ -2759,7 +2766,7 @@ func (h *AgentHandler) inferStatusV4Stream(_ *gin.Context, w http.ResponseWriter
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Printf("[InferStatusV4Stream] panic recovered: %v\n", r)
-			errEvent := service.InferenceStreamEvent{Type: "error", Message: "服务异常，请重试"}
+			errEvent := inferenceStreamEvent{Type: "error", Message: "服务异常，请重试"}
 			data, _ := json.Marshal(errEvent)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flush()
@@ -2776,15 +2783,15 @@ func (h *AgentHandler) inferStatusV4Stream(_ *gin.Context, w http.ResponseWriter
 
 	// V4 推断，将 V4Event 转为 InferenceStreamEvent
 	inferResp, err := h.voiceScheduleServiceV4.InferStatus(v4Ctx, userID, req, inferenceContext, func(event *model.V4Event) {
-		var streamEvent *service.InferenceStreamEvent
+		var streamEvent *inferenceStreamEvent
 		switch event.Type {
 		case model.V4EventTypePhase:
-			streamEvent = &service.InferenceStreamEvent{
+			streamEvent = &inferenceStreamEvent{
 				Type:    "phase",
 				Message: event.Message,
 			}
 		case model.V4EventTypeStatusUpdated:
-			streamEvent = &service.InferenceStreamEvent{
+			streamEvent = &inferenceStreamEvent{
 				Type: "result",
 				Data: map[string]interface{}{
 					"result": &model.CurrentStatusInference{
@@ -2795,7 +2802,7 @@ func (h *AgentHandler) inferStatusV4Stream(_ *gin.Context, w http.ResponseWriter
 				Message: event.Message,
 			}
 		case model.V4EventTypeToolStart:
-			streamEvent = &service.InferenceStreamEvent{
+			streamEvent = &inferenceStreamEvent{
 				Type:    "tool",
 				Message: "正在推断状态...",
 			}
@@ -2810,29 +2817,26 @@ func (h *AgentHandler) inferStatusV4Stream(_ *gin.Context, w http.ResponseWriter
 	})
 
 	if err != nil {
-		errEvent := service.InferenceStreamEvent{Type: "error", Message: err.Error()}
+		errEvent := inferenceStreamEvent{Type: "error", Message: err.Error()}
 		data, _ := json.Marshal(errEvent)
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flush()
 		return
 	}
 
-	// 推断成功后更新首页状态
-	if inferResp != nil && inferResp.Result != nil && h.agentService != nil {
-		result := inferResp.Result
-		go func() {
-			ctx := context.Background()
-			feedbackReq := &model.StatusFeedbackRequest{
-				CorrectedEmoji:       result.Emoji,
-				CorrectedActivity:    result.Activity,
-				CorrectedPlace:       result.Place,
-				CorrectedIsAvailable: &result.IsAvailable,
-				GifURL:               result.GifURL,
-				GiphyQuery:           result.GiphyQuery,
-			}
-			h.agentService.MergeExistingGifInfo(ctx, userID, feedbackReq)
-			h.agentService.SaveStatusFeedback(ctx, userID, feedbackReq)
-		}()
+	// 推断结果不自动入库，等用户点击"确认发布"后通过 status-feedback 接口入库
+	if inferResp != nil && inferResp.Result != nil {
+		// 发送最终结果事件（包含 GIF 信息，供客户端展示）
+		resultEvent := inferenceStreamEvent{
+			Type: "result",
+			Data: map[string]interface{}{
+				"result": inferResp.Result,
+			},
+			Message: "推断完成，等待确认发布",
+		}
+		data, _ := json.Marshal(resultEvent)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flush()
 	}
 }
 
