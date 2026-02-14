@@ -819,3 +819,143 @@ func (r *MemoryRepository) UpdateLifeStatus(ctx context.Context, userID, emoji, 
 	_, err := r.db.ExecContext(ctx, query, userID, emoji, label)
 	return err
 }
+
+// ========== 推断纠正记录操作 ==========
+
+// SaveInferenceCorrection 保存推断纠正记录
+func (r *MemoryRepository) SaveInferenceCorrection(ctx context.Context, correction *model.InferenceCorrection) error {
+	query := `INSERT INTO inference_corrections (
+		user_id, original_emoji, original_activity,
+		corrected_emoji, corrected_activity, corrected_place,
+		day_of_week, hour_of_day, device_context, location_type
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := r.db.ExecContext(ctx, query,
+		correction.UserID,
+		correction.OriginalEmoji,
+		correction.OriginalActivity,
+		correction.CorrectedEmoji,
+		correction.CorrectedActivity,
+		correction.CorrectedPlace,
+		correction.DayOfWeek,
+		correction.HourOfDay,
+		correction.DeviceContext,
+		correction.LocationType,
+	)
+	return err
+}
+
+// GetTimeslotCorrections 获取指定时段的纠正聚合（30天内同时段 GROUP BY）
+func (r *MemoryRepository) GetTimeslotCorrections(ctx context.Context, userID string, dayOfWeek, hourOfDay int) ([]model.TimeslotCorrectionSummary, error) {
+	query := `SELECT original_emoji, original_activity,
+		corrected_emoji, corrected_activity, corrected_place,
+		COUNT(*) as count
+		FROM inference_corrections
+		WHERE user_id = ?
+		AND day_of_week = ?
+		AND hour_of_day = ?
+		AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+		GROUP BY original_emoji, original_activity, corrected_emoji, corrected_activity, corrected_place
+		ORDER BY count DESC
+		LIMIT 10`
+	var summaries []model.TimeslotCorrectionSummary
+	err := r.db.SelectContext(ctx, &summaries, query, userID, dayOfWeek, hourOfDay)
+	if err != nil {
+		return nil, err
+	}
+	return summaries, nil
+}
+
+// ========== 日维度活动摘要操作 ==========
+
+// UpsertDailyActivitySummary 插入或更新日维度活动摘要
+func (r *MemoryRepository) UpsertDailyActivitySummary(ctx context.Context, summary *model.DailyActivitySummary) error {
+	query := `INSERT INTO daily_activity_summaries (
+		user_id, summary_date, home_hours, work_hours, transit_hours,
+		screen_active_hours, total_steps, most_active_period, sample_count, text_summary
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON DUPLICATE KEY UPDATE
+		home_hours = VALUES(home_hours),
+		work_hours = VALUES(work_hours),
+		transit_hours = VALUES(transit_hours),
+		screen_active_hours = VALUES(screen_active_hours),
+		total_steps = VALUES(total_steps),
+		most_active_period = VALUES(most_active_period),
+		sample_count = VALUES(sample_count),
+		text_summary = VALUES(text_summary)`
+	_, err := r.db.ExecContext(ctx, query,
+		summary.UserID,
+		summary.SummaryDate,
+		summary.HomeHours,
+		summary.WorkHours,
+		summary.TransitHours,
+		summary.ScreenActiveHours,
+		summary.TotalSteps,
+		summary.MostActivePeriod,
+		summary.SampleCount,
+		summary.TextSummary,
+	)
+	return err
+}
+
+// ========== 推断日志操作 ==========
+
+// SaveInferenceLog 保存推断日志
+func (r *MemoryRepository) SaveInferenceLog(ctx context.Context, log *model.InferenceLog) error {
+	toolsJSON := "[]"
+	if len(log.ToolsUsed) > 0 {
+		if data, err := json.Marshal(log.ToolsUsed); err == nil {
+			toolsJSON = string(data)
+		}
+	}
+
+	query := `INSERT INTO inference_logs (
+		user_id, timestamp, sensor_data, tools_used, asked_user,
+		initial_result, final_result, user_corrected, confidence, iterations,
+		latency_ms, trigger_source, context_sections, thinking_tokens
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	_, err := r.db.ExecContext(ctx, query,
+		log.UserID,
+		log.Timestamp,
+		log.SensorData,
+		toolsJSON,
+		log.AskedUser,
+		log.InitialResult,
+		log.FinalResult,
+		log.UserCorrected,
+		log.Confidence,
+		log.Iterations,
+		log.LatencyMs,
+		log.TriggerSource,
+		log.ContextSections,
+		log.ThinkingTokens,
+	)
+	return err
+}
+
+// MarkInferenceLogCorrected 标记最近的推断日志为已纠正
+func (r *MemoryRepository) MarkInferenceLogCorrected(ctx context.Context, userID string, finalResult string) error {
+	query := `UPDATE inference_logs
+		SET user_corrected = TRUE, final_result = ?
+		WHERE user_id = ? AND timestamp > DATE_SUB(NOW(), INTERVAL 15 MINUTE)
+		ORDER BY timestamp DESC LIMIT 1`
+	_, err := r.db.ExecContext(ctx, query, finalResult, userID)
+	return err
+}
+
+// GetDailyActivitySummary 获取指定日期的活动摘要
+func (r *MemoryRepository) GetDailyActivitySummary(ctx context.Context, userID string, date string) (*model.DailyActivitySummary, error) {
+	var summary model.DailyActivitySummary
+	query := `SELECT id, user_id, summary_date, home_hours, work_hours, transit_hours,
+		screen_active_hours, total_steps, most_active_period, sample_count, text_summary
+		FROM daily_activity_summaries
+		WHERE user_id = ? AND summary_date = ?`
+	err := r.db.GetContext(ctx, &summary, query, userID, date)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &summary, nil
+}

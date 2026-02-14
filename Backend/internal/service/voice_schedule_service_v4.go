@@ -43,8 +43,9 @@ type VoiceScheduleServiceV4 struct {
 	agentService        *AgentService
 
 	// ========== 扩展功能依赖 ==========
-	contactService *ContactService
-	bookingService *BookingService
+	contactService  *ContactService
+	bookingService  *BookingService
+	locationService *LocationService
 }
 
 // SetBookingService 设置预约服务（延迟注入，避免循环依赖）
@@ -66,6 +67,7 @@ func NewVoiceScheduleServiceV4(
 	conversationService *ConversationService,
 	agentService *AgentService,
 	contactService *ContactService,
+	locationService *LocationService,
 ) *VoiceScheduleServiceV4 {
 	svc := &VoiceScheduleServiceV4{
 		scheduleRepo:        scheduleRepo,
@@ -78,6 +80,7 @@ func NewVoiceScheduleServiceV4(
 		conversationService: conversationService,
 		agentService:        agentService,
 		contactService:      contactService,
+		locationService:     locationService,
 	}
 
 	// 创建 LLM 适配器
@@ -159,6 +162,13 @@ func (s *VoiceScheduleServiceV4) InferStatus(
 	inferenceContext string,
 	callback func(event *model.V4Event),
 ) (*model.InferenceResponse, error) {
+	// 记录推断开始时间（用于计算 latency）
+	inferStartTime := time.Now()
+	triggerSource := "oneclick"
+	if src, ok := ctx.Value("trigger_source").(string); ok {
+		triggerSource = src
+	}
+
 	if s.llmAdapter == nil {
 		return nil, fmt.Errorf("LLM 未配置")
 	}
@@ -171,6 +181,11 @@ func (s *VoiceScheduleServiceV4) InferStatus(
 	// 缓存传感器数据
 	if sensorData != nil {
 		s.cacheSensorDataForInference(ctx, userID, sensorData)
+	}
+
+	// 用服务端聚类结果覆写客户端位置类型，使【实时设备数据】与【多维上下文数据】一致
+	if sensorData != nil && s.locationService != nil {
+		s.enrichSensorLocation(ctx, userID, sensorData)
 	}
 
 	// 创建临时推断 session（不持久化到 Redis）
@@ -221,6 +236,9 @@ func (s *VoiceScheduleServiceV4) InferStatus(
 
 	// 注意：一键生成推断不设置推断锁、不保存推断历史
 	// 等用户通过 status-feedback 确认发布后，由 SaveStatusFeedback 处理入库
+
+	// 异步记录推断日志（不阻塞主流程）
+	go s.saveInferenceLog(userID, triggerSource, sensorData, inferenceContext, inferResult, session, inferStartTime)
 
 	return &model.InferenceResponse{
 		Phase:  model.InferencePhaseCompleted,
@@ -374,6 +392,12 @@ func (s *VoiceScheduleServiceV4) processLoopWithTools(
 		})
 		if err != nil {
 			return fmt.Errorf("LLM 调用失败: %w", err)
+		}
+
+		// 累积 LLM token 用量 + thinking 内容（用于推断日志）
+		session.TotalCompletionTokens += response.CompletionTokens
+		if response.Reasoning != "" {
+			session.LastReasoning = response.Reasoning
 		}
 
 		// 3. 处理响应
@@ -707,6 +731,8 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 3. **时间语境**：工作日和周末的同一信号可能意味着不同活动。深夜、清晨、午间有各自的合理推断。
 4. **is_available 含义**：表示用户此刻是否方便被打扰/有空社交。工作、开会、通勤、睡觉、运动等通常为 false；在家休闲、空闲、午休等通常为 true。
 5. **用户修正**：修正历史中纠正过的推断不能再犯。
+6. **深夜/凌晨规则**：22:00-06:00 + 在家 + 屏幕长时间不活跃(>60min) → 大概率在睡觉。但如果用户是轮班工作者且在工作地点，则可能在值班。
+7. **职业参考**：注意用户画像中的职业类型和工作时间。轮班制(护士/保安等)深夜在工作地点=值班而非睡觉；学生在学校/图书馆+专注模式=学习而非摸鱼。
 
 # status 格式
 - 2-4字，口语化动词短语。如：刷手机、工作、睡觉、刷剧、聊微信、开车上班、午休、散步
@@ -760,11 +786,16 @@ func formatSensorData(data *model.ExtendedStatusReportRequest) string {
 		}
 	}
 
-	// 位置（place_type 由客户端猜测，不一定准确）
+	// 位置（有坐标时已由 enrichSensorLocation 覆写为服务端分类，无坐标时仅为客户端猜测）
 	if data.ExtendedLocation != nil {
 		loc := data.ExtendedLocation
-		sb.WriteString(fmt.Sprintf("- location: place_type=%s (client_guess, may be inaccurate), at_place_since_minutes=%d",
-			loc.PlaceType, loc.AtPlaceSinceMinutes))
+		if loc.Latitude != 0 || loc.Longitude != 0 {
+			sb.WriteString(fmt.Sprintf("- location: place_type=%s (server_classified), at_place_since_minutes=%d",
+				loc.PlaceType, loc.AtPlaceSinceMinutes))
+		} else {
+			sb.WriteString(fmt.Sprintf("- location: place_type=%s (client_guess, may be inaccurate), at_place_since_minutes=%d",
+				loc.PlaceType, loc.AtPlaceSinceMinutes))
+		}
 		if loc.PlaceName != "" {
 			sb.WriteString(fmt.Sprintf(", place_name=%s", loc.PlaceName))
 		}
@@ -3152,19 +3183,22 @@ func (s *VoiceScheduleServiceV4) InferWithAgent(ctx context.Context, userID stri
 		}
 	}
 
-	// 聚合推断上下文（复用 V3 的 PreGatherContext）
+	// 聚合推断上下文
 	deps := &agent.InferenceToolDeps{
 		RedisClient:        s.redisClient,
 		MemoryRepo:         s.memoryRepo,
 		ScheduleRepo:       s.scheduleRepo,
 		UserProfileService: s.userProfileService,
+		LocationService:    s.locationService,
+		MemoryDocRepo:      s.memoryDocRepo,
 		UserID:             userID,
 	}
 	inferCtx := agent.PreGatherContext(ctx, deps)
 	inferenceContext := agent.FormatContextForPrompt(inferCtx)
 
-	// 调用 V4 推断
-	resp, err := s.InferStatus(ctx, userID, sensorData, inferenceContext, nil)
+	// 调用 V4 推断（标记为自动推断来源）
+	autoCtx := context.WithValue(ctx, "trigger_source", "auto_scheduler")
+	resp, err := s.InferStatus(autoCtx, userID, sensorData, inferenceContext, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -3178,6 +3212,8 @@ func (s *VoiceScheduleServiceV4) GatherInferenceContext(ctx context.Context, use
 		MemoryRepo:         s.memoryRepo,
 		ScheduleRepo:       s.scheduleRepo,
 		UserProfileService: s.userProfileService,
+		LocationService:    s.locationService,
+		MemoryDocRepo:      s.memoryDocRepo,
 		UserID:             userID,
 	}
 	inferCtx := agent.PreGatherContext(ctx, deps)
@@ -3262,10 +3298,151 @@ func (s *VoiceScheduleServiceV4) cacheSensorDataForInference(ctx context.Context
 	if s.redisClient == nil || data == nil {
 		return
 	}
+
+	// 位置学习：记录到 MySQL 聚类 + Redis 历史
+	RecordLocationFromReport(ctx, s.locationService, s.redisClient, userID, data)
+
 	extKey := fmt.Sprintf("agent:extended:%s", userID)
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return
 	}
 	s.redisClient.Set(ctx, extKey, jsonData, 30*time.Minute)
+}
+
+// enrichSensorLocation 用服务端聚类结果覆写客户端 place_type
+func (s *VoiceScheduleServiceV4) enrichSensorLocation(ctx context.Context, userID string, data *model.ExtendedStatusReportRequest) {
+	var lat, lng float64
+	if data.ExtendedLocation != nil {
+		lat, lng = data.ExtendedLocation.Latitude, data.ExtendedLocation.Longitude
+	} else if data.Location != nil {
+		lat, lng = data.Location.Latitude, data.Location.Longitude
+	}
+	if lat == 0 && lng == 0 {
+		return
+	}
+
+	result := s.locationService.ClassifyLocation(ctx, userID, lat, lng)
+	if result == nil {
+		return
+	}
+	classification, ok := result.(*LocationClassification)
+	if !ok || classification.PlaceType == "" || classification.PlaceType == "first_visit" {
+		return
+	}
+
+	// 覆写客户端 place_type 为服务端分类结果
+	serverType := model.PlaceType(classification.PlaceType)
+	if data.ExtendedLocation != nil {
+		data.ExtendedLocation.PlaceType = serverType
+	} else if data.Location != nil {
+		data.Location.PlaceType = serverType
+	}
+}
+
+// ========== 推断日志记录 ==========
+
+// saveInferenceLog 异步记录推断日志（不阻塞主流程）
+func (s *VoiceScheduleServiceV4) saveInferenceLog(
+	userID, triggerSource string,
+	sensorData *model.ExtendedStatusReportRequest,
+	inferenceContext string,
+	result *model.CurrentStatusInference,
+	session *model.V4Session,
+	startTime time.Time,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("[InferenceLog] panic: %v\n", r)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	latencyMs := time.Since(startTime).Milliseconds()
+
+	// 从 session.Messages 提取工具使用和迭代次数
+	var toolsUsed []string
+	iterations := 0
+	for _, msg := range session.Messages {
+		if msg.Role == "assistant" {
+			iterations++
+			for _, tc := range msg.ToolCalls {
+				toolsUsed = append(toolsUsed, tc.Function.Name)
+			}
+		}
+	}
+	if iterations == 0 {
+		iterations = 1
+	}
+
+	// 轻量提取上下文段落元数据
+	meta := extractContextSections(inferenceContext)
+	metaJSON, _ := json.Marshal(meta)
+
+	// 使用 LLM API 返回的 completion_tokens 作为 thinking_tokens（含 thinking + output）
+	thinkingTokens := session.TotalCompletionTokens
+
+	sensorJSON := "{}"
+	if sensorData != nil {
+		if d, err := json.Marshal(sensorData); err == nil {
+			sensorJSON = string(d)
+		}
+	}
+
+	resultJSON := "{}"
+	confidence := "low"
+	if result != nil {
+		confidence = result.Confidence
+		if d, err := json.Marshal(result); err == nil {
+			resultJSON = string(d)
+		}
+	}
+
+	log := &model.InferenceLog{
+		UserID:          userID,
+		Timestamp:       startTime,
+		SensorData:      sensorJSON,
+		ToolsUsed:       toolsUsed,
+		Confidence:      confidence,
+		Iterations:      iterations,
+		InitialResult:   resultJSON,
+		FinalResult:     resultJSON,
+		LatencyMs:       int(latencyMs),
+		TriggerSource:   triggerSource,
+		ContextSections: string(metaJSON),
+		ThinkingTokens:  thinkingTokens,
+	}
+	if err := s.memoryRepo.SaveInferenceLog(ctx, log); err != nil {
+		fmt.Printf("[InferenceLog] 保存失败: %v\n", err)
+	}
+}
+
+// extractContextSections 从格式化后的上下文字符串中提取段落元数据
+func extractContextSections(ctxStr string) *model.ContextSectionsMeta {
+	countSection := func(header string) int {
+		idx := strings.Index(ctxStr, header)
+		if idx < 0 {
+			return 0
+		}
+		section := ctxStr[idx:]
+		nextHeader := strings.Index(section[1:], "\n# ")
+		if nextHeader > 0 {
+			section = section[:nextHeader+1]
+		}
+		return strings.Count(section, "\n- ")
+	}
+	return &model.ContextSectionsMeta{
+		HasDeviceSignals:    strings.Contains(ctxStr, "# 实时设备信号（推断的主要依据）"),
+		CorrectionsCount:    countSection("# 用户修正历史"),
+		TimeslotCorrections: countSection("# 本时段历史纠正记录"),
+		UserScheduleCount:   countSection("# 用户主动设置的时刻表"),
+		AIScheduleCount:     countSection("# AI 自动推测的时刻表"),
+		HasProfile:          strings.Contains(ctxStr, "# 用户画像"),
+		HasCoreMemory:       strings.Contains(ctxStr, "# 行为记忆"),
+		RecentStatusesCount: countSection("# 最近状态记录"),
+		HasPrevInference:    strings.Contains(ctxStr, "# 上次推断"),
+		HasConversation:     strings.Contains(ctxStr, "# 最近对话"),
+	}
 }

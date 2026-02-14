@@ -245,8 +245,8 @@ type InferenceResponse struct {
 	DefaultIdx int                  `json:"default_index,omitempty"`
 }
 
-// V3InferenceContext 预聚合的推断上下文（Go 代码收集，注入 system prompt）
-type V3InferenceContext struct {
+// AgentInferenceContext 预聚合的推断上下文（Go 代码收集，注入 system prompt）
+type AgentInferenceContext struct {
 	DeviceSignals        map[string]interface{}   `json:"device_signals,omitempty"`
 	TodaySchedule        map[string]interface{}   `json:"today_schedule,omitempty"`
 	UserScheduleItems    []map[string]interface{} `json:"user_schedule_items,omitempty"`    // 用户主动设置的时刻表条目
@@ -258,4 +258,5 @@ type V3InferenceContext struct {
 	CoreMemory           map[string]interface{}   `json:"core_memory,omitempty"`
 	PrevInference        *CurrentStatusInference  `json:"prev_inference,omitempty"`
 	Preferences          []string                 `json:"preferences,omitempty"`
+	TimeslotCorrections  []TimeslotCorrectionSummary `json:"timeslot_corrections,omitempty"`
 }

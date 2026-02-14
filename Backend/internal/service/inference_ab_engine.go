@@ -706,8 +706,8 @@ func placeTypeToLabel(pt string) string {
 
 // ========== 上下文构建（复用 SimEngine 逻辑）==========
 
-func (e *InferenceABEngine) buildSimContextForAB(state *SimState, slot *SimTimeSlot, persona *SimPersona, simTime time.Time) *model.V3InferenceContext {
-	ic := &model.V3InferenceContext{}
+func (e *InferenceABEngine) buildSimContextForAB(state *SimState, slot *SimTimeSlot, persona *SimPersona, simTime time.Time) *model.AgentInferenceContext {
+	ic := &model.AgentInferenceContext{}
 
 	// 设备信号
 	ic.DeviceSignals = e.sensorToSignalMap(slot, simTime)

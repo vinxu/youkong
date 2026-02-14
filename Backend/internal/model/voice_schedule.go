@@ -697,6 +697,18 @@ type V4Session struct {
 	// V3 近期推断状态（不持久化，仅本次请求使用，格式如 "😴准备睡觉"）
 	RecentInference string `json:"-"`
 
+	// ========== 推断模式（V4 替代 V3 StatusInferenceAgent）==========
+	// InferenceMode 为 true 时，V4 只暴露 set_status 工具，用于状态推断
+	InferenceMode    bool   `json:"-"`
+	// InferenceContext 预聚合的推断上下文（PreGatherContext 格式化后的文本）
+	InferenceContext string `json:"-"`
+	// InferenceResult 推断模式下 set_status 执行后的结果（从 tool call args 提取）
+	InferenceResult  *CurrentStatusInference `json:"-"`
+	// LastReasoning LLM 最后一轮的 thinking 内容（用于日志记录）
+	LastReasoning      string `json:"-"`
+	// TotalCompletionTokens 所有 LLM 调用的 completion_tokens 累计（用于日志记录）
+	TotalCompletionTokens int `json:"-"`
+
 	// 时间预处理注解（Layer 1 解析结果，不持久化，仅本次请求使用）
 	TemporalAnnotation string `json:"-"`
 

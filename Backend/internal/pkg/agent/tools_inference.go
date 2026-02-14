@@ -25,6 +25,7 @@ type InferenceToolDeps struct {
 	ScheduleRepo       *repository.ScheduleRepository
 	UserProfileService UserProfileProvider
 	LocationService    LocationClassifier // Phase 4: 服务端位置聚类（可选）
+	MemoryDocRepo      *repository.UserMemoryDocumentRepository
 	UserID             string
 }
 
@@ -225,8 +226,8 @@ func createAskUserChoiceHandler(deps *InferenceToolDeps) ToolHandler {
 // ========== 预聚合: Go 代码收集所有数据源 ==========
 
 // PreGatherContext 预聚合所有推断数据源（Go 代码执行，~50ms）
-func PreGatherContext(ctx context.Context, deps *InferenceToolDeps) *model.V3InferenceContext {
-	ic := &model.V3InferenceContext{}
+func PreGatherContext(ctx context.Context, deps *InferenceToolDeps) *model.AgentInferenceContext {
+	ic := &model.AgentInferenceContext{}
 
 	// 1. 设备信号（Redis 缓存）
 	ic.DeviceSignals = gatherDeviceSignals(ctx, deps)
@@ -251,7 +252,7 @@ func PreGatherContext(ctx context.Context, deps *InferenceToolDeps) *model.V3Inf
 
 // FormatContextForPrompt 将预聚合的上下文格式化为 prompt 注入文本
 // 数据段按三级可信度排列：实时信号(高) → 用户主动设置(最高) → AI推测(低)
-func FormatContextForPrompt(ic *model.V3InferenceContext) string {
+func FormatContextForPrompt(ic *model.AgentInferenceContext) string {
 	var sb strings.Builder
 
 	// === 高可信度: 实时设备信号 ===
@@ -278,6 +279,18 @@ func FormatContextForPrompt(ic *model.V3InferenceContext) string {
 					c["corrected_emoji"], c["corrected_activity"]))
 			} else {
 				sb.WriteString(fmt.Sprintf("- 用户主动设为 %s %s\n", c["corrected_emoji"], c["corrected_activity"]))
+			}
+		}
+	}
+
+	// P1: 本时段历史纠正记录（高优先级）
+	if len(ic.TimeslotCorrections) > 0 {
+		sb.WriteString("\n# 本时段历史纠正记录（高优先级）\n")
+		for _, tc := range ic.TimeslotCorrections {
+			if tc.OriginalEmoji != "" || tc.OriginalActivity != "" {
+				sb.WriteString(fmt.Sprintf("- 你之前推断「%s %s」但用户纠正为「%s %s」（已发生%d次）\n",
+					tc.OriginalEmoji, tc.OriginalActivity,
+					tc.CorrectedEmoji, tc.CorrectedActivity, tc.Count))
 			}
 		}
 	}
@@ -458,7 +471,7 @@ func gatherDeviceSignals(ctx context.Context, deps *InferenceToolDeps) map[strin
 	return result
 }
 
-func gatherHistoryData(ctx context.Context, deps *InferenceToolDeps, ic *model.V3InferenceContext) {
+func gatherHistoryData(ctx context.Context, deps *InferenceToolDeps, ic *model.AgentInferenceContext) {
 	now := time.Now()
 	currentTime := now.Format("15:04")
 
@@ -567,6 +580,15 @@ func gatherHistoryData(ctx context.Context, deps *InferenceToolDeps, ic *model.V
 			}
 		}
 	}
+
+	// P1: 查询本时段历史纠正记录（MySQL 持久化）
+	if deps.MemoryRepo != nil {
+		now := time.Now()
+		corrections, err := deps.MemoryRepo.GetTimeslotCorrections(ctx, deps.UserID, int(now.Weekday()), now.Hour())
+		if err == nil && len(corrections) > 0 {
+			ic.TimeslotCorrections = corrections
+		}
+	}
 }
 
 func gatherConversation(ctx context.Context, deps *InferenceToolDeps) string {
@@ -581,7 +603,7 @@ func gatherConversation(ctx context.Context, deps *InferenceToolDeps) string {
 	return summary
 }
 
-func gatherProfileData(ctx context.Context, deps *InferenceToolDeps, ic *model.V3InferenceContext) {
+func gatherProfileData(ctx context.Context, deps *InferenceToolDeps, ic *model.AgentInferenceContext) {
 	// 用户画像
 	if deps.UserProfileService != nil {
 		profile, err := deps.UserProfileService.GetProfile(deps.UserID)
@@ -642,6 +664,80 @@ func gatherProfileData(ctx context.Context, deps *InferenceToolDeps, ic *model.V
 						ic.Profile = make(map[string]interface{})
 					}
 					ic.Profile["current_slot_history"] = slotDist
+				}
+			}
+		}
+	}
+
+	// 注入当前时段的历史可用率（user_time_slot_stats）
+	if deps.MemoryRepo != nil {
+		now := time.Now()
+		sampleCount, availableRate, err := deps.MemoryRepo.GetTimeSlotStats(
+			ctx, deps.UserID, int(now.Weekday()), now.Hour())
+		if err == nil && sampleCount >= 3 {
+			if ic.Profile == nil {
+				ic.Profile = make(map[string]interface{})
+			}
+			weekdays := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
+			ic.Profile["current_slot_availability"] = fmt.Sprintf(
+				"%s %d:00-%d:00 历史可用率: %d%% (样本%d次)",
+				weekdays[now.Weekday()], now.Hour(), now.Hour()+1,
+				availableRate, sampleCount)
+		}
+
+		// P2-a: 注入昨天活动摘要
+		yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
+		summary, err := deps.MemoryRepo.GetDailyActivitySummary(ctx, deps.UserID, yesterday)
+		if err == nil && summary != nil {
+			if ic.Profile == nil {
+				ic.Profile = make(map[string]interface{})
+			}
+			parts := []string{}
+			if summary.WorkHours > 0 {
+				parts = append(parts, fmt.Sprintf("工作%.1fh", summary.WorkHours))
+			}
+			if summary.HomeHours > 0 {
+				parts = append(parts, fmt.Sprintf("在家%.1fh", summary.HomeHours))
+			}
+			if summary.TransitHours > 0 {
+				parts = append(parts, fmt.Sprintf("通勤%.1fh", summary.TransitHours))
+			}
+			if summary.ScreenActiveHours > 0 {
+				parts = append(parts, fmt.Sprintf("看屏幕%.1fh", summary.ScreenActiveHours))
+			}
+			if summary.TotalSteps > 0 {
+				parts = append(parts, fmt.Sprintf("步数%d", summary.TotalSteps))
+			}
+			if len(parts) > 0 {
+				ic.Profile["yesterday_activity"] = strings.Join(parts, "，")
+			}
+		}
+	}
+
+	// P2-b: 注入结构化时间表模板
+	if deps.MemoryDocRepo != nil {
+		doc, err := deps.MemoryDocRepo.GetByUserID(ctx, deps.UserID)
+		if err == nil && doc != nil && doc.StructuredSchedule.StructuredScheduleTemplate != nil {
+			now := time.Now()
+			isWeekend := now.Weekday() == time.Saturday || now.Weekday() == time.Sunday
+			var slots []model.TimeSlotTemplate
+			if isWeekend {
+				slots = doc.StructuredSchedule.WeekendTemplate
+			} else {
+				slots = doc.StructuredSchedule.WeekdayTemplate
+			}
+			// 找到匹配当前时段的模板
+			for _, slot := range slots {
+				if now.Hour() >= slot.StartHour && now.Hour() < slot.EndHour {
+					if ic.Profile == nil {
+						ic.Profile = make(map[string]interface{})
+					}
+					ic.Profile["structured_schedule_hint"] = fmt.Sprintf(
+						"历史规律: %s %s (%02d:00-%02d:00, %.0f%%置信, %d次)",
+						slot.Emoji, slot.Activity,
+						slot.StartHour, slot.EndHour,
+						slot.Confidence*100, slot.Samples)
+					break
 				}
 			}
 		}

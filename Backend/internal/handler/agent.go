@@ -276,6 +276,11 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 	// 追踪权限授权状态（用于 AI 就绪检查，持久化到 Redis 90天）
 	h.trackPermissions(c.Request.Context(), userID, &req)
 
+	// 每次上报都持久化城市信息（不依赖推断是否执行）
+	if h.agentService != nil {
+		h.agentService.PersistCityFromExtendedReport(c.Request.Context(), userID, &req)
+	}
+
 	// 使用 V4 推断
 	if h.voiceScheduleServiceV4 == nil {
 		response.InternalError(c, "推断服务未初始化")
@@ -320,13 +325,30 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 		return
 	}
 
+	// 推断锁生效时（activity="状态保持中"），不返回占位符，直接返回用户当前已缓存的状态
+	if inference.Activity == "状态保持中" {
+		fmt.Printf("[上报] 推断锁生效，返回已缓存状态 user=%s\n", userID)
+		if h.memoryService != nil {
+			existingMap, _ := h.memoryService.GetCachedAnalysisByUserIDs(inferCtx, []string{userID})
+			if existing := existingMap[userID]; existing != nil {
+				response.Success(c, gin.H{
+					"success":  true,
+					"message":  "状态未变化",
+					"analysis": existing,
+				})
+				return
+			}
+		}
+		// 无缓存则返回空（不返回占位符）
+		response.Success(c, gin.H{
+			"success": true,
+			"message": "状态未变化",
+		})
+		return
+	}
+
 	fmt.Printf("[上报] V4 推断完成 user=%s emoji=%s activity=%s confidence=%s\n",
 		userID, inference.Emoji, inference.Activity, inference.Confidence)
-
-	// 持久化城市信息到 Redis（agent:status key）和 MySQL（users.city）
-	if h.agentService != nil {
-		h.agentService.PersistCityFromExtendedReport(inferCtx, userID, &req)
-	}
 
 	// 转换为 AnalysisResult 格式（兼容现有前端）
 	analysisResult := inferenceToAnalysisResult(inference)
@@ -2693,7 +2715,7 @@ func (h *AgentHandler) InferStatusV2(c *gin.Context) {
 
 // inferStatusV4Sync V4 同步推断（一键生成，用户主动触发，不受推断锁限制）
 func (h *AgentHandler) inferStatusV4Sync(c *gin.Context, userID string, req *model.ExtendedStatusReportRequest) {
-	v4Ctx, v4Cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	v4Ctx, v4Cancel := context.WithTimeout(context.WithValue(context.Background(), "trigger_source", "sync"), 60*time.Second)
 	defer v4Cancel()
 
 	// 聚合上下文后直接调用 InferStatus（绕过 InferWithAgent 的推断锁）
@@ -2779,7 +2801,7 @@ func (h *AgentHandler) inferStatusV4Stream(_ *gin.Context, w http.ResponseWriter
 	// 聚合推断上下文
 	inferenceContext := h.voiceScheduleServiceV4.GatherInferenceContext(context.Background(), userID)
 
-	v4Ctx, v4Cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	v4Ctx, v4Cancel := context.WithTimeout(context.WithValue(context.Background(), "trigger_source", "oneclick"), 60*time.Second)
 	defer v4Cancel()
 
 	// V4 推断，将 V4Event 转为 InferenceStreamEvent
@@ -3191,7 +3213,7 @@ func (h *AgentHandler) TestScenarioFull(c *gin.Context) {
 
 	fmt.Printf("[Scenario] 开始全量场景测试（30画像×30天）\n")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
 	defer cancel()
 
 	report, err := h.scenarioEngine.RunFullScenario(ctx)

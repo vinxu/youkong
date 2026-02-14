@@ -35,6 +35,7 @@ type AgentService struct {
 	memoryRepo         *repository.MemoryRepository
 	scheduleRepo       *repository.ScheduleRepository
 	userProfileService *UserProfileService
+	locationService    *LocationService
 	llmClient          *llm.OpenRouterClient
 	holmesAnalyzer     *llm.HolmesAnalyzer
 }
@@ -48,6 +49,7 @@ func NewAgentService(
 	scheduleRepo *repository.ScheduleRepository,
 	userProfileService *UserProfileService,
 	llmClient *llm.OpenRouterClient,
+	locationService *LocationService,
 ) *AgentService {
 	var holmesAnalyzer *llm.HolmesAnalyzer
 	if llmClient != nil {
@@ -60,6 +62,7 @@ func NewAgentService(
 		memoryRepo:         memoryRepo,
 		scheduleRepo:       scheduleRepo,
 		userProfileService: userProfileService,
+		locationService:    locationService,
 		llmClient:          llmClient,
 		holmesAnalyzer:     holmesAnalyzer,
 	}
@@ -587,6 +590,9 @@ func (s *AgentService) ReportExtendedStatus(ctx context.Context, userID string, 
 
 // ReportExtendedStatusStream 流式上报状态（实时输出推理过程）
 func (s *AgentService) ReportExtendedStatusStream(ctx context.Context, userID string, req *model.ExtendedStatusReportRequest, callback func(event interface{})) (*model.HolmesResult, error) {
+	// 0. 位置学习：记录到 MySQL 聚类 + Redis 历史
+	RecordLocationFromReport(ctx, s.locationService, s.redisClient, userID, req)
+
 	// 1. 保存原始状态到 Redis
 	status := model.UserRealtimeStatus{
 		UserID:    userID,
@@ -597,6 +603,9 @@ func (s *AgentService) ReportExtendedStatusStream(ctx context.Context, userID st
 	}
 	if req.Location != nil {
 		status.Location = *req.Location
+		if req.Location.City != "" {
+			status.City = req.Location.City
+		}
 	}
 
 	data, err := json.Marshal(status)
@@ -893,6 +902,9 @@ func (s *AgentService) GenerateStatusOptionsStream(ctx context.Context, userID s
 	}
 	if req.Location != nil {
 		status.Location = *req.Location
+		if req.Location.City != "" {
+			status.City = req.Location.City
+		}
 	}
 
 	data, err := json.Marshal(status)
@@ -1184,6 +1196,9 @@ func (s *AgentService) getDefaultOnboardingOptions(profileType string) *model.St
 
 // ReportExtendedStatus2Stream Holmes 2.0 流式上报状态
 func (s *AgentService) ReportExtendedStatus2Stream(ctx context.Context, userID string, req *model.ExtendedStatusReportRequest, callback func(event interface{})) (*model.Holmes2Result, error) {
+	// 0. 位置学习：记录到 MySQL 聚类 + Redis 历史
+	RecordLocationFromReport(ctx, s.locationService, s.redisClient, userID, req)
+
 	// 1. 保存原始状态到 Redis
 	status := model.UserRealtimeStatus{
 		UserID:    userID,
@@ -1194,6 +1209,9 @@ func (s *AgentService) ReportExtendedStatus2Stream(ctx context.Context, userID s
 	}
 	if req.Location != nil {
 		status.Location = *req.Location
+		if req.Location.City != "" {
+			status.City = req.Location.City
+		}
 	}
 
 	data, err := json.Marshal(status)
@@ -1413,6 +1431,56 @@ func (s *AgentService) SaveStatusFeedback(ctx context.Context, userID string, re
 		// 设置推断锁（10 分钟内 StatusScheduler 不会覆盖用户确认的状态）
 		lockKey := fmt.Sprintf("infer:lock:%s", userID)
 		s.redisClient.Set(ctx, lockKey, "user_confirmed", 10*time.Minute)
+	}
+
+	// 累积时段可用率统计（user_time_slot_stats）
+	if s.memoryRepo != nil {
+		now := time.Now()
+		locationType := ""
+		activityType := req.CorrectedActivity
+		screenDuration := 0
+		if sensorData != nil {
+			if sensorData.ExtendedLocation != nil {
+				locationType = string(sensorData.ExtendedLocation.PlaceType)
+			} else if sensorData.Location != nil {
+				locationType = string(sensorData.Location.PlaceType)
+			}
+			if sensorData.Screen != nil {
+				screenDuration = sensorData.Screen.SessionDurationMinutes
+			}
+		}
+		if err := s.memoryRepo.UpdateTimeSlotStats(ctx, userID,
+			int(now.Weekday()), now.Hour(),
+			isAvailable, locationType, activityType, screenDuration); err != nil {
+			fmt.Printf("[SaveStatusFeedback] 更新时段统计失败 user=%s error=%v\n", userID, err)
+		}
+
+		// P1: 持久化推断纠正记录（仅当有原始推断且发生了实际纠正时）
+		if req.OriginalActivity != "" && (req.OriginalEmoji != req.CorrectedEmoji || req.OriginalActivity != req.CorrectedActivity) {
+			correction := &model.InferenceCorrection{
+				UserID:            userID,
+				OriginalEmoji:     req.OriginalEmoji,
+				OriginalActivity:  req.OriginalActivity,
+				CorrectedEmoji:    req.CorrectedEmoji,
+				CorrectedActivity: req.CorrectedActivity,
+				CorrectedPlace:    req.CorrectedPlace,
+				DayOfWeek:         int(now.Weekday()),
+				HourOfDay:         now.Hour(),
+				DeviceContext:     contextJSON,
+				LocationType:      locationType,
+			}
+			if err := s.memoryRepo.SaveInferenceCorrection(ctx, correction); err != nil {
+				fmt.Printf("[SaveStatusFeedback] 保存推断纠正失败 user=%s error=%v\n", userID, err)
+			}
+		}
+	}
+
+	// 回标 inference_log 为已纠正（匹配最近 15 分钟内的推断日志）
+	if req.OriginalEmoji != "" || req.OriginalActivity != "" {
+		correctedJSON, _ := json.Marshal(analysisResult.LifeStatus)
+		if err := s.memoryRepo.MarkInferenceLogCorrected(ctx, userID, string(correctedJSON)); err != nil {
+			fmt.Printf("[SaveStatusFeedback] 回标 inference_log 纠正失败 user=%s error=%v\n", userID, err)
+		}
 	}
 
 	return nil
@@ -1761,9 +1829,42 @@ func getPlaceEmoji(place string) string {
 	return ""
 }
 
-// PersistCityFromExtendedReport 从扩展上报中持久化城市信息（通过位置反查）
-func (s *AgentService) PersistCityFromExtendedReport(_ context.Context, _ string, _ *model.ExtendedStatusReportRequest) {
-	// TODO: 从经纬度反查城市并持久化
+// PersistCityFromExtendedReport 从扩展上报中持久化城市信息到 agent:status Redis key
+// V4 推断流程（InferWithAgent）不走 ReportExtendedStatusStream，需要单独持久化 City
+func (s *AgentService) PersistCityFromExtendedReport(ctx context.Context, userID string, req *model.ExtendedStatusReportRequest) {
+	if req.Location == nil || req.Location.City == "" {
+		return
+	}
+
+	key := fmt.Sprintf(keyUserStatus, userID)
+	data, err := s.redisClient.Get(ctx, key)
+	if err != nil {
+		// key 不存在，创建新的
+		status := model.UserRealtimeStatus{
+			UserID:    userID,
+			UpdatedAt: time.Now(),
+			City:      req.Location.City,
+		}
+		status.Location = *req.Location
+		if req.Screen != nil {
+			status.Screen = *req.Screen
+		}
+		newData, _ := json.Marshal(status)
+		_ = s.redisClient.Set(ctx, key, newData, statusTTL)
+		return
+	}
+
+	// key 已存在，更新 City 字段
+	var status model.UserRealtimeStatus
+	if err := json.Unmarshal([]byte(data), &status); err != nil {
+		return
+	}
+	status.City = req.Location.City
+	if req.Location != nil {
+		status.Location = *req.Location
+	}
+	newData, _ := json.Marshal(status)
+	_ = s.redisClient.Set(ctx, key, newData, statusTTL)
 }
 
 // MergeExistingGifInfo 合并已有的 GIF 信息到反馈请求

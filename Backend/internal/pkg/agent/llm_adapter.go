@@ -157,9 +157,10 @@ type LLMRequest struct {
 
 // LLMResponse LLM 响应
 type LLMResponse struct {
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	Reasoning string     `json:"reasoning,omitempty"` // 思考过程
+	Content          string     `json:"content"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	Reasoning        string     `json:"reasoning,omitempty"`         // 思考过程
+	CompletionTokens int        `json:"completion_tokens,omitempty"` // 输出 token 数（含 thinking）
 }
 
 // ChatWithTools 带工具的聊天请求
@@ -257,6 +258,9 @@ func (a *LLMAdapter) chatWithToolsOpenAI(ctx context.Context, req *LLMRequest) (
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
+		Usage *struct {
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage,omitempty"`
 		Error *struct {
 			Message string `json:"message"`
 			Code    string `json:"code"`
@@ -277,10 +281,15 @@ func (a *LLMAdapter) chatWithToolsOpenAI(ctx context.Context, req *LLMRequest) (
 	}
 
 	choice := apiResp.Choices[0]
+	completionTokens := 0
+	if apiResp.Usage != nil {
+		completionTokens = apiResp.Usage.CompletionTokens
+	}
 	return &LLMResponse{
-		Content:   choice.Message.Content,
-		ToolCalls: choice.Message.ToolCalls,
-		Reasoning: choice.Message.ReasoningContent,
+		Content:          choice.Message.Content,
+		ToolCalls:        choice.Message.ToolCalls,
+		Reasoning:        choice.Message.ReasoningContent,
+		CompletionTokens: completionTokens,
 	}, nil
 }
 

@@ -479,8 +479,8 @@ func (e *SimEngine) runSingleInference(ctx context.Context, state *SimState, per
 // ========== 上下文构建 ==========
 
 // buildSimContext 构建模拟推断上下文（绕过 PreGatherContext）
-func (e *SimEngine) buildSimContext(state *SimState, slot *SimTimeSlot, persona *SimPersona, simTime time.Time) *model.V3InferenceContext {
-	ic := &model.V3InferenceContext{}
+func (e *SimEngine) buildSimContext(state *SimState, slot *SimTimeSlot, persona *SimPersona, simTime time.Time) *model.AgentInferenceContext {
+	ic := &model.AgentInferenceContext{}
 
 	// 1. 设备信号
 	ic.DeviceSignals = e.sensorToSignalMap(slot, simTime)
@@ -643,11 +643,16 @@ func (e *SimEngine) buildSimSystemPrompt(contextText string, simTime time.Time) 
 - screen.activity_type=productivity + work → 工作/办公
 - screen.activity_type=communication → 聊天/微信
 - location=transit → 在路上/通勤
-- screen.is_active=false + home + 深夜/凌晨 → 睡觉/休息
-- screen.is_active=false + home + last_active_minutes_ago>60 → 休息/小憩/睡觉
+- screen.is_active=false + home + 深夜/凌晨(22:00-06:00) → 睡觉（高确定性，尤其是 last_active>60min）
+- screen.is_active=false + home + last_active_minutes_ago>60 + 非深夜 → 休息/小憩
 - movement.activity=running → 跑步/运动
 - calendar.has_current_event=true → 参考日历事件名称
 - location=leisure → 外出/休闲（不是"在家"）
+- focus_mode=true + work/school → 工作/学习（非娱乐）
+
+# 职业特殊规则
+- 轮班工作者(ShiftWorker/护士/保安): 深夜在工作地点 → 值班/夜班（不是睡觉）
+- 学生: 在学校/图书馆 + 专注模式 + 屏幕不活跃 → 学习/自习（不是摸鱼）
 
 # is_available 判断规则
 - true: 在家+娱乐/休闲/通讯、在家+空闲、充电中无事、已完成工作
