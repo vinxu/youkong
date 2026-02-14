@@ -27,6 +27,22 @@ data class LocationDataRequest(
     val placeType: String,
     @SerialName("at_place_since_minutes")
     val atPlaceSinceMinutes: Int,
+    val city: String? = null,
+)
+
+/**
+ * 扩展位置数据（包含地点名称和精确坐标）
+ */
+@Serializable
+data class ExtendedLocationDataRequest(
+    @SerialName("place_type")
+    val placeType: String,
+    @SerialName("place_name")
+    val placeName: String? = null,
+    @SerialName("at_place_since_minutes")
+    val atPlaceSinceMinutes: Int,
+    val latitude: Double? = null,
+    val longitude: Double? = null,
 )
 
 /**
@@ -74,16 +90,54 @@ data class DisplayDataRequest(
 )
 
 /**
+ * 日历数据
+ */
+@Serializable
+data class CalendarDataRequest(
+    @SerialName("has_current_event")
+    val hasCurrentEvent: Boolean = false,
+    @SerialName("current_event_title")
+    val currentEventTitle: String? = null,
+    @SerialName("event_end_minutes")
+    val eventEndMinutes: Int? = null,
+    @SerialName("next_event_in_minutes")
+    val nextEventInMinutes: Int? = null,
+    @SerialName("today_remaining_count")
+    val todayRemainingCount: Int = 0,
+)
+
+/**
+ * 运动数据
+ */
+@Serializable
+data class MovementDataRequest(
+    @SerialName("is_moving")
+    val isMoving: Boolean = false,
+    @SerialName("movement_type")
+    val movementType: String = "stationary",
+    @SerialName("steps_today")
+    val stepsToday: Int? = null,
+    @SerialName("steps_last_hour")
+    val stepsLastHour: Int? = null,
+    @SerialName("stationary_minutes")
+    val stationaryMinutes: Int? = null,
+)
+
+/**
  * Agent 状态上报请求（扩展版，匹配后端 ExtendedStatusReportRequest）
  */
 @Serializable
 data class AgentStatusRequest(
     val screen: ScreenDataRequest? = null,
     val location: LocationDataRequest? = null,
+    @SerialName("extended_location")
+    val extendedLocation: ExtendedLocationDataRequest? = null,
     val battery: BatteryDataRequest? = null,
     val mode: ModeDataRequest? = null,
     val connection: ConnectionDataRequest? = null,
     val display: DisplayDataRequest? = null,
+    val calendar: CalendarDataRequest? = null,
+    val movement: MovementDataRequest? = null,
 )
 
 // ========== 响应数据结构 ==========
@@ -160,6 +214,72 @@ data class FreeProbabilityResponse(
     val friends: List<FriendProbabilityResponse>,
     @SerialName("generated_at")
     val generatedAt: Long, // 毫秒时间戳
+)
+
+// ========== V2 推断 SSE 数据结构 ==========
+
+/**
+ * V2 推断流式事件（Agent-based）
+ */
+@Serializable
+data class InferenceV2SseEvent(
+    val type: String = "",
+    val message: String? = null,
+    val data: InferenceV2EventData? = null,
+) {
+    // 便捷属性：从 data 中解包，兼顾向后兼容
+    val phase: String? get() = data?.phase
+    val tool: String? get() = data?.tool
+    val summary: String? get() = data?.summary
+    val content: String? get() = data?.content
+    val sessionId: String? get() = data?.sessionId
+    val question: String? get() = data?.question
+    val options: List<String>? get() = data?.options
+    val context: String? get() = data?.context
+    val result: InferenceV2Result? get() = data?.result
+    val error: String? get() = data?.error
+}
+
+/**
+ * V2 推断事件数据（嵌套在 data 字段中）
+ */
+@Serializable
+data class InferenceV2EventData(
+    val phase: String? = null,
+    val content: String? = null,
+    val tool: String? = null,
+    val summary: String? = null,
+    @SerialName("session_id")
+    val sessionId: String? = null,
+    val question: String? = null,
+    val options: List<String>? = null,
+    val context: String? = null,
+    val result: InferenceV2Result? = null,
+    val error: String? = null,
+)
+
+/**
+ * V2 推断结果
+ */
+@Serializable
+data class InferenceV2Result(
+    val emoji: String = "",
+    val activity: String = "",
+    val place: String? = null,
+    @SerialName("is_available")
+    val isAvailable: Boolean = false,
+    @SerialName("duration_hint")
+    val durationHint: String? = null,
+    val confidence: String = "medium",
+    @SerialName("inferred_at")
+    val inferredAt: Long = 0,
+    val reasoning: String? = null,
+    @SerialName("gif_url")
+    val gifUrl: String? = null,
+    @SerialName("gif_small_url")
+    val gifSmallUrl: String? = null,
+    @SerialName("giphy_query")
+    val giphyQuery: String? = null,
 )
 
 // ========== SSE 流式推理数据结构 ==========

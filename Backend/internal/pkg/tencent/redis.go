@@ -98,6 +98,31 @@ func (r *RedisClient) SetNX(ctx context.Context, key string, value interface{}, 
 	return r.client.SetNX(ctx, key, value, expiration).Result()
 }
 
+// HGetAll 获取 Hash 的所有字段和值
+func (r *RedisClient) HGetAll(ctx context.Context, key string) (map[string]string, error) {
+	return r.client.HGetAll(ctx, key).Result()
+}
+
+// LPush 向列表头部插入元素
+func (r *RedisClient) LPush(ctx context.Context, key string, values ...interface{}) error {
+	return r.client.LPush(ctx, key, values...).Err()
+}
+
+// LTrim 修剪列表，保留指定范围的元素
+func (r *RedisClient) LTrim(ctx context.Context, key string, start, stop int64) error {
+	return r.client.LTrim(ctx, key, start, stop).Err()
+}
+
+// Expire 设置 key 的过期时间
+func (r *RedisClient) Expire(ctx context.Context, key string, expiration time.Duration) error {
+	return r.client.Expire(ctx, key, expiration).Err()
+}
+
+// LRange 获取列表指定范围的元素
+func (r *RedisClient) LRange(ctx context.Context, key string, start, stop int64) ([]string, error) {
+	return r.client.LRange(ctx, key, start, stop).Result()
+}
+
 // IsNil 检查错误是否为 key 不存在
 func IsNil(err error) bool {
 	return err != nil && err.Error() == "redis: nil"

@@ -17,7 +17,7 @@ func NewUserProfileRepository(db *sqlx.DB) *UserProfileRepository {
 func (r *UserProfileRepository) Get(userID string) (*model.UserProfileData, error) {
 	var profile model.UserProfileData
 	query := `
-		SELECT user_id, occupation_type, work_schedule, typical_work_hours,
+		SELECT user_id, gender, mbti, occupation_type, work_schedule, typical_work_hours,
 		       lifestyle_type, exercise_frequency, social_preference,
 		       frequent_locations, preferences, created_at, updated_at
 		FROM user_profiles
@@ -34,11 +34,13 @@ func (r *UserProfileRepository) Get(userID string) (*model.UserProfileData, erro
 func (r *UserProfileRepository) Upsert(profile *model.UserProfileData) error {
 	query := `
 		INSERT INTO user_profiles (
-			user_id, occupation_type, work_schedule, typical_work_hours,
+			user_id, gender, mbti, occupation_type, work_schedule, typical_work_hours,
 			lifestyle_type, exercise_frequency, social_preference,
 			frequent_locations, preferences
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
+			gender = VALUES(gender),
+			mbti = VALUES(mbti),
 			occupation_type = VALUES(occupation_type),
 			work_schedule = VALUES(work_schedule),
 			typical_work_hours = VALUES(typical_work_hours),
@@ -51,6 +53,8 @@ func (r *UserProfileRepository) Upsert(profile *model.UserProfileData) error {
 	`
 	_, err := r.db.Exec(query,
 		profile.UserID,
+		profile.Gender,
+		profile.MBTI,
 		profile.OccupationType,
 		profile.WorkSchedule,
 		profile.TypicalWorkHours,

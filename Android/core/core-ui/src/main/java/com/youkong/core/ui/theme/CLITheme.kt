@@ -10,6 +10,7 @@ object CLIColors {
     // 背景色
     val Background = Color(0xFF0D1117)          // 主背景（GitHub Dark）
     val BackgroundSecondary = Color(0xFF161B22) // 次背景（卡片/提升）
+    val BackgroundHighlight = Color(0xFF1C2333) // 微亮背景（有空高亮）
     val Border = Color(0xFF30363D)              // 边框/分隔线
 
     // 文本色

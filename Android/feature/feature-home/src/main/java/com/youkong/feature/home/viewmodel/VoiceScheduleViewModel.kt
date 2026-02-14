@@ -1,5 +1,8 @@
 package com.youkong.feature.home.viewmodel
 
+import android.content.ContentValues
+import android.content.Context
+import android.provider.CalendarContract
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -8,20 +11,22 @@ import com.youkong.core.datastore.TokenManager
 import com.youkong.core.network.model.*
 import com.youkong.core.network.sse.VoiceScheduleSseClient
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 import javax.inject.Inject
 
 @HiltViewModel
 class VoiceScheduleViewModel @Inject constructor(
     private val voiceRecordingManager: VoiceRecordingManager,
     private val voiceScheduleSseClient: VoiceScheduleSseClient,
-    private val tokenManager: TokenManager
+    private val tokenManager: TokenManager,
+    @ApplicationContext private val appContext: Context
 ) : ViewModel() {
-
-    companion object {
-        private const val TAG = "VoiceScheduleVM"
-    }
 
     // UI State
     private val _uiState = MutableStateFlow(VoiceScheduleUiState())
@@ -103,6 +108,52 @@ class VoiceScheduleViewModel @Inject constructor(
         }
     }
 
+    // MARK: - Text Input
+
+    /**
+     * 提交文本输入（走 V4 Agent 流程，跳过语音转文字）
+     */
+    fun submitTextInput(text: String) {
+        if (text.isBlank()) return
+        val currentState = _uiState.value.state
+        if (currentState == VoiceScheduleState.PROCESSING ||
+            currentState == VoiceScheduleState.CONFIRMING
+        ) {
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    state = VoiceScheduleState.PROCESSING,
+                    processingStatus = "处理中...",
+                    progressItems = emptyList()
+                )
+            }
+
+            val token = tokenManager.accessToken.first()
+            if (token == null) {
+                addMessage(ChatMessageType.SYSTEM, "请先登录")
+                _uiState.update { it.copy(state = VoiceScheduleState.IDLE) }
+                return@launch
+            }
+
+            try {
+                voiceScheduleSseClient.streamTextInput(
+                    sessionId = sessionId,
+                    text = text,
+                    token = token
+                ).collect { event ->
+                    handleEvent(event)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "文本处理失败: ${e.message}")
+                addMessage(ChatMessageType.SYSTEM, "处理失败: ${e.message}")
+                _uiState.update { it.copy(state = VoiceScheduleState.IDLE) }
+            }
+        }
+    }
+
     // MARK: - Process Audio
 
     private suspend fun processAudio(audioData: ByteArray) {
@@ -114,7 +165,7 @@ class VoiceScheduleViewModel @Inject constructor(
             )
         }
 
-        val token = tokenManager.getAccessToken()
+        val token = tokenManager.accessToken.first()
         if (token == null) {
             addMessage(ChatMessageType.SYSTEM, "请先登录")
             _uiState.update { it.copy(state = VoiceScheduleState.IDLE) }
@@ -164,12 +215,12 @@ class VoiceScheduleViewModel @Inject constructor(
                         progressItems = it.progressItems.map { item ->
                             item.copy(isCompleted = true)
                         },
-                        transcript = event.text ?: "",
+                        transcript = event.message ?: "",
                         processingStatus = "分析中..."
                     )
                 }
                 // 添加用户消息
-                event.text?.takeIf { it.isNotEmpty() }?.let { text ->
+                event.message?.takeIf { it.isNotEmpty() }?.let { text ->
                     addMessage(ChatMessageType.USER, text)
                 }
             }
@@ -258,7 +309,9 @@ class VoiceScheduleViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         progressItems = emptyList(),
-                        state = VoiceScheduleState.IDLE
+                        // 不覆盖终态（COMPLETED），避免 chat 事件把已完成的状态冲掉
+                        state = if (it.state == VoiceScheduleState.COMPLETED) VoiceScheduleState.COMPLETED
+                                else VoiceScheduleState.IDLE
                     )
                 }
             }
@@ -279,16 +332,242 @@ class VoiceScheduleViewModel @Inject constructor(
                 }
             }
 
-            // 多阶段对话状态机事件
-            VoiceScheduleEventType.PHASE_CHANGE -> {
-                event.phase?.let { phase ->
+            // ========== V4 Agent 架构事件 ==========
+            VoiceScheduleEventType.PHASE -> {
+                val phase = event.phase ?: ""
+                _uiState.update {
+                    it.copy(
+                        v4Phase = phase,
+                        processingStatus = event.message ?: "处理中..."
+                    )
+                }
+                Log.d(TAG, "V4 phase=$phase loop=${event.loop ?: 0}")
+            }
+
+            VoiceScheduleEventType.TOOL_START -> {
+                val toolName = event.toolName ?: ""
+                val toolDesc = event.message ?: "执行 $toolName..."
+                val item = ProgressItem(action = "tool", message = toolDesc)
+                _uiState.update {
+                    it.copy(
+                        currentToolName = toolName,
+                        progressItems = it.progressItems + item,
+                        processingStatus = toolDesc
+                    )
+                }
+            }
+
+            VoiceScheduleEventType.TOOL_END -> {
+                _uiState.update {
+                    val items = it.progressItems.toMutableList()
+                    if (items.isNotEmpty()) {
+                        items[items.lastIndex] = items.last().copy(isCompleted = true)
+                    }
+                    it.copy(
+                        currentToolName = "",
+                        progressItems = items
+                    )
+                }
+            }
+
+            VoiceScheduleEventType.SCHEDULE_PREVIEW -> {
+                event.items?.let { items ->
                     _uiState.update {
                         it.copy(
-                            currentPhase = phase,
-                            processingStatus = event.message ?: "阶段: ${phase.name}"
+                            schedule = items,
+                            progressItems = emptyList(),
+                            canApprove = true,
+                            state = VoiceScheduleState.AWAITING_APPROVAL
                         )
                     }
-                    Log.d(TAG, "阶段变更: ${event.previousPhase} -> $phase")
+                    val msg = event.message ?: "已生成时刻表预览"
+                    addMessage(
+                        ChatMessageType.AI_SCHEDULE,
+                        msg,
+                        schedule = items,
+                        reasoning = null,
+                        isQuery = false
+                    )
+                }
+            }
+
+            VoiceScheduleEventType.SCHEDULE_SAVED -> {
+                event.items?.let { items ->
+                    _uiState.update { it.copy(schedule = items) }
+                    val dateStr = event.date ?: SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(java.util.Date())
+                    scheduleCalendarReminders(items, dateStr)
+                }
+                addMessage(ChatMessageType.SYSTEM, "✓ 时刻表已保存！状态将按时刻表自动更新")
+                _uiState.update { it.copy(state = VoiceScheduleState.COMPLETED) }
+            }
+
+            VoiceScheduleEventType.STATUS_UPDATED -> {
+                val emoji = event.emoji ?: "🤔"
+                val status = event.status ?: "状态已更新"
+                val msg = event.message ?: "$emoji $status"
+                addMessage(ChatMessageType.AI_TEXT, msg)
+                _uiState.update {
+                    it.copy(
+                        progressItems = emptyList(),
+                        state = VoiceScheduleState.COMPLETED
+                    )
+                }
+            }
+
+            VoiceScheduleEventType.PREFERENCE_UPDATED -> {
+                val msg = event.message ?: "偏好设置已更新"
+                addMessage(ChatMessageType.SYSTEM, "✓ $msg")
+                _uiState.update {
+                    it.copy(
+                        progressItems = emptyList(),
+                        state = VoiceScheduleState.IDLE
+                    )
+                }
+            }
+
+            VoiceScheduleEventType.CHAT_STREAM -> {
+                event.message?.let { text ->
+                    _uiState.update { state ->
+                        val newText = state.streamingText + text
+                        val messages = state.messages.toMutableList()
+                        val lastAiIdx = messages.indexOfLast { it.type == ChatMessageType.AI_TEXT }
+                        if (lastAiIdx >= 0) {
+                            messages[lastAiIdx] = messages[lastAiIdx].copy(content = newText)
+                        } else {
+                            messages.add(ChatMessage(type = ChatMessageType.AI_TEXT, content = newText))
+                        }
+                        state.copy(streamingText = newText, messages = messages)
+                    }
+                }
+            }
+
+            VoiceScheduleEventType.CHAT_STREAM_END -> {
+                _uiState.update {
+                    it.copy(
+                        streamingText = "",
+                        progressItems = emptyList(),
+                        state = VoiceScheduleState.IDLE
+                    )
+                }
+            }
+
+            VoiceScheduleEventType.FRIENDS_RESULT -> {
+                _uiState.update {
+                    it.copy(
+                        friendsResult = event.friends ?: emptyList(),
+                        progressItems = emptyList(),
+                        state = VoiceScheduleState.IDLE
+                    )
+                }
+                val msg = event.message ?: "查询完成"
+                addMessage(ChatMessageType.AI_TEXT, msg)
+            }
+
+            VoiceScheduleEventType.MESSAGE_PREVIEW -> {
+                _uiState.update {
+                    it.copy(
+                        pendingMessage = event.pendingMessage,
+                        progressItems = emptyList(),
+                        canApprove = true,
+                        state = VoiceScheduleState.AWAITING_APPROVAL
+                    )
+                }
+                val msg = event.message ?: "消息预览"
+                addMessage(ChatMessageType.AI_TEXT, msg, awaitingAction = true)
+            }
+
+            VoiceScheduleEventType.MESSAGE_SENT -> {
+                _uiState.update {
+                    it.copy(
+                        pendingMessage = null,
+                        state = VoiceScheduleState.IDLE
+                    )
+                }
+                val sentTo = event.sentTo ?: ""
+                val msg = event.message ?: "消息已发送给 $sentTo"
+                addMessage(ChatMessageType.SYSTEM, "✓ $msg")
+            }
+
+            VoiceScheduleEventType.INVITE_PREVIEW -> {
+                _uiState.update {
+                    it.copy(
+                        pendingInvite = event.pendingInvite,
+                        progressItems = emptyList(),
+                        canApprove = true,
+                        state = VoiceScheduleState.AWAITING_APPROVAL
+                    )
+                }
+                val msg = event.message ?: "邀请预览"
+                addMessage(ChatMessageType.AI_TEXT, msg, awaitingAction = true)
+            }
+
+            VoiceScheduleEventType.INVITE_SENT -> {
+                _uiState.update {
+                    it.copy(
+                        pendingInvite = null,
+                        state = VoiceScheduleState.IDLE
+                    )
+                }
+                val sentTo = event.sentTo ?: ""
+                val msg = event.message ?: "邀请已发送给 $sentTo"
+                addMessage(ChatMessageType.SYSTEM, "✓ $msg")
+            }
+
+            VoiceScheduleEventType.DELETE_PREVIEW -> {
+                _uiState.update {
+                    it.copy(
+                        pendingDeletion = event.pendingDeletion,
+                        progressItems = emptyList(),
+                        canApprove = true,
+                        state = VoiceScheduleState.AWAITING_APPROVAL
+                    )
+                }
+                val msg = event.message ?: "将删除安排，等待确认"
+                addMessage(ChatMessageType.AI_TEXT, msg, awaitingAction = true)
+            }
+
+            VoiceScheduleEventType.SCHEDULE_DELETED -> {
+                _uiState.update {
+                    it.copy(
+                        pendingDeletion = null,
+                        schedule = event.items ?: emptyList(),
+                        state = VoiceScheduleState.COMPLETED
+                    )
+                }
+                val msg = event.message ?: "已删除"
+                addMessage(ChatMessageType.SYSTEM, "✓ $msg")
+            }
+
+            VoiceScheduleEventType.FRIEND_REMOVED -> {
+                _uiState.update {
+                    it.copy(
+                        pendingDeletion = null,
+                        state = VoiceScheduleState.COMPLETED
+                    )
+                }
+                val msg = event.message ?: "好友已删除"
+                addMessage(ChatMessageType.SYSTEM, "✓ $msg")
+            }
+
+            VoiceScheduleEventType.INVITE_RESPONDED -> {
+                val msg = event.message ?: "已响应邀请"
+                addMessage(ChatMessageType.SYSTEM, "✓ $msg")
+                _uiState.update { it.copy(state = VoiceScheduleState.COMPLETED) }
+            }
+
+            // ========== Legacy 多阶段对话状态机事件 ==========
+            VoiceScheduleEventType.PHASE_CHANGE -> {
+                event.phase?.let { phaseStr ->
+                    val phase = try { ConversationPhase.valueOf(phaseStr.uppercase()) } catch (_: Exception) { null }
+                    phase?.let {
+                        _uiState.update {
+                            it.copy(
+                                currentPhase = phase,
+                                processingStatus = event.message ?: "阶段: ${phase.name}"
+                            )
+                        }
+                    }
+                    Log.d(TAG, "Legacy 阶段变更: ${event.previousPhase} -> $phaseStr")
                 }
             }
 
@@ -308,7 +587,6 @@ class VoiceScheduleViewModel @Inject constructor(
                 val message = event.message ?: "需要确认一些信息"
                 event.clarifications?.let { clarifications ->
                     _uiState.update { it.copy(clarifications = clarifications) }
-                    // 转换为问题格式
                     val questions = clarifications
                         .filter { it.answered != true }
                         .map { item ->
@@ -345,8 +623,6 @@ class VoiceScheduleViewModel @Inject constructor(
                         reasoning = plan.reasoning,
                         isQuery = false
                     )
-
-                    // 显示变更列表
                     plan.changes?.takeIf { it.isNotEmpty() }?.let { changes ->
                         val changesText = buildString {
                             appendLine("变更：")
@@ -391,7 +667,7 @@ class VoiceScheduleViewModel @Inject constructor(
             }
 
             null -> {
-                // 忽略
+                // 未知类型（coerceInputValues 会将未识别的枚举设为 null）
             }
         }
     }
@@ -455,18 +731,13 @@ class VoiceScheduleViewModel @Inject constructor(
         _uiState.update { it.copy(state = VoiceScheduleState.CONFIRMING) }
 
         viewModelScope.launch {
-            val token = tokenManager.getAccessToken() ?: return@launch
-
-            val data = VoiceScheduleInteractionData(
-                visibility = visibility.value,
-                circleIds = if (visibility == ScheduleVisibility.CIRCLES) circleIds else null
-            )
+            val token = tokenManager.accessToken.first() ?: return@launch
 
             try {
-                voiceScheduleSseClient.streamInteraction(
+                // 通过 V4 text 端点发送"确认"，让 LLM 调用 confirm 工具
+                voiceScheduleSseClient.streamTextInput(
                     sessionId = sid,
-                    action = VoiceScheduleAction.CONFIRM.value,
-                    data = data,
+                    text = "确认",
                     token = token
                 ).collect { event ->
                     handleEvent(event)
@@ -478,6 +749,26 @@ class VoiceScheduleViewModel @Inject constructor(
         }
     }
 
+    // MARK: - Cancel Pending
+
+    /**
+     * 放弃当前待确认操作（预览/草稿），保留对话继续修改
+     */
+    fun cancelPending() {
+        _uiState.update {
+            it.copy(
+                schedule = emptyList(),
+                pendingMessage = null,
+                pendingInvite = null,
+                pendingDeletion = null,
+                canApprove = false,
+                showVisibilitySelection = false,
+                state = VoiceScheduleState.IDLE
+            )
+        }
+        addMessage(ChatMessageType.SYSTEM, "已放弃，你可以继续说")
+    }
+
     // MARK: - Cancel Session
 
     /**
@@ -487,7 +778,7 @@ class VoiceScheduleViewModel @Inject constructor(
         val sid = sessionId
         if (sid != null) {
             viewModelScope.launch {
-                val token = tokenManager.getAccessToken() ?: return@launch
+                val token = tokenManager.accessToken.first() ?: return@launch
                 try {
                     voiceScheduleSseClient.streamInteraction(
                         sessionId = sid,
@@ -542,7 +833,8 @@ class VoiceScheduleViewModel @Inject constructor(
         schedule: List<ScheduleItem>? = null,
         questions: List<ClarifyQuestion>? = null,
         reasoning: List<String>? = null,
-        isQuery: Boolean = false
+        isQuery: Boolean = false,
+        awaitingAction: Boolean = false
     ) {
         val message = ChatMessage(
             type = type,
@@ -550,9 +842,91 @@ class VoiceScheduleViewModel @Inject constructor(
             schedule = schedule,
             questions = questions,
             reasoning = reasoning,
-            isQuery = isQuery
+            isQuery = isQuery,
+            awaitingAction = awaitingAction
         )
         _uiState.update { it.copy(messages = it.messages + message) }
+    }
+
+    // MARK: - Calendar Reminders
+
+    private fun scheduleCalendarReminders(items: List<ScheduleItem>, date: String) {
+        scheduleReminders(appContext, items, date)
+    }
+
+    companion object {
+        private const val TAG = "VoiceScheduleVM"
+
+        fun scheduleReminders(context: Context, items: List<ScheduleItem>, date: String) {
+            val reminderItems = items.filter { (it.remindBefore ?: 0) > 0 }
+            if (reminderItems.isEmpty()) return
+
+            try {
+                val calendarId = getCalendarId(context) ?: return
+                for (item in reminderItems) {
+                    createCalendarReminderStatic(context, calendarId, item, date)
+                }
+            } catch (e: SecurityException) {
+                Log.w(TAG, "日历权限未授予: ${e.message}")
+            } catch (e: Exception) {
+                Log.e(TAG, "创建日历提醒失败: ${e.message}")
+            }
+        }
+
+        fun removeCalendarReminder(context: Context, date: String, startTime: String) {
+            val prefs = context.getSharedPreferences("reminders", Context.MODE_PRIVATE)
+            val eventId = prefs.getLong("reminder_${date}_${startTime}", -1L)
+            if (eventId == -1L) return
+
+            try {
+                val deleteUri = android.content.ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
+                context.contentResolver.delete(deleteUri, null, null)
+                Log.d(TAG, "已删除日历提醒: $date $startTime")
+            } catch (e: Exception) {
+                Log.e(TAG, "删除日历提醒失败: ${e.message}")
+            }
+            prefs.edit().remove("reminder_${date}_${startTime}").apply()
+        }
+
+        private fun getCalendarId(context: Context): Long? {
+            val projection = arrayOf(CalendarContract.Calendars._ID)
+            val selection = "${CalendarContract.Calendars.IS_PRIMARY} = 1"
+            context.contentResolver.query(
+                CalendarContract.Calendars.CONTENT_URI, projection, selection, null, null
+            )?.use { if (it.moveToFirst()) return it.getLong(0) }
+            context.contentResolver.query(
+                CalendarContract.Calendars.CONTENT_URI, projection, null, null, null
+            )?.use { if (it.moveToFirst()) return it.getLong(0) }
+            return null
+        }
+
+        private fun createCalendarReminderStatic(context: Context, calendarId: Long, item: ScheduleItem, date: String) {
+            val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+            val startMillis = sdf.parse("$date ${item.startTime}")?.time ?: return
+            val endMillis = sdf.parse("$date ${item.endTime}")?.time ?: return
+            val remindMinutes = item.remindBefore ?: 15
+
+            val eventValues = ContentValues().apply {
+                put(CalendarContract.Events.CALENDAR_ID, calendarId)
+                put(CalendarContract.Events.TITLE, "${item.emoji} ${item.status}")
+                put(CalendarContract.Events.DTSTART, startMillis)
+                put(CalendarContract.Events.DTEND, endMillis)
+                put(CalendarContract.Events.EVENT_TIMEZONE, java.util.TimeZone.getDefault().id)
+            }
+            val eventUri = context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, eventValues) ?: return
+            val eventId = eventUri.lastPathSegment?.toLongOrNull() ?: return
+
+            val reminderValues = ContentValues().apply {
+                put(CalendarContract.Reminders.EVENT_ID, eventId)
+                put(CalendarContract.Reminders.MINUTES, remindMinutes)
+                put(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
+            }
+            context.contentResolver.insert(CalendarContract.Reminders.CONTENT_URI, reminderValues)
+
+            val prefs = context.getSharedPreferences("reminders", Context.MODE_PRIVATE)
+            prefs.edit().putLong("reminder_${date}_${item.startTime}", eventId).apply()
+            Log.d(TAG, "已创建日历提醒: ${item.emoji} ${item.status}, 提前${remindMinutes}分钟")
+        }
     }
 }
 
@@ -573,7 +947,15 @@ data class VoiceScheduleUiState(
     val selectedVisibility: ScheduleVisibility = ScheduleVisibility.ALL_FRIENDS,
     val selectedCircleIds: Set<String> = emptySet(),
     val availableCircles: List<CircleInfoCompact> = emptyList(),
-    // 多阶段对话
+    // V4 Agent 状态
+    val v4Phase: String = "",
+    val currentToolName: String = "",
+    val friendsResult: List<V4FriendInfo> = emptyList(),
+    val pendingMessage: V4PendingMessage? = null,
+    val pendingInvite: V4PendingInvite? = null,
+    val pendingDeletion: V4PendingDeletion? = null,
+    val streamingText: String = "",
+    // Legacy 多阶段对话
     val currentPhase: ConversationPhase = ConversationPhase.UNDERSTANDING,
     val intentSummary: IntentSummary? = null,
     val draftPlan: DraftPlan? = null,

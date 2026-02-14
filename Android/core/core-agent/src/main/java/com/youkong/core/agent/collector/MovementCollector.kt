@@ -2,6 +2,8 @@ package com.youkong.core.agent.collector
 
 import android.content.Context
 import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import com.google.android.gms.location.ActivityRecognition
 import com.google.android.gms.location.ActivityRecognitionClient
@@ -12,6 +14,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.datetime.Clock
+import java.util.Calendar
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.resume
@@ -158,21 +161,43 @@ class MovementCollector @Inject constructor(
 
     /**
      * 获取今日步数
-     * 使用计步器传感器
+     * TYPE_STEP_COUNTER 返回开机以来总步数，需减去今日零点的基线值
      */
-    private fun getStepsToday(): Int? {
-        return try {
-            val stepSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
-            if (stepSensor != null) {
-                // 计步器传感器返回的是设备启动以来的总步数
-                // 需要配合存储来计算今日步数
-                // 这里简化处理，返回 null
-                null
-            } else {
-                null
+    private suspend fun getStepsToday(): Int? {
+        val stepSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER) ?: return null
+
+        // 读取当前总步数（注册监听器获取一次读数）
+        val totalSteps = withTimeoutOrNull(3000L) {
+            suspendCancellableCoroutine<Float?> { cont ->
+                val listener = object : SensorEventListener {
+                    override fun onSensorChanged(event: SensorEvent) {
+                        sensorManager.unregisterListener(this)
+                        if (cont.isActive) cont.resume(event.values[0])
+                    }
+                    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+                }
+                sensorManager.registerListener(listener, stepSensor, SensorManager.SENSOR_DELAY_FASTEST)
+                cont.invokeOnCancellation { sensorManager.unregisterListener(listener) }
             }
-        } catch (e: Exception) {
-            null
+        }?.toInt() ?: return null
+
+        // 用 SharedPreferences 存今日基线
+        val prefs = context.getSharedPreferences("youkong_steps", Context.MODE_PRIVATE)
+        val today = todayDateKey()
+        val savedDate = prefs.getString("date", null)
+        val baseline = prefs.getInt("baseline", -1)
+
+        return if (savedDate == today && baseline >= 0) {
+            (totalSteps - baseline).coerceAtLeast(0)
+        } else {
+            // 新的一天或首次，将当前值设为基线
+            prefs.edit().putString("date", today).putInt("baseline", totalSteps).apply()
+            0
         }
+    }
+
+    private fun todayDateKey(): String {
+        val cal = Calendar.getInstance()
+        return "${cal.get(Calendar.YEAR)}-${cal.get(Calendar.MONTH) + 1}-${cal.get(Calendar.DAY_OF_MONTH)}"
     }
 }

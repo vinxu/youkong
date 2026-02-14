@@ -2,6 +2,7 @@ package com.youkong.feature.message.screen
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -26,6 +27,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -46,11 +49,13 @@ import java.util.Locale
 @Composable
 fun ChatScreen(
     onBackClick: () -> Unit,
+    onNavigateToFriendSchedule: (userId: String, friendName: String) -> Unit = { _, _ -> },
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val focusManager = LocalFocusManager.current
 
     LaunchedEffect(uiState.messages.size) {
         if (uiState.messages.isNotEmpty()) {
@@ -73,6 +78,39 @@ fun ChatScreen(
             onBackClick = onBackClick,
         )
 
+        // 好友行程表入口
+        if (uiState.partnerId != null && uiState.partnerName != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        onNavigateToFriendSchedule(uiState.partnerId!!, uiState.partnerName!!)
+                    }
+                    .background(CLIColors.BackgroundSecondary)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "📅",
+                    fontSize = 14.sp,
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "查看${uiState.partnerName}的行程表",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    color = CLIColors.Green,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = ">",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp,
+                    color = CLIColors.TextWeak,
+                )
+            }
+        }
+
         when {
             uiState.isLoading -> {
                 YouKongLoading(
@@ -83,7 +121,11 @@ fun ChatScreen(
 
             else -> {
                 LazyColumn(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .pointerInput(Unit) {
+                            detectTapGestures { focusManager.clearFocus() }
+                        },
                     state = listState,
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(
@@ -128,17 +170,19 @@ fun ChatScreen(
 
             Spacer(modifier = Modifier.width(12.dp))
 
-            // 发送按钮
+            // 发送按钮（用 pointerInput 避免抢焦点导致键盘收起）
             Text(
                 text = ASCII.ARROW_RIGHT,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 16.sp,
                 color = if (inputText.isNotBlank()) CLIColors.Green else CLIColors.TextWeak,
                 modifier = Modifier
-                    .clickable(enabled = inputText.isNotBlank()) {
-                        if (inputText.isNotBlank()) {
-                            viewModel.sendMessage(inputText)
-                            inputText = ""
+                    .pointerInput(Unit) {
+                        detectTapGestures {
+                            if (inputText.isNotBlank()) {
+                                viewModel.sendMessage(inputText)
+                                inputText = ""
+                            }
                         }
                     }
                     .padding(8.dp),

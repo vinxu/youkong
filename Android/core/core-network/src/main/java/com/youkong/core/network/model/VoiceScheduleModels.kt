@@ -44,7 +44,14 @@ data class ScheduleItem(
     @SerialName("end_time") val endTime: String,
     val emoji: String,
     val status: String,
-    val executed: Boolean? = null
+    val executed: Boolean? = null,
+    @SerialName("is_ai_guess") val isAIGuess: Boolean? = null,
+    @SerialName("gif_url") val gifUrl: String? = null,
+    @SerialName("giphy_query") val giphyQuery: String? = null,
+    val highlight: Boolean? = null,
+    @SerialName("booking_id") val bookingId: String? = null,
+    @SerialName("with_users") val withUsers: String? = null,
+    @SerialName("remind_before") val remindBefore: Int? = null,
 ) {
     val id: String get() = "${startTime}_${endTime}_$emoji"
 }
@@ -168,7 +175,27 @@ enum class VoiceScheduleEventType {
     @SerialName("circle_list") CIRCLE_LIST,
     @SerialName("confirmed") CONFIRMED,
     @SerialName("error") ERROR,
-    // 多阶段对话状态机事件
+    // V4 Agent 架构事件
+    @SerialName("phase") PHASE,
+    @SerialName("tool_start") TOOL_START,
+    @SerialName("tool_end") TOOL_END,
+    @SerialName("schedule_preview") SCHEDULE_PREVIEW,
+    @SerialName("schedule_saved") SCHEDULE_SAVED,
+    @SerialName("status_updated") STATUS_UPDATED,
+    @SerialName("preference_updated") PREFERENCE_UPDATED,
+    @SerialName("chat_stream") CHAT_STREAM,
+    @SerialName("chat_stream_end") CHAT_STREAM_END,
+    @SerialName("friends_result") FRIENDS_RESULT,
+    @SerialName("message_preview") MESSAGE_PREVIEW,
+    @SerialName("message_sent") MESSAGE_SENT,
+    @SerialName("invite_preview") INVITE_PREVIEW,
+    @SerialName("invite_sent") INVITE_SENT,
+    // 删除 + 响应相关事件
+    @SerialName("delete_preview") DELETE_PREVIEW,
+    @SerialName("schedule_deleted") SCHEDULE_DELETED,
+    @SerialName("friend_removed") FRIEND_REMOVED,
+    @SerialName("invite_responded") INVITE_RESPONDED,
+    // Legacy 多阶段对话状态机事件
     @SerialName("phase_change") PHASE_CHANGE,
     @SerialName("intent_summary") INTENT_SUMMARY,
     @SerialName("discussion") DISCUSSION,
@@ -202,13 +229,75 @@ data class VoiceScheduleEvent(
     val circles: List<CircleInfoCompact>? = null,
     // 查询模式标识
     @SerialName("is_query") val isQuery: Boolean? = null,
-    // 多阶段对话状态机字段
-    val phase: ConversationPhase? = null,
-    @SerialName("previous_phase") val previousPhase: ConversationPhase? = null,
+    // V4 Agent 架构字段
+    val phase: String? = null,                                      // 阶段名称（V4: understanding/thinking/continuing/complete）
+    @SerialName("tool_name") val toolName: String? = null,          // 工具名称
+    val loop: Int? = null,                                          // 当前循环次数
+    val date: String? = null,                                       // 日期 YYYY-MM-DD
+    val friends: List<V4FriendInfo>? = null,                        // 好友列表
+    val total: Int? = null,                                         // 好友总数
+    @SerialName("filter_applied") val filterApplied: String? = null, // 筛选条件
+    @SerialName("pending_message") val pendingMessage: V4PendingMessage? = null,
+    @SerialName("pending_invite") val pendingInvite: V4PendingInvite? = null,
+    @SerialName("pending_deletion") val pendingDeletion: V4PendingDeletion? = null,
+    @SerialName("deleted_count") val deletedCount: Int? = null,
+    @SerialName("message_id") val messageId: String? = null,
+    @SerialName("sent_to") val sentTo: String? = null,
+    @SerialName("awaiting_confirm") val awaitingConfirm: Boolean? = null,
+    // Legacy 多阶段对话状态机字段
+    @SerialName("previous_phase") val previousPhase: String? = null,
     @SerialName("intent_summary") val intentSummary: IntentSummary? = null,
     @SerialName("draft_plan") val draftPlan: DraftPlan? = null,
     val clarifications: List<ClarificationItem>? = null,
     @SerialName("can_approve") val canApprove: Boolean? = null
+)
+
+// ========== V4 Agent 架构模型 ==========
+
+@Serializable
+data class V4FriendInfo(
+    val id: String,
+    val name: String,
+    val avatar: String? = null,
+    val probability: Int = -1,
+    val status: String? = null,
+    val emoji: String? = null,
+    val city: String? = null,
+    val confidence: String = "low",
+    @SerialName("availability_status") val availabilityStatus: String? = null
+)
+
+@Serializable
+data class V4PendingMessage(
+    @SerialName("friend_id") val friendId: String,
+    @SerialName("friend_name") val friendName: String,
+    val message: String
+)
+
+@Serializable
+data class V4PendingInvite(
+    @SerialName("friend_id") val friendId: String,
+    @SerialName("friend_name") val friendName: String,
+    val date: String,
+    @SerialName("start_time") val startTime: String,
+    @SerialName("end_time") val endTime: String,
+    val activity: String,
+    val location: String? = null,
+    val message: String? = null,
+    @SerialName("friend_ids") val friendIds: List<String>? = null,
+    @SerialName("friend_names") val friendNames: List<String>? = null,
+    @SerialName("booking_id") val bookingId: String? = null,
+)
+
+@Serializable
+data class V4PendingDeletion(
+    val type: String,                                           // "schedule" | "friend"
+    val date: String? = null,
+    val target: String? = null,
+    @SerialName("deleted_items") val deletedItems: List<ScheduleItem>? = null,
+    @SerialName("remaining_items") val remainingItems: List<ScheduleItem>? = null,
+    @SerialName("friend_id") val friendId: String? = null,
+    @SerialName("friend_name") val friendName: String? = null,
 )
 
 // MARK: - 交互请求模型
@@ -289,7 +378,7 @@ data class ScheduleGroup(
             return ScheduleGroup(
                 date = daySchedule.scheduleDate,
                 displayDate = displayDate,
-                items = daySchedule.items,
+                items = daySchedule.items.sortedBy { it.startTime },
                 status = daySchedule.status,
                 isCurrentOrFuture = isCurrentOrFuture
             )
@@ -339,6 +428,20 @@ data class ScheduleGroup(
     }
 }
 
+// MARK: - 时刻表条目编辑
+
+@Serializable
+data class UpdateScheduleItemRequest(
+    @SerialName("old_start_time") val oldStartTime: String,
+    @SerialName("old_end_time") val oldEndTime: String,
+    @SerialName("new_start_time") val newStartTime: String,
+    @SerialName("new_end_time") val newEndTime: String,
+    val emoji: String,
+    val status: String,
+    val highlight: Boolean? = null,
+    @SerialName("remind_before") val remindBefore: Int? = null,
+)
+
 // MARK: - UI 消息模型
 
 /**
@@ -364,7 +467,8 @@ data class ChatMessage(
     val schedule: List<ScheduleItem>? = null,
     val questions: List<ClarifyQuestion>? = null,
     val reasoning: List<String>? = null,
-    val isQuery: Boolean = false  // 是否为查询模式
+    val isQuery: Boolean = false,  // 是否为查询模式
+    val awaitingAction: Boolean = false  // 是否需要内联确认按钮
 )
 
 /**

@@ -21,6 +21,7 @@ class AuthInterceptor @Inject constructor(
             "auth/sms/send",
             "auth/sms/verify",
             "auth/refresh",
+            "app/version",
         )
         val path = originalRequest.url.encodedPath
         if (noAuthPaths.any { path.contains(it) }) {

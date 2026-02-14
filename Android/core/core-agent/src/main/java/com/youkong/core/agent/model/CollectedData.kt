@@ -50,4 +50,6 @@ data class LocalLocationData(
     val longitude: Double,
     val accuracy: Float,
     val timestamp: Instant,
+    val city: String? = null,
+    val placeName: String? = null,
 )

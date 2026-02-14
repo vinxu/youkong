@@ -20,4 +20,5 @@ dependencies {
 
     // DataStore (for UnreadMessageManager persistence)
     implementation(project(":core:core-datastore"))
+
 }

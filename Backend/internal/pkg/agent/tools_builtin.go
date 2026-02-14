@@ -52,11 +52,12 @@ type UserMemoryInfo struct {
 
 // ScheduleItemInfo 时刻表条目信息
 type ScheduleItemInfo struct {
-	StartTime string `json:"start_time"` // HH:MM 格式
-	EndTime   string `json:"end_time"`   // HH:MM 格式
-	Emoji     string `json:"emoji"`
-	Status    string `json:"status"`
-	Available *bool  `json:"available,omitempty"` // nil=不指定（保留原值），true=有空，false=没空
+	StartTime    string `json:"start_time"` // HH:MM 格式
+	EndTime      string `json:"end_time"`   // HH:MM 格式
+	Emoji        string `json:"emoji"`
+	Status       string `json:"status"`
+	Available    *bool  `json:"available,omitempty"`     // nil=不指定（保留原值），true=有空，false=没空
+	RemindBefore int    `json:"remind_before,omitempty"` // 提前提醒分钟数，0=不提醒
 }
 
 // UserInfo 用户信息

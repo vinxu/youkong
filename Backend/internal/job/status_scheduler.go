@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"youkong/internal/model"
@@ -22,6 +23,11 @@ type PersonaGenerator interface {
 	GeneratePersona(ctx context.Context, userID string) error
 }
 
+// ScheduleTemplateGenerator 结构化时间表生成接口
+type ScheduleTemplateGenerator interface {
+	GenerateStructuredSchedule(ctx context.Context, userID string) (*model.StructuredScheduleTemplate, error)
+}
+
 // StatusScheduler 状态时刻表调度器
 type StatusScheduler struct {
 	scheduleRepo     *repository.ScheduleRepository
@@ -30,10 +36,12 @@ type StatusScheduler struct {
 	bookingRepo      *repository.BookingRepository
 	notifService     NotificationSender
 	userSettingsRepo *repository.UserSettingsRepository
-	inferenceAgent   StatusInferrer
-	personaService   PersonaGenerator
-	ticker           *time.Ticker
-	stop             chan struct{}
+	inferenceAgent       StatusInferrer
+	personaService       PersonaGenerator
+	scheduleGenService   ScheduleTemplateGenerator
+	memoryDocRepo        *repository.UserMemoryDocumentRepository
+	ticker               *time.Ticker
+	stop                 chan struct{}
 }
 
 // NotificationSender 通知发送接口（避免循环依赖）
@@ -78,6 +86,16 @@ func (s *StatusScheduler) SetInferenceAgent(agent StatusInferrer) {
 // SetPersonaService 设置个性化 persona 生成服务
 func (s *StatusScheduler) SetPersonaService(ps PersonaGenerator) {
 	s.personaService = ps
+}
+
+// SetMemoryDocRepo 设置记忆文档 Repository（结构化时间表需要）
+func (s *StatusScheduler) SetMemoryDocRepo(repo *repository.UserMemoryDocumentRepository) {
+	s.memoryDocRepo = repo
+}
+
+// SetScheduleGenService 设置结构化时间表生成服务
+func (s *StatusScheduler) SetScheduleGenService(sgs ScheduleTemplateGenerator) {
+	s.scheduleGenService = sgs
 }
 
 // Start 启动调度器（每分钟执行一次）
@@ -171,9 +189,10 @@ func (s *StatusScheduler) run() {
 	// ============ 第四步：检查 Booking 提醒 ============
 	s.checkBookingReminders(ctx, now)
 
-	// ============ 第五步：凌晨 03:00 生成每日 persona ============
+	// ============ 第五步：凌晨 03:00 生成每日 persona + 日活动摘要 ============
 	if now.Hour() == 3 && now.Minute() == 0 {
 		go s.generateDailyPersonas()
+		go s.generateDailyActivitySummaries()
 	}
 }
 
@@ -475,12 +494,10 @@ func (s *StatusScheduler) autoInferForUsersWithoutSchedule(ctx context.Context, 
 			continue
 		}
 
-		// 4. 检查是否有最近的传感器数据（30 分钟内），没有数据就不推测
+		// 4. 检查传感器数据（可选）：有数据用 10 分钟锁，无数据用 30 分钟锁（persona 兜底）
 		sensorKey := fmt.Sprintf("agent:extended:%s", userID)
 		sensorData, _ := s.redisClient.Get(ctx, sensorKey)
-		if sensorData == "" {
-			continue
-		}
+		hasSensorData := sensorData != ""
 
 		// 5. 检查今天是否已有 completed schedule（避免重复创建）
 		existingSchedules, _ := s.scheduleRepo.GetAllByUserAndDate(ctx, userID, today)
@@ -509,15 +526,25 @@ func (s *StatusScheduler) autoInferForUsersWithoutSchedule(ctx context.Context, 
 			continue
 		}
 
-		// 6. 触发 V3 推断
-		fmt.Printf("[StatusScheduler] 无 schedule 用户自动推测触发: user=%s currentTime=%s\n", userID, currentTime)
-		s.redisClient.Set(ctx, lockKey, "1", 10*time.Minute)
+		// 6. 触发推断（有传感器数据用 10 分钟锁，无数据用 persona 兜底 30 分钟锁）
+		lockTTL := 10 * time.Minute
+		dataSource := "传感器数据"
+		if !hasSensorData {
+			lockTTL = 30 * time.Minute
+			dataSource = "persona兜底(无传感器)"
+		}
+		fmt.Printf("[StatusScheduler] 无 schedule 用户自动推测触发: user=%s currentTime=%s source=%s\n", userID, currentTime, dataSource)
+		s.redisClient.Set(ctx, lockKey, "1", lockTTL)
 
 		inferCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		inference, err := s.inferenceAgent.InferWithAgent(inferCtx, userID, nil)
 		cancel()
 		if err != nil {
 			fmt.Printf("[StatusScheduler] 无 schedule 用户自动推测失败: user=%s err=%v\n", userID, err)
+			continue
+		}
+		// 推断锁生效返回的占位符，跳过
+		if inference.Activity == "状态保持中" {
 			continue
 		}
 		triggeredCount++
@@ -608,9 +635,15 @@ func (s *StatusScheduler) maybeAutoInfer(ctx context.Context, schedule *model.St
 		}
 	}
 
-	// 6. 触发 V3 推断
-	fmt.Printf("[StatusScheduler] 自动推测触发: user=%s currentTime=%s\n", userID, currentTime)
-	s.redisClient.Set(ctx, lockKey, "1", 10*time.Minute) // 防重复
+	// 6. 触发推断（无传感器数据时用更长锁间隔）
+	sensorKey := fmt.Sprintf("agent:extended:%s", userID)
+	hasSensor, _ := s.redisClient.Get(ctx, sensorKey)
+	lockTTL := 10 * time.Minute
+	if hasSensor == "" {
+		lockTTL = 30 * time.Minute
+	}
+	fmt.Printf("[StatusScheduler] 自动推测触发: user=%s currentTime=%s hasSensor=%v\n", userID, currentTime, hasSensor != "")
+	s.redisClient.Set(ctx, lockKey, "1", lockTTL) // 防重复
 
 	inferCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -618,6 +651,10 @@ func (s *StatusScheduler) maybeAutoInfer(ctx context.Context, schedule *model.St
 	inference, err := s.inferenceAgent.InferWithAgent(inferCtx, userID, nil) // nil = 用 Redis 缓存
 	if err != nil {
 		fmt.Printf("[StatusScheduler] 自动推测失败: user=%s err=%v\n", userID, err)
+		return
+	}
+	// 推断锁生效返回的占位符，跳过
+	if inference.Activity == "状态保持中" {
 		return
 	}
 
@@ -751,6 +788,194 @@ func (s *StatusScheduler) generateDailyPersonas() {
 	}
 
 	fmt.Printf("[PersonaScheduler] 生成完成 success=%d/%d\n", successCount, len(activeUsers))
+
+	// P2-b: 生成结构化时间表模板
+	if s.scheduleGenService != nil && s.memoryDocRepo != nil {
+		schedSuccessCount := 0
+		for _, userID := range activeUsers {
+			schedule, err := s.scheduleGenService.GenerateStructuredSchedule(ctx, userID)
+			if err != nil {
+				fmt.Printf("[PersonaScheduler] 结构化时间表生成失败 user=%s: %v\n", userID, err)
+				continue
+			}
+			if schedule == nil {
+				continue // 数据不足
+			}
+			// 读取现有文档，更新 structured_schedule
+			doc, err := s.memoryDocRepo.GetByUserID(ctx, userID)
+			if err != nil {
+				continue
+			}
+			if doc == nil {
+				doc = &model.UserMemoryDocument{UserID: userID}
+			}
+			doc.StructuredSchedule = model.StructuredScheduleJSON{StructuredScheduleTemplate: schedule}
+			if err := s.memoryDocRepo.Upsert(ctx, doc); err != nil {
+				fmt.Printf("[PersonaScheduler] 保存结构化时间表失败 user=%s: %v\n", userID, err)
+			} else {
+				schedSuccessCount++
+			}
+		}
+		if schedSuccessCount > 0 {
+			fmt.Printf("[PersonaScheduler] 结构化时间表生成完成 success=%d/%d\n", schedSuccessCount, len(activeUsers))
+		}
+	}
+}
+
+// generateDailyActivitySummaries P2-a: 每日凌晨聚合传感器数据为日维度摘要
+func (s *StatusScheduler) generateDailyActivitySummaries() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("[DailySummary] PANIC recovered: %v\n", r)
+		}
+	}()
+
+	if s.memoryRepo == nil || s.redisClient == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// 防重复
+	today := time.Now().Format("2006-01-02")
+	lockKey := fmt.Sprintf("daily_summary:gen:%s", today)
+	if locked, _ := s.redisClient.Get(ctx, lockKey); locked != "" {
+		return
+	}
+	s.redisClient.Set(ctx, lockKey, "1", 24*time.Hour)
+
+	// 获取近 3 天有数据的活跃用户
+	activeUsers, err := s.memoryRepo.GetActiveUsersWithRecentHistory(ctx, 3)
+	if err != nil {
+		fmt.Printf("[DailySummary] 获取活跃用户失败: %v\n", err)
+		return
+	}
+
+	yesterday := time.Now().AddDate(0, 0, -1)
+	yesterdayStr := yesterday.Format("2006-01-02")
+	fmt.Printf("[DailySummary] 开始聚合 %s 的日活动摘要，用户数: %d\n", yesterdayStr, len(activeUsers))
+
+	successCount := 0
+	for _, userID := range activeUsers {
+		if err := s.aggregateUserDailySummary(ctx, userID, yesterday, yesterdayStr); err != nil {
+			fmt.Printf("[DailySummary] 聚合失败 user=%s: %v\n", userID, err)
+		} else {
+			successCount++
+		}
+	}
+
+	fmt.Printf("[DailySummary] 聚合完成 success=%d/%d\n", successCount, len(activeUsers))
+}
+
+// aggregateUserDailySummary 为单个用户聚合昨天的日活动摘要
+func (s *StatusScheduler) aggregateUserDailySummary(ctx context.Context, userID string, date time.Time, dateStr string) error {
+	// 获取昨天的所有 status_histories
+	startOfDay := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
+	endOfDay := startOfDay.Add(24 * time.Hour)
+
+	histories, err := s.memoryRepo.GetHistoryByTimeRange(ctx, userID, startOfDay, endOfDay)
+	if err != nil {
+		return err
+	}
+	if len(histories) == 0 {
+		return nil
+	}
+
+	// 统计变量
+	var homeMinutes, workMinutes, transitMinutes, screenActiveMinutes float64
+	var totalSteps int
+	hourActivity := make(map[int]int) // hour -> sample count
+
+	for _, h := range histories {
+		hourActivity[h.HourOfDay]++
+
+		// 反序列化 raw_data
+		if h.RawData == "" {
+			continue
+		}
+		var rawData model.ExtendedStatusReportRequest
+		if json.Unmarshal([]byte(h.RawData), &rawData) != nil {
+			continue
+		}
+
+		// 每条记录约 5 分钟间隔
+		intervalMins := 5.0
+
+		// 统计 place_type 分布
+		placeType := ""
+		if rawData.ExtendedLocation != nil {
+			placeType = string(rawData.ExtendedLocation.PlaceType)
+		} else if rawData.Location != nil {
+			placeType = string(rawData.Location.PlaceType)
+		}
+		switch placeType {
+		case "home":
+			homeMinutes += intervalMins
+		case "work":
+			workMinutes += intervalMins
+		case "transit":
+			transitMinutes += intervalMins
+		}
+
+		// 统计 screen 活跃时长
+		if rawData.Screen != nil && rawData.Screen.IsActive {
+			screenActiveMinutes += intervalMins
+		}
+
+		// 统计步数（取 StepsToday 的最大值作为当天步数）
+		if rawData.Movement != nil && rawData.Movement.StepsToday > totalSteps {
+			totalSteps = rawData.Movement.StepsToday
+		}
+	}
+
+	// 找最活跃时段
+	mostActiveHour := 0
+	maxCount := 0
+	for hour, count := range hourActivity {
+		if count > maxCount {
+			maxCount = count
+			mostActiveHour = hour
+		}
+	}
+	mostActivePeriod := fmt.Sprintf("%02d:00-%02d:00", mostActiveHour, mostActiveHour+1)
+
+	// 生成文本摘要
+	var summaryParts []string
+	if workMinutes > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("工作%.1fh", workMinutes/60))
+	}
+	if homeMinutes > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("在家%.1fh", homeMinutes/60))
+	}
+	if transitMinutes > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("通勤%.1fh", transitMinutes/60))
+	}
+	if screenActiveMinutes > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("看屏幕%.1fh", screenActiveMinutes/60))
+	}
+	if totalSteps > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("步数%d", totalSteps))
+	}
+	textSummary := ""
+	if len(summaryParts) > 0 {
+		textSummary = strings.Join(summaryParts, "，")
+	}
+
+	summary := &model.DailyActivitySummary{
+		UserID:            userID,
+		SummaryDate:       dateStr,
+		HomeHours:         homeMinutes / 60,
+		WorkHours:         workMinutes / 60,
+		TransitHours:      transitMinutes / 60,
+		ScreenActiveHours: screenActiveMinutes / 60,
+		TotalSteps:        totalSteps,
+		MostActivePeriod:  mostActivePeriod,
+		SampleCount:       len(histories),
+		TextSummary:       textSummary,
+	}
+
+	return s.memoryRepo.UpsertDailyActivitySummary(ctx, summary)
 }
 
 // checkBookingReminders 检查即将开始的 Booking 并发送提醒

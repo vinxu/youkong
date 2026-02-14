@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.youkong.feature.home.screen
 
 import android.Manifest
@@ -7,22 +9,34 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ListAlt
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -42,7 +56,27 @@ import com.youkong.core.network.model.VoiceScheduleState
 import com.youkong.core.ui.theme.CLIColors
 import com.youkong.feature.home.component.WechatStyleVoiceButton
 import com.youkong.feature.home.viewmodel.GridHomeViewModel
+import com.youkong.feature.home.viewmodel.ScheduleTimelineViewModel
 import com.youkong.feature.home.viewmodel.VoiceScheduleViewModel
+import kotlinx.coroutines.launch
+
+/** 按 grapheme cluster 截断 emoji 字符串到指定个数 */
+private fun truncateEmoji(str: String, maxCount: Int): String {
+    if (str.isEmpty()) return str
+    val bi = java.text.BreakIterator.getCharacterInstance()
+    bi.setText(str)
+    val sb = StringBuilder()
+    var count = 0
+    var start = bi.first()
+    var end = bi.next()
+    while (end != java.text.BreakIterator.DONE && count < maxCount) {
+        sb.append(str, start, end)
+        count++
+        start = end
+        end = bi.next()
+    }
+    return sb.toString()
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -51,21 +85,34 @@ fun GridHomeScreen(
     onNavigateToAddFriend: () -> Unit = {},
     onNavigateToChat: (userId: String) -> Unit = {},
     viewModel: GridHomeViewModel = hiltViewModel(),
-    voiceScheduleViewModel: VoiceScheduleViewModel = hiltViewModel()
+    voiceScheduleViewModel: VoiceScheduleViewModel = hiltViewModel(),
+    scheduleTimelineViewModel: ScheduleTimelineViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val voiceUiState by voiceScheduleViewModel.uiState.collectAsStateWithLifecycle()
     val isRecording by voiceScheduleViewModel.isRecording.collectAsStateWithLifecycle()
     val recordingDuration by voiceScheduleViewModel.recordingDuration.collectAsStateWithLifecycle()
     val isCancelling by voiceScheduleViewModel.isCancelling.collectAsStateWithLifecycle()
+    val scheduleUiState by scheduleTimelineViewModel.uiState.collectAsStateWithLifecycle()
 
     val swipeRefreshState = rememberSwipeRefreshState(isRefreshing = uiState.isRefreshing)
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
-    // 时刻表 BottomSheet 状态
-    var showScheduleSheet by remember { mutableStateOf(false) }
-    val scheduleSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // AI 推断 sheet 状态
+    var showAIInferenceSheet by remember { mutableStateOf(false) }
+    // AI readiness sheet 状态
+    var showReadinessSheet by remember { mutableStateOf(false) }
+
+    // 引导气泡（关闭后持久记住）
+    val prefs = context.getSharedPreferences("youkong_guide", android.content.Context.MODE_PRIVATE)
+    var showGuideBubble by remember { mutableStateOf(prefs.getInt("voice_guide_dismiss_count", 0) < 3) }
+
+    // Tab pager 状态
+    val pagerState = rememberPagerState(initialPage = 0) { 2 }
+    val coroutineScope = rememberCoroutineScope()
 
     // 权限请求
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -81,6 +128,8 @@ fun GridHomeScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 viewModel.loadGrid()
+                scheduleTimelineViewModel.loadSettings()
+                scheduleTimelineViewModel.refresh()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -89,56 +138,116 @@ fun GridHomeScreen(
         }
     }
 
-    // 监听语音时刻表完成状态
-    LaunchedEffect(voiceUiState.state) {
-        if (voiceUiState.state == VoiceScheduleState.COMPLETED) {
-            // 刷新首页数据
+    // 监听时刻表编辑/删除/切换有空事件，立即刷新首页
+    LaunchedEffect(Unit) {
+        com.youkong.feature.home.viewmodel.ScheduleChangeNotifier.events.collect {
+            android.util.Log.d("GridHome", "🔔 收到时刻表变更事件，刷新首页")
             viewModel.loadGrid()
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    // 监听语音时刻表完成状态
+    LaunchedEffect(voiceUiState.state) {
+        if (voiceUiState.state == VoiceScheduleState.COMPLETED) {
+            // 刷新首页数据和时刻表
+            viewModel.loadGrid()
+            scheduleTimelineViewModel.refresh()
+        }
+    }
+
+    // tab 切换时刷新对应数据
+    LaunchedEffect(pagerState.currentPage) {
+        if (pagerState.currentPage == 0) {
+            viewModel.loadGrid()
+        } else if (pagerState.currentPage == 1) {
+            scheduleTimelineViewModel.refresh()
+        }
+    }
+
+    Box(
+        modifier = Modifier.fillMaxSize()
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .background(CLIColors.Background)
                 .statusBarsPadding()
                 .navigationBarsPadding()
+                .imePadding()
         ) {
-            // CLI 标题栏
+            // 顶部导航栏：tabs 居左 + icons 居右
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "━━ 有空 ━━",
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = CLIColors.Green
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = onNavigateToAddFriend) {
-                        Text(
-                            text = "[+好友]",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            color = CLIColors.Green
-                        )
+                // 好友 tab
+                TextButton(
+                    onClick = {
+                        coroutineScope.launch {
+                            pagerState.animateScrollToPage(0)
+                        }
                     }
-
-                    TextButton(onClick = onNavigateToSettings) {
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            text = "[设置]",
+                            text = "好友",
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            color = CLIColors.TextSecondary
+                            fontSize = 16.sp,
+                            fontWeight = if (pagerState.currentPage == 0) FontWeight.Bold else FontWeight.Normal,
+                            color = if (pagerState.currentPage == 0) CLIColors.Green else CLIColors.TextSecondary
                         )
+                        if (pagerState.currentPage == 0) {
+                            Box(
+                                modifier = Modifier
+                                    .width(24.dp)
+                                    .height(2.dp)
+                                    .background(CLIColors.Green)
+                            )
+                        }
                     }
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                // 我的 tab
+                TextButton(
+                    onClick = {
+                        coroutineScope.launch {
+                            pagerState.animateScrollToPage(1)
+                        }
+                    }
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "我的",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 16.sp,
+                            fontWeight = if (pagerState.currentPage == 1) FontWeight.Bold else FontWeight.Normal,
+                            color = if (pagerState.currentPage == 1) CLIColors.Green else CLIColors.TextSecondary
+                        )
+                        if (pagerState.currentPage == 1) {
+                            Box(
+                                modifier = Modifier
+                                    .width(24.dp)
+                                    .height(2.dp)
+                                    .background(CLIColors.Green)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                // 加好友 icon
+                IconButton(onClick = onNavigateToAddFriend) {
+                    Text(text = "➕", fontSize = 18.sp)
+                }
+
+                // 设置 icon
+                IconButton(onClick = onNavigateToSettings) {
+                    Text(text = "⚙️", fontSize = 18.sp)
                 }
             }
 
@@ -151,53 +260,118 @@ fun GridHomeScreen(
             )
 
             // 内容区域
-            Box(modifier = Modifier.weight(1f)) {
-                SwipeRefresh(
-                    state = swipeRefreshState,
-                    onRefresh = { viewModel.refresh() },
-                    indicator = { state, trigger ->
-                        SwipeRefreshIndicator(
-                            state = state,
-                            refreshTriggerDistance = trigger,
-                            backgroundColor = CLIColors.BackgroundSecondary,
-                            contentColor = CLIColors.Green
-                        )
-                    }
-                ) {
-                    when {
-                        uiState.isLoading && uiState.friends.isEmpty() -> {
-                            CLILoadingState()
+            if (voiceUiState.showOverlay) {
+                // 语音对话覆盖层（内嵌显示，底部按钮保持可见）
+                VoiceScheduleOverlay(
+                    uiState = voiceUiState,
+                    onDismiss = {
+                        viewModel.loadGrid()
+                        voiceScheduleViewModel.reset()
+                    },
+                    onConfirm = { voiceScheduleViewModel.confirmSchedule() },
+                    onCancel = { voiceScheduleViewModel.cancelSession() },
+                    onVisibilitySelected = { voiceScheduleViewModel.selectVisibility(it) },
+                    onCircleToggled = { voiceScheduleViewModel.toggleCircleSelection(it) },
+                    modifier = Modifier.weight(1f)
+                )
+            } else {
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .pointerInput(Unit) {
+                            detectTapGestures { focusManager.clearFocus() }
                         }
-
-                        uiState.errorMessage != null -> {
-                            CLIErrorState(
-                                message = uiState.errorMessage ?: "加载失败",
-                                onRetry = { viewModel.loadGrid() }
-                            )
-                        }
-
-                        uiState.friends.isEmpty() -> {
-                            CLIEmptyState()
-                        }
-
-                        else -> {
-                            CLIFriendGrid(
-                                friends = uiState.friends,
-                                gridSize = uiState.gridSize,
-                                getUnreadCount = { friendId ->
-                                    viewModel.getUnreadCount(friendId)
-                                },
-                                onFriendClick = { userId ->
-                                    onNavigateToChat(userId)
+                ) { page ->
+                    when (page) {
+                        0 -> {
+                            // 好友 tab
+                            SwipeRefresh(
+                                state = swipeRefreshState,
+                                onRefresh = { viewModel.refresh() },
+                                indicator = { state, trigger ->
+                                    SwipeRefreshIndicator(
+                                        state = state,
+                                        refreshTriggerDistance = trigger,
+                                        backgroundColor = CLIColors.BackgroundSecondary,
+                                        contentColor = CLIColors.Green
+                                    )
                                 }
-                            )
+                            ) {
+                                when {
+                                    uiState.isLoading && uiState.friends.isEmpty() -> {
+                                        CLILoadingState()
+                                    }
+
+                                    uiState.errorMessage != null -> {
+                                        CLIErrorState(
+                                            message = uiState.errorMessage ?: "加载失败",
+                                            onRetry = { viewModel.loadGrid() }
+                                        )
+                                    }
+
+                                    uiState.friends.isEmpty() -> {
+                                        CLIEmptyState()
+                                    }
+
+                                    else -> {
+                                        CLIFriendGrid(
+                                            friends = uiState.friends,
+                                            gridSize = uiState.gridSize,
+                                            getUnreadCount = { friendId ->
+                                                viewModel.getUnreadCount(friendId)
+                                            },
+                                            onFriendClick = { userId ->
+                                                onNavigateToChat(userId)
+                                            },
+                                            onNeedsScheduleClick = {
+                                                showAIInferenceSheet = true
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        1 -> {
+                            // 我的 tab - AI 推测开关 + 状态时刻表
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                AutoPredictToggleBar(
+                                    enabled = scheduleUiState.autoPredictEnabled,
+                                    aiReady = scheduleUiState.aiReady,
+                                    isToggling = scheduleUiState.isTogglingAutoPredict,
+                                    onToggle = { scheduleTimelineViewModel.toggleAutoPredict() },
+                                    onShowReadiness = { showReadinessSheet = true },
+                                )
+                                ScheduleTimelineContent(viewModel = scheduleTimelineViewModel)
+                            }
                         }
                     }
                 }
             }
 
-            // 底部按钮 - 始终显示（语音发状态 + 时刻表）
+            // 底部按钮 - 🤖 icon + 语音/文本输入 + 切换按钮
             if (!(uiState.isLoading && uiState.friends.isEmpty())) {
+                // 输入模式状态
+                var inputMode by remember { mutableStateOf("voice") }
+                var textInput by remember { mutableStateOf("") }
+                val focusRequester = remember { FocusRequester() }
+
+                // 引导气泡
+                if (showGuideBubble) {
+                    GuideBubble(
+                        text = if (inputMode == "voice")
+                            "按住说话，告诉我你在做什么或接下来的安排\n例：\"我在吃饭\" 或 \"明天上午开会，下午健身\""
+                        else
+                            "输入你的行程安排，我来帮你生成时间表\n例：\"明天上午开会，下午健身\" 或 \"周末想约朋友吃饭\"",
+                        onDismiss = {
+                            showGuideBubble = false
+                            val count = prefs.getInt("voice_guide_dismiss_count", 0) + 1
+                            prefs.edit().putInt("voice_guide_dismiss_count", count).apply()
+                        }
+                    )
+                }
+
                 // 分隔线
                 Box(
                     modifier = Modifier
@@ -209,109 +383,162 @@ fun GridHomeScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.Bottom
                 ) {
-                    // 语音发状态按钮 (weight 2)
-                    WechatStyleVoiceButton(
-                        isRecording = isRecording,
-                        isCancelling = isCancelling,
-                        recordingDurationMs = recordingDuration,
-                        onStart = {
-                            // 检查权限
-                            if (ContextCompat.checkSelfPermission(
-                                    context,
-                                    Manifest.permission.RECORD_AUDIO
-                                ) == PackageManager.PERMISSION_GRANTED
-                            ) {
-                                voiceScheduleViewModel.startRecording()
+                    // 🤖 一键生成按钮（icon only）
+                    val isVoiceActive = voiceUiState.showOverlay
+                    TextButton(
+                        onClick = { showAIInferenceSheet = true },
+                        enabled = !isVoiceActive,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .border(1.dp, if (isVoiceActive) CLIColors.TextWeak else CLIColors.Border),
+                        contentPadding = PaddingValues(0.dp)
+                    ) {
+                        Text(
+                            text = "🤖",
+                            fontSize = 18.sp
+                        )
+                    }
+
+                    // 中间区域：语音按钮 / 文本输入
+                    if (inputMode == "voice") {
+                        WechatStyleVoiceButton(
+                            isRecording = isRecording,
+                            isCancelling = isCancelling,
+                            recordingDurationMs = recordingDuration,
+                            onStart = {
+                                if (ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.RECORD_AUDIO
+                                    ) == PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    voiceScheduleViewModel.startRecording()
+                                } else {
+                                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            },
+                            onEnd = {
+                                voiceScheduleViewModel.submitRecording()
+                            },
+                            onCancel = {
+                                voiceScheduleViewModel.cancelRecording()
+                            },
+                            onCancellingChanged = { cancelling ->
+                                voiceScheduleViewModel.setCancelling(cancelling)
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                    } else {
+                        // 文本输入框
+                        androidx.compose.foundation.text.BasicTextField(
+                            value = textInput,
+                            onValueChange = { textInput = it },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(44.dp)
+                                .background(CLIColors.BackgroundSecondary)
+                                .border(1.dp, CLIColors.Green)
+                                .padding(horizontal = 12.dp)
+                                .focusRequester(focusRequester),
+                            textStyle = androidx.compose.ui.text.TextStyle(
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 13.sp,
+                                color = CLIColors.TextPrimary
+                            ),
+                            singleLine = true,
+                            cursorBrush = androidx.compose.ui.graphics.SolidColor(CLIColors.Green),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(
+                                onSend = {
+                                    if (textInput.isNotBlank()) {
+                                        val text = textInput
+                                        textInput = ""
+                                        voiceScheduleViewModel.submitTextInput(text)
+                                        focusRequester.requestFocus()
+                                    }
+                                }
+                            ),
+                            decorationBox = { innerTextField ->
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.CenterStart
+                                ) {
+                                    if (textInput.isEmpty()) {
+                                        Text(
+                                            "输入大致的行程安排",
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 13.sp,
+                                            color = CLIColors.TextSecondary
+                                        )
+                                    }
+                                    innerTextField()
+                                }
+                            }
+                        )
+
+                    }
+
+                    // 键盘/麦克风切换按钮
+                    TextButton(
+                        onClick = {
+                            if (inputMode == "voice") {
+                                inputMode = "text"
+                                coroutineScope.launch {
+                                    kotlinx.coroutines.delay(100)
+                                    try { focusRequester.requestFocus() } catch (_: Exception) {}
+                                }
                             } else {
-                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                keyboardController?.hide()
+                                inputMode = "voice"
                             }
                         },
-                        onEnd = {
-                            voiceScheduleViewModel.submitRecording()
-                        },
-                        onCancel = {
-                            voiceScheduleViewModel.cancelRecording()
-                        },
-                        onCancellingChanged = { cancelling ->
-                            voiceScheduleViewModel.setCancelling(cancelling)
-                        },
-                        modifier = Modifier.weight(2f)
-                    )
-
-                    // 时刻表按钮 (weight 1)
-                    TextButton(
-                        onClick = { showScheduleSheet = true },
                         modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .border(1.dp, CLIColors.Border)
+                            .size(44.dp)
+                            .border(1.dp, CLIColors.Border),
+                        contentPadding = PaddingValues(0.dp)
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ListAlt,
-                                contentDescription = "时刻表",
-                                tint = CLIColors.TextPrimary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Text(
-                                text = "时刻表",
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 14.sp,
-                                color = CLIColors.TextPrimary
-                            )
-                        }
+                        Text(
+                            text = if (inputMode == "voice") "⌨️" else "🎤",
+                            fontSize = 18.sp
+                        )
                     }
                 }
             }
         }
 
-        // 语音对话覆盖层
-        if (voiceUiState.showOverlay) {
-            Dialog(
-                onDismissRequest = {
-                    voiceScheduleViewModel.cancelSession()
-                },
-                properties = DialogProperties(
-                    dismissOnBackPress = true,
-                    dismissOnClickOutside = false,
-                    usePlatformDefaultWidth = false
-                )
-            ) {
-                VoiceScheduleOverlay(
-                    uiState = voiceUiState,
-                    onDismiss = { voiceScheduleViewModel.reset() },
-                    onConfirm = { voiceScheduleViewModel.confirmSchedule() },
-                    onCancel = { voiceScheduleViewModel.cancelSession() },
-                    onVisibilitySelected = { voiceScheduleViewModel.selectVisibility(it) },
-                    onCircleToggled = { voiceScheduleViewModel.toggleCircleSelection(it) },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .statusBarsPadding()
-                        .navigationBarsPadding()
-                )
-            }
+        // 语音对话覆盖层已改为内嵌显示（在内容区域中）
+    }
+
+    // AI 推断 Dialog
+    if (showAIInferenceSheet) {
+        Dialog(
+            onDismissRequest = { showAIInferenceSheet = false },
+            properties = DialogProperties(
+                dismissOnBackPress = true,
+                dismissOnClickOutside = false,
+                usePlatformDefaultWidth = false
+            )
+        ) {
+            AIStatusInferenceScreen(
+                onDismiss = { showAIInferenceSheet = false },
+                onConfirmed = {
+                    showAIInferenceSheet = false
+                    viewModel.loadGrid()
+                }
+            )
         }
     }
 
-    // 时刻表 BottomSheet
-    if (showScheduleSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showScheduleSheet = false },
-            sheetState = scheduleSheetState,
-            containerColor = CLIColors.Background,
-            modifier = Modifier.fillMaxHeight(0.9f)
-        ) {
-            ScheduleTimelineScreen(
-                onDismiss = { showScheduleSheet = false }
-            )
-        }
+    // AI Readiness Sheet
+    if (showReadinessSheet) {
+        AIReadinessSheet(
+            details = scheduleUiState.aiReadyDetails,
+            onDismiss = { showReadinessSheet = false },
+            onNavigateToAddFriend = onNavigateToAddFriend,
+        )
     }
 }
 
@@ -322,10 +549,12 @@ private fun CLIFriendGrid(
     friends: List<FriendGridItem>,
     gridSize: Int,
     getUnreadCount: (friendId: String) -> Int = { 0 },
-    onFriendClick: (userId: String) -> Unit = {}
+    onFriendClick: (userId: String) -> Unit = {},
+    onNeedsScheduleClick: () -> Unit = {}
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(gridSize),
+        modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -335,7 +564,62 @@ private fun CLIFriendGrid(
             CLIFriendCard(
                 friend = friend,
                 unreadCount = unreadCount,
-                onClick = { onFriendClick(friend.userId) }
+                onClick = {
+                    if (friend.needsSchedule) {
+                        onNeedsScheduleClick()
+                    } else {
+                        onFriendClick(friend.userId)
+                    }
+                }
+            )
+        }
+    }
+}
+
+// MARK: - Guide Bubble
+
+@Composable
+private fun GuideBubble(text: String, onDismiss: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    color = CLIColors.Green.copy(alpha = 0.1f),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                )
+                .border(
+                    width = 1.dp,
+                    color = CLIColors.Green.copy(alpha = 0.3f),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                )
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Text(
+                text = "💡",
+                fontSize = 14.sp,
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = text,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                color = CLIColors.TextSecondary,
+                lineHeight = 18.sp,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = "✕",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = CLIColors.TextWeak,
+                modifier = Modifier.clickable { onDismiss() }
             )
         }
     }
@@ -349,46 +633,76 @@ private fun CLIFriendCard(
     unreadCount: Int = 0,
     onClick: () -> Unit = {}
 ) {
-    Column(
+    // 优先级：有空(绿) > 未读(绿) > 普通(灰)
+    val borderColor = when {
+        friend.isAvailable -> CLIColors.Green
+        unreadCount > 0 -> CLIColors.Green
+        else -> CLIColors.Border
+    }
+    val bgColor = if (friend.isAvailable) CLIColors.BackgroundHighlight else CLIColors.BackgroundSecondary
+
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(CLIColors.BackgroundSecondary)
-            .clickable { onClick() },
-        horizontalAlignment = Alignment.CenterHorizontally
+            .background(bgColor)
+            .border(1.dp, borderColor)
+            .clickable { onClick() }
     ) {
-        // 顶部边框（带未读标记）
-        Box(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = "┌──────────┐",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                color = if (unreadCount > 0) CLIColors.Green else CLIColors.Border,
-                modifier = Modifier.align(Alignment.Center)
-            )
-            // 未读消息角标
-            if (unreadCount > 0) {
-                Text(
-                    text = "[$unreadCount]",
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    color = CLIColors.Green,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(end = 4.dp)
-                )
-            }
-        }
-
-        // 内容
         Column(
-            modifier = Modifier.padding(vertical = 8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Emoji
+            // 有空标签（始终占位，保持等高）
             Text(
-                text = friend.emoji,
-                fontSize = 32.sp
+                text = if (friend.isAvailable) "[有空]" else " ",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                color = if (friend.isAvailable) CLIColors.Green else androidx.compose.ui.graphics.Color.Transparent,
+                maxLines = 1
             )
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Emoji 或 GIF
+            if (friend.needsSchedule) {
+                // 无状态：显示 +状态 按钮
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(40.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "➕",
+                        fontSize = 24.sp,
+                        maxLines = 1,
+                    )
+                }
+            } else if (friend.useGif && !friend.gifUrl.isNullOrEmpty()) {
+                coil.compose.AsyncImage(
+                    model = friend.gifUrl,
+                    contentDescription = friend.status,
+                    modifier = Modifier.size(40.dp),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                )
+            } else {
+                val emoji = truncateEmoji(friend.emoji, 2)
+                val emojiCount = emoji.codePointCount(0, emoji.length)
+                val fontSize = if (emojiCount <= 1) 32.sp else 20.sp
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(40.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = emoji,
+                        fontSize = fontSize,
+                        maxLines = 1,
+                    )
+                }
+            }
 
             Spacer(modifier = Modifier.height(4.dp))
 
@@ -404,33 +718,56 @@ private fun CLIFriendCard(
             )
 
             // 状态
-            Text(
-                text = friend.status,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                color = CLIColors.TextSecondary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            // 城市（如果有），否则不显示
-            friend.city?.takeIf { it.isNotEmpty() }?.let { city ->
+            if (friend.needsSchedule) {
                 Text(
-                    text = city,
+                    text = "+状态",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    color = CLIColors.Green,
+                    maxLines = 1,
+                )
+            } else {
+                Text(
+                    text = friend.status,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 10.sp,
-                    color = CLIColors.TextWeak
+                    color = CLIColors.TextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
+
+            // 城市（如果有），无城市时用空占位保持等高
+            val cityText = friend.city?.takeIf { it.isNotEmpty() }
+            Text(
+                text = when {
+                    cityText != null && friend.isVisiting -> "\uD83D\uDCCD来访·$cityText"
+                    cityText != null -> cityText
+                    else -> " "
+                },
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                color = when {
+                    cityText != null && friend.isVisiting -> CLIColors.Yellow
+                    cityText != null -> CLIColors.TextWeak
+                    else -> androidx.compose.ui.graphics.Color.Transparent
+                },
+                maxLines = 1,
+            )
         }
 
-        // 底部边框
-        Text(
-            text = "└──────────┘",
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
-            color = if (unreadCount > 0) CLIColors.Green else CLIColors.Border
-        )
+        // 未读消息角标
+        if (unreadCount > 0) {
+            Text(
+                text = "[$unreadCount]",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                color = CLIColors.Green,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(end = 4.dp, top = 2.dp)
+            )
+        }
     }
 }
 
@@ -454,7 +791,7 @@ private fun CLILoadingState() {
                 text = "加载中...",
                 fontFamily = FontFamily.Monospace,
                 fontSize = 14.sp,
-                color = CLIColors.Yellow
+                color = CLIColors.Green
             )
         }
     }

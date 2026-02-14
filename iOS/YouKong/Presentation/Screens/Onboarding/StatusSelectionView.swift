@@ -220,6 +220,10 @@ class StatusSelectionViewModel: ObservableObject {
             print("[StatusSelection] 保存状态失败: \(error)")
         }
 
+        // 3. 暂存选中状态供 Wow Phase 2 使用
+        UserDefaults.standard.set(option.emoji, forKey: "onboarding_selected_emoji")
+        UserDefaults.standard.set(option.status, forKey: "onboarding_selected_status")
+
         isSaving = false
     }
 

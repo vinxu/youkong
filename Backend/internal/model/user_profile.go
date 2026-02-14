@@ -146,6 +146,8 @@ func (f FrequentLocations) Value() (driver.Value, error) {
 // 用户画像
 type UserProfileData struct {
 	UserID             string              `db:"user_id" json:"user_id"`
+	Gender             *string             `db:"gender" json:"gender,omitempty"`
+	MBTI               *string             `db:"mbti" json:"mbti,omitempty"`
 	OccupationType     OccupationType      `db:"occupation_type" json:"occupation_type"`
 	WorkSchedule       WorkSchedule        `db:"work_schedule" json:"work_schedule"`
 	TypicalWorkHours   *WorkHours          `db:"typical_work_hours" json:"typical_work_hours,omitempty"`
@@ -173,6 +175,8 @@ type UserProfileRequest struct {
 // 简化的用户画像请求（引导流程用）
 type SimpleProfileRequest struct {
 	ProfileType string `json:"profile_type" binding:"required,oneof=office_worker student freelancer entrepreneur investor parent retired"`
+	Gender      string `json:"gender"`  // male/female/other, 可选
+	MBTI        string `json:"mbti"`    // INTJ/ENFP/..., 可选
 }
 
 // ProfileType 到 OccupationType 的映射

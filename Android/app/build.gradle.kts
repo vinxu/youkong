@@ -23,8 +23,8 @@ android {
 
     defaultConfig {
         applicationId = "com.youkong.app"
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.5.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -90,6 +90,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.bundles.lifecycle)
+    implementation(libs.androidx.lifecycle.process)
 
     // Navigation
     implementation(libs.navigation.compose)

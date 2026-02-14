@@ -53,7 +53,12 @@ fun SmsVerificationScreen(
     val focusRequester = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
+        kotlinx.coroutines.delay(100)
+        try {
+            focusRequester.requestFocus()
+        } catch (_: IllegalStateException) {
+            // 华为等设备布局时序不同，安全忽略
+        }
     }
 
     LaunchedEffect(uiState.loginSuccess) {

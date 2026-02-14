@@ -6,7 +6,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -17,7 +16,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -93,45 +95,57 @@ fun WechatStyleVoiceButton(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(48.dp)
+                .height(44.dp)
                 .background(
                     when {
                         isRecording && isInCancelZone -> CLIColors.Red.copy(alpha = 0.1f)
                         isRecording -> CLIColors.Green.copy(alpha = 0.1f)
-                        isPressed -> CLIColors.BackgroundSecondary
-                        else -> CLIColors.BackgroundSecondary
-                    }
-                )
-                .border(
-                    width = 1.dp,
-                    color = when {
-                        isRecording && isInCancelZone -> CLIColors.Red
-                        isRecording -> CLIColors.Green
-                        else -> CLIColors.Border
+                        else -> CLIColors.Green
                     }
                 )
                 .pointerInput(Unit) {
-                    detectDragGestures(
-                        onDragStart = {
+                    awaitPointerEventScope {
+                        while (true) {
+                            // 等待按下
+                            awaitFirstDown(requireUnconsumed = false)
                             isPressed = true
                             dragOffsetY = 0f
                             isInCancelZone = false
                             showCancelZone = false
                             onStart()
-                        },
-                        onDrag = { change, dragAmount ->
-                            change.consume()
-                            dragOffsetY += dragAmount.y
 
-                            // 显示取消区域
-                            if (dragOffsetY < showCancelZoneThreshold) {
-                                showCancelZone = true
+                            // 追踪拖拽直到松开
+                            try {
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val allUp = event.changes.all { it.changedToUp() }
+                                    if (allUp) {
+                                        // 松开
+                                        event.changes.forEach { it.consume() }
+                                        break
+                                    }
+                                    // 追踪拖拽偏移
+                                    event.changes.forEach { change ->
+                                        val delta = change.positionChange()
+                                        dragOffsetY += delta.y
+                                        if (dragOffsetY < showCancelZoneThreshold) {
+                                            showCancelZone = true
+                                        }
+                                        isInCancelZone = dragOffsetY < cancelThreshold
+                                        change.consume()
+                                    }
+                                }
+                            } catch (_: Exception) {
+                                // 手势被取消
+                                isPressed = false
+                                onCancel()
+                                dragOffsetY = 0f
+                                isInCancelZone = false
+                                showCancelZone = false
+                                continue
                             }
 
-                            // 进入取消区域
-                            isInCancelZone = dragOffsetY < cancelThreshold
-                        },
-                        onDragEnd = {
+                            // 松开后处理
                             isPressed = false
                             if (isInCancelZone) {
                                 onCancel()
@@ -141,15 +155,8 @@ fun WechatStyleVoiceButton(
                             dragOffsetY = 0f
                             isInCancelZone = false
                             showCancelZone = false
-                        },
-                        onDragCancel = {
-                            isPressed = false
-                            onCancel()
-                            dragOffsetY = 0f
-                            isInCancelZone = false
-                            showCancelZone = false
                         }
-                    )
+                    }
                 },
             contentAlignment = Alignment.Center
         ) {
@@ -157,14 +164,15 @@ fun WechatStyleVoiceButton(
                 text = when {
                     isRecording && isInCancelZone -> "松开取消"
                     isRecording -> "松开发送"
-                    else -> "🎤 按住说话发状态"
+                    else -> "🎤 和AI说说你的行程"
                 },
                 fontFamily = FontFamily.Monospace,
-                fontSize = 14.sp,
+                fontSize = 12.sp,
+                maxLines = 1,
                 color = when {
                     isRecording && isInCancelZone -> CLIColors.Red
                     isRecording -> CLIColors.Green
-                    else -> CLIColors.TextPrimary
+                    else -> CLIColors.Background
                 }
             )
         }

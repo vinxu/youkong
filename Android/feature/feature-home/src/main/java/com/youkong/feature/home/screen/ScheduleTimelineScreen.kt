@@ -1,5 +1,7 @@
 package com.youkong.feature.home.screen
 
+import android.content.Intent
+import android.provider.Settings
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -18,7 +20,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -27,6 +31,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.accompanist.swiperefresh.SwipeRefresh
 import com.google.accompanist.swiperefresh.SwipeRefreshIndicator
 import com.google.accompanist.swiperefresh.rememberSwipeRefreshState
+import com.youkong.core.network.model.AIReadyDetails
 import com.youkong.core.network.model.ScheduleGroup
 import com.youkong.core.network.model.ScheduleItem
 import com.youkong.core.ui.theme.CLIColors
@@ -133,6 +138,7 @@ fun ScheduleTimelineScreen(
             onHighlightChange = { viewModel.updateEditHighlight(it) },
             onAdjustStartTime = { viewModel.adjustStartTime(it) },
             onAdjustEndTime = { viewModel.adjustEndTime(it) },
+            onRemindBeforeChange = { viewModel.updateEditRemindBefore(it) },
             onSave = { viewModel.saveEdit() },
         )
     }
@@ -203,6 +209,7 @@ fun ScheduleTimelineContent(
             onHighlightChange = { viewModel.updateEditHighlight(it) },
             onAdjustStartTime = { viewModel.adjustStartTime(it) },
             onAdjustEndTime = { viewModel.adjustEndTime(it) },
+            onRemindBeforeChange = { viewModel.updateEditRemindBefore(it) },
             onSave = { viewModel.saveEdit() },
         )
     }
@@ -588,7 +595,7 @@ private fun MainScheduleItemView(
             Text(
                 text = buildString {
                     append(item.status)
-                    if (item.isAIGuess == true) append(" (AI 推测)")
+                    if (item.isAIGuess == true) append(" (AI)")
                     if (!item.withUsers.isNullOrEmpty()) append(" 👥 ${item.withUsers}")
                 },
                 fontFamily = FontFamily.Monospace,
@@ -597,6 +604,14 @@ private fun MainScheduleItemView(
                 modifier = Modifier.weight(1f),
                 maxLines = 1
             )
+
+            // 提醒图标
+            if ((item.remindBefore ?: 0) > 0) {
+                Text(
+                    text = "🔔",
+                    fontSize = 10.sp
+                )
+            }
 
             // 状态指示
             when {
@@ -672,6 +687,7 @@ private fun ScheduleEditSheet(
     onHighlightChange: (Boolean) -> Unit,
     onAdjustStartTime: (Int) -> Unit,
     onAdjustEndTime: (Int) -> Unit,
+    onRemindBeforeChange: (Int) -> Unit,
     onSave: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -988,6 +1004,80 @@ private fun ScheduleEditSheet(
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 提醒选择
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "> 提醒:",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = CLIColors.TextSecondary
+                )
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                var expanded by remember { mutableStateOf(false) }
+                val remindOptions = listOf(
+                    0 to "不提醒",
+                    5 to "5分钟前",
+                    10 to "10分钟前",
+                    15 to "15分钟前",
+                    30 to "30分钟前",
+                    60 to "1小时前",
+                )
+                val currentLabel = remindOptions.firstOrNull { it.first == uiState.editRemindBefore }?.second ?: "不提醒"
+
+                Box {
+                    Text(
+                        text = "[ $currentLabel ▼ ]",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = if (uiState.editRemindBefore > 0) CLIColors.Yellow else CLIColors.TextSecondary,
+                        modifier = Modifier
+                            .clickable { expanded = true }
+                            .background(
+                                color = CLIColors.BackgroundSecondary,
+                                shape = RoundedCornerShape(4.dp)
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = CLIColors.Border,
+                                shape = RoundedCornerShape(4.dp)
+                            )
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    )
+
+                    DropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false },
+                        modifier = Modifier.background(CLIColors.BackgroundSecondary),
+                    ) {
+                        remindOptions.forEach { (minutes, label) ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = label,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 12.sp,
+                                        color = if (minutes == uiState.editRemindBefore) CLIColors.Green else CLIColors.TextPrimary
+                                    )
+                                },
+                                onClick = {
+                                    onRemindBeforeChange(minutes)
+                                    expanded = false
+                                },
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1165,6 +1255,286 @@ internal fun EmojiGridPicker(
                     )
                 }
             }
+        }
+    }
+}
+
+// ========== AI 自动推测 Toggle Bar ==========
+
+@Composable
+fun AutoPredictToggleBar(
+    enabled: Boolean,
+    aiReady: Boolean,
+    isToggling: Boolean,
+    onToggle: () -> Unit,
+    onShowReadiness: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "AI 自动推测",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = CLIColors.TextPrimary
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "ⓘ",
+                    fontSize = 14.sp,
+                    color = CLIColors.TextWeak,
+                    modifier = Modifier.clickable { onShowReadiness() }
+                )
+            }
+            Text(
+                text = "根据你的习惯和数据，自动补全空缺状态",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                color = CLIColors.TextSecondary
+            )
+        }
+
+        Switch(
+            checked = enabled,
+            onCheckedChange = {
+                if (!aiReady && it) {
+                    // 条件不满足试图打开 → 弹 readiness sheet
+                    onShowReadiness()
+                } else {
+                    onToggle()
+                }
+            },
+            enabled = !isToggling,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = CLIColors.Green,
+                checkedTrackColor = CLIColors.Green.copy(alpha = 0.3f),
+                uncheckedThumbColor = CLIColors.TextWeak,
+                uncheckedTrackColor = CLIColors.Border,
+            )
+        )
+    }
+
+    HorizontalDivider(color = CLIColors.Border)
+}
+
+// ========== AI Readiness Sheet ==========
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AIReadinessSheet(
+    details: AIReadyDetails?,
+    onDismiss: () -> Unit,
+    onNavigateToAddFriend: () -> Unit,
+) {
+    val context = LocalContext.current
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val d = details ?: AIReadyDetails()
+
+    val allReady = d.permLocation && d.permMotion && d.permCalendar
+            && d.hasInvitedFriend && d.hasVoiceSchedule
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = CLIColors.Background,
+        contentColor = CLIColors.TextPrimary,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 32.dp)
+        ) {
+            // 标题栏
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "━━ AI 自动推测 ━━",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 16.sp,
+                    color = CLIColors.Green,
+                    modifier = Modifier.weight(1f),
+                    textAlign = TextAlign.Center
+                )
+
+                TextButton(onClick = onDismiss) {
+                    Text(
+                        text = "完成",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = CLIColors.Green
+                    )
+                }
+            }
+
+            HorizontalDivider(color = CLIColors.Border)
+
+            // 说明
+            Text(
+                text = "AI 将根据你授权的数据和社交信息，自动推测并补全空缺的状态时段。",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                color = CLIColors.TextSecondary,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            )
+
+            // 数据权限授权
+            SectionHeader("数据权限授权")
+
+            ReadinessRow(
+                icon = "📍",
+                title = "位置权限",
+                ready = d.permLocation,
+                action = {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = android.net.Uri.fromParts("package", context.packageName, null)
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(intent)
+                }
+            )
+
+            ReadinessRow(
+                icon = "🏃",
+                title = "运动数据权限",
+                ready = d.permMotion,
+                action = {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = android.net.Uri.fromParts("package", context.packageName, null)
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(intent)
+                }
+            )
+
+            ReadinessRow(
+                icon = "📅",
+                title = "日历权限",
+                ready = d.permCalendar,
+                action = {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = android.net.Uri.fromParts("package", context.packageName, null)
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(intent)
+                }
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 社交
+            SectionHeader("社交")
+
+            ReadinessRow(
+                icon = "👥",
+                title = "邀请一个朋友",
+                ready = d.hasInvitedFriend,
+                action = {
+                    onNavigateToAddFriend()
+                    onDismiss()
+                }
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 行程
+            SectionHeader("行程")
+
+            ReadinessRow(
+                icon = "🎤",
+                title = "成功建立一次行程",
+                ready = d.hasVoiceSchedule,
+                action = null // 需要用语音或文本建行程，无直接跳转
+            )
+
+            // 底部提示
+            if (!allReady) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "完成以上条件，即可开启 AI 自动推测",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    color = CLIColors.Yellow,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SectionHeader(title: String) {
+    Text(
+        text = "> $title",
+        fontFamily = FontFamily.Monospace,
+        fontSize = 11.sp,
+        color = CLIColors.TextWeak,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+    )
+}
+
+@Composable
+private fun ReadinessRow(
+    icon: String,
+    title: String,
+    ready: Boolean,
+    action: (() -> Unit)?,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (!ready && action != null) Modifier.clickable { action() }
+                else Modifier
+            )
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(text = icon, fontSize = 16.sp)
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        Text(
+            text = title,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            color = if (ready) CLIColors.TextPrimary else CLIColors.TextSecondary,
+            modifier = Modifier.weight(1f)
+        )
+
+        if (ready) {
+            Text(
+                text = "✓",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 14.sp,
+                color = CLIColors.Green
+            )
+        } else if (action != null) {
+            Text(
+                text = "去完成 >",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                color = CLIColors.Green
+            )
+        } else {
+            Text(
+                text = "○",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 14.sp,
+                color = CLIColors.TextWeak
+            )
         }
     }
 }

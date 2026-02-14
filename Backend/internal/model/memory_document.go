@@ -29,6 +29,9 @@ type UserMemoryDocument struct {
 
 	// 会话摘要（最近 N 次会话的压缩）
 	SessionSummaries SessionSummaryList `db:"session_summaries" json:"session_summaries"`
+
+	// 结构化时间表模板（从历史数据统计生成）
+	StructuredSchedule StructuredScheduleJSON `db:"structured_schedule" json:"structured_schedule"`
 }
 
 // UserMemoryPreferences 用户偏好设置
@@ -249,3 +252,62 @@ const (
 	MaxSchedulePatterns = 10 // 最多保留的日程模式数量
 	MaxKeyFacts = 20 // 最多保留的关键事实数量
 )
+
+// ========== 结构化时间表模板 ==========
+
+// TimeSlotTemplate 时间段模板
+type TimeSlotTemplate struct {
+	StartHour  int     `json:"start_hour"`
+	EndHour    int     `json:"end_hour"`
+	Emoji      string  `json:"emoji"`
+	Activity   string  `json:"activity"`
+	Confidence float64 `json:"confidence"`
+	Samples    int     `json:"samples"`
+}
+
+// StructuredScheduleTemplate 结构化时间表模板
+type StructuredScheduleTemplate struct {
+	WeekdayTemplate []TimeSlotTemplate `json:"weekday_template"`
+	WeekendTemplate []TimeSlotTemplate `json:"weekend_template"`
+	GeneratedAt     string             `json:"generated_at"`
+}
+
+// StructuredScheduleJSON 结构化时间表 JSON 类型（实现 Value/Scan）
+// 使用 *StructuredScheduleTemplate 的方式直接在 UserMemoryDocument 中用指针
+// 这里提供 Value/Scan 的独立函数供 sqlx 使用
+type StructuredScheduleJSON struct {
+	*StructuredScheduleTemplate
+}
+
+// Value 实现 driver.Valuer 接口
+func (s StructuredScheduleJSON) Value() (driver.Value, error) {
+	if s.StructuredScheduleTemplate == nil {
+		return nil, nil
+	}
+	return json.Marshal(s.StructuredScheduleTemplate)
+}
+
+// Scan 实现 sql.Scanner 接口
+func (s *StructuredScheduleJSON) Scan(value interface{}) error {
+	if value == nil {
+		s.StructuredScheduleTemplate = nil
+		return nil
+	}
+
+	var data []byte
+	switch v := value.(type) {
+	case []byte:
+		data = v
+	case string:
+		data = []byte(v)
+	default:
+		return errors.New("invalid type for StructuredScheduleJSON")
+	}
+
+	var schedule StructuredScheduleTemplate
+	if err := json.Unmarshal(data, &schedule); err != nil {
+		return err
+	}
+	s.StructuredScheduleTemplate = &schedule
+	return nil
+}

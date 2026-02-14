@@ -249,7 +249,7 @@ func (r *ScheduleRepository) GetUserScheduleHistory(ctx context.Context, userID 
 		// 从最新开始获取
 		query = `
 			SELECT * FROM status_schedules
-			WHERE user_id = ?
+			WHERE user_id = ? AND status != 'cancelled'
 			ORDER BY schedule_date DESC, created_at DESC
 			LIMIT ?
 		`
@@ -258,7 +258,7 @@ func (r *ScheduleRepository) GetUserScheduleHistory(ctx context.Context, userID 
 		// 获取指定日期之前的数据
 		query = `
 			SELECT * FROM status_schedules
-			WHERE user_id = ? AND schedule_date < ?
+			WHERE user_id = ? AND schedule_date < ? AND status != 'cancelled'
 			ORDER BY schedule_date DESC, created_at DESC
 			LIMIT ?
 		`
@@ -334,4 +334,12 @@ func (r *ScheduleRepository) UpsertUserPreference(ctx context.Context, pref *mod
 		pref.ShowCity,
 	)
 	return err
+}
+
+// HasCancelledScheduleForDate 检查用户在指定日期是否有已取消的时刻表
+func (r *ScheduleRepository) HasCancelledScheduleForDate(ctx context.Context, userID string, date time.Time) (bool, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM status_schedules WHERE user_id = ? AND date = ? AND status = 'cancelled'`
+	err := r.db.GetContext(ctx, &count, query, userID, date.Format("2006-01-02"))
+	return count > 0, err
 }

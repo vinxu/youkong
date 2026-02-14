@@ -16,4 +16,7 @@ dependencies {
     // Coroutines
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
+
+    // OkHttp (for multipart upload in AgentRepositoryImpl)
+    implementation(libs.okhttp)
 }

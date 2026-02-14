@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.youkong.feature.home.component
 
 import androidx.compose.animation.*
@@ -11,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -27,8 +30,10 @@ import java.util.*
 @Composable
 fun MessageBubble(
     message: ChatMessage,
+    voiceState: VoiceScheduleState = VoiceScheduleState.IDLE,
     onConfirm: (() -> Unit)? = null,
     onCancel: (() -> Unit)? = null,
+    confirmButtonText: String = "✓ 确认保存",
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -53,8 +58,10 @@ fun MessageBubble(
             // 消息内容
             MessageContent(
                 message = message,
+                voiceState = voiceState,
                 onConfirm = onConfirm,
-                onCancel = onCancel
+                onCancel = onCancel,
+                confirmButtonText = confirmButtonText
             )
 
             // 时间
@@ -76,8 +83,10 @@ fun MessageBubble(
 @Composable
 private fun MessageContent(
     message: ChatMessage,
+    voiceState: VoiceScheduleState = VoiceScheduleState.IDLE,
     onConfirm: (() -> Unit)?,
-    onCancel: (() -> Unit)?
+    onCancel: (() -> Unit)?,
+    confirmButtonText: String = "✓ 确认保存"
 ) {
     when (message.type) {
         ChatMessageType.USER -> {
@@ -93,16 +102,59 @@ private fun MessageContent(
         }
 
         ChatMessageType.AI_TEXT, ChatMessageType.AI_THINKING -> {
-            Text(
-                text = message.content,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 14.sp,
-                color = CLIColors.TextPrimary,
+            Column(
                 modifier = Modifier
                     .background(CLIColors.BackgroundSecondary)
                     .border(1.dp, CLIColors.Border)
-                    .padding(12.dp)
-            )
+            ) {
+                Text(
+                    text = message.content,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp,
+                    color = CLIColors.TextPrimary,
+                    modifier = Modifier.padding(12.dp)
+                )
+
+                // 内联确认按钮（邀请/消息/删除预览）
+                if (message.awaitingAction && (onConfirm != null || onCancel != null)) {
+                    Divider(color = CLIColors.Border, thickness = 1.dp)
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        // 取消按钮
+                        Text(
+                            text = "取消",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            color = CLIColors.TextSecondary,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .weight(1f)
+                                .border(1.dp, CLIColors.Border)
+                                .clickable { onCancel?.invoke() }
+                                .padding(vertical = 8.dp)
+                        )
+
+                        // 确认按钮
+                        Text(
+                            text = confirmButtonText,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            color = CLIColors.Background,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .weight(1f)
+                                .background(CLIColors.Green)
+                                .clickable { onConfirm?.invoke() }
+                                .padding(vertical = 8.dp)
+                        )
+                    }
+                }
+            }
         }
 
         ChatMessageType.AI_SCHEDULE -> {
@@ -111,8 +163,10 @@ private fun MessageContent(
                     schedule = schedule,
                     reasoning = message.reasoning ?: emptyList(),
                     isQuery = message.isQuery,
+                    voiceState = voiceState,
                     onConfirm = onConfirm,
-                    onCancel = onCancel
+                    onCancel = onCancel,
+                    confirmButtonText = confirmButtonText
                 )
             } ?: Text(
                 text = message.content,
@@ -161,12 +215,14 @@ fun SchedulePreview(
     schedule: List<ScheduleItem>,
     reasoning: List<String> = emptyList(),
     isQuery: Boolean = false,
+    voiceState: VoiceScheduleState = VoiceScheduleState.IDLE,
     onConfirm: (() -> Unit)? = null,
     onCancel: (() -> Unit)? = null,
+    confirmButtonText: String = "✓ 确认保存",
     modifier: Modifier = Modifier
 ) {
     var showReasoning by remember { mutableStateOf(false) }
-    var showConfirmOptions by remember { mutableStateOf(false) }
+    var actionTaken by remember { mutableStateOf<String?>(null) } // "confirming", "confirmed", "cancelled"
 
     Column(
         modifier = modifier
@@ -238,15 +294,67 @@ fun SchedulePreview(
                 modifier = Modifier.padding(vertical = 8.dp)
             )
 
-            AnimatedVisibility(visible = showConfirmOptions) {
-                Column {
+            val isConfirmed = actionTaken == "confirmed" || voiceState == VoiceScheduleState.COMPLETED
+            val isConfirming = actionTaken == "confirming" || voiceState == VoiceScheduleState.CONFIRMING
+            val isCancelled = actionTaken == "cancelled"
+
+            when {
+                isConfirmed -> {
+                    Text(
+                        text = "✓ 已保存",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = CLIColors.Green,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        textAlign = TextAlign.Center
+                    )
+                }
+                isConfirming -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                            color = CLIColors.Green
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "确认中...",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            color = CLIColors.TextSecondary
+                        )
+                    }
+                }
+                isCancelled -> {
+                    Text(
+                        text = "已放弃",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = CLIColors.TextWeak,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        textAlign = TextAlign.Center
+                    )
+                }
+                else -> {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        // 放弃按钮
                         TextButton(
-                            onClick = { onCancel?.invoke() },
+                            onClick = {
+                                actionTaken = "cancelled"
+                                onCancel?.invoke()
+                            },
                             modifier = Modifier
                                 .weight(1f)
                                 .border(1.dp, CLIColors.Border)
@@ -259,15 +367,17 @@ fun SchedulePreview(
                             )
                         }
 
-                        // 确认按钮
                         TextButton(
-                            onClick = { onConfirm?.invoke() },
+                            onClick = {
+                                actionTaken = "confirming"
+                                onConfirm?.invoke()
+                            },
                             modifier = Modifier
                                 .weight(1f)
                                 .background(CLIColors.Green)
                         ) {
                             Text(
-                                text = "✓ 确认执行",
+                                text = confirmButtonText,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 12.sp,
                                 color = CLIColors.Background
@@ -275,43 +385,15 @@ fun SchedulePreview(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
 
-                    TextButton(
-                        onClick = { showConfirmOptions = false }
-                    ) {
-                        Text(
-                            text = "继续修改",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            color = CLIColors.TextWeak
-                        )
-                    }
-                }
-            }
-
-            AnimatedVisibility(visible = !showConfirmOptions) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
                     Text(
-                        text = "继续说话修改",
+                        text = "继续说话可修改内容",
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                        color = CLIColors.TextWeak
+                        fontSize = 10.sp,
+                        color = CLIColors.TextWeak,
+                        modifier = Modifier.padding(start = 4.dp)
                     )
-
-                    TextButton(
-                        onClick = { showConfirmOptions = true }
-                    ) {
-                        Text(
-                            text = "[满意了？确认]",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            color = CLIColors.Green
-                        )
-                    }
                 }
             }
         }

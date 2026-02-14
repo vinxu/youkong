@@ -83,33 +83,37 @@ fun VoiceScheduleOverlay(
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // 处理中状态（首条显示时）
-            if ((uiState.state == VoiceScheduleState.PROCESSING || uiState.progressItems.isNotEmpty()) && uiState.messages.isEmpty()) {
-                item(key = "progressFeedback") {
-                    ProgressFeedbackView(
-                        progressItems = uiState.progressItems,
-                        isProcessing = uiState.state == VoiceScheduleState.PROCESSING,
-                        processingStatus = uiState.processingStatus
-                    )
-                }
-            }
-
             // 消息列表
             items(
                 items = uiState.messages,
                 key = { it.id }
             ) { message ->
+                val confirmText = when {
+                    uiState.pendingInvite != null -> "✓ 发送邀请"
+                    uiState.pendingMessage != null -> "✓ 发送消息"
+                    uiState.pendingDeletion != null -> "✓ 确认删除"
+                    else -> "✓ 确认保存"
+                }
                 MessageBubble(
                     message = message,
+                    voiceState = uiState.state,
                     onConfirm = onConfirm,
-                    onCancel = onCancel
+                    onCancel = onCancel,
+                    confirmButtonText = confirmText
                 )
             }
 
-            // 处理中状态（有消息后的简化显示）
-            if (uiState.state == VoiceScheduleState.PROCESSING && uiState.messages.isNotEmpty()) {
-                item(key = "simpleProcessing") {
-                    SimpleProcessingView(isProcessing = true)
+            // 处理中状态 - 始终显示详细进度反馈
+            if (uiState.state == VoiceScheduleState.PROCESSING ||
+                uiState.state == VoiceScheduleState.CONFIRMING ||
+                uiState.progressItems.isNotEmpty()) {
+                item(key = "progressFeedback") {
+                    ProgressFeedbackView(
+                        progressItems = uiState.progressItems,
+                        isProcessing = uiState.state == VoiceScheduleState.PROCESSING ||
+                                      uiState.state == VoiceScheduleState.CONFIRMING,
+                        processingStatus = uiState.processingStatus
+                    )
                 }
             }
 
@@ -133,18 +137,7 @@ fun VoiceScheduleOverlay(
             }
         }
 
-        // 底部操作区域
-        if (uiState.state == VoiceScheduleState.AWAITING_APPROVAL && uiState.canApprove) {
-            ApprovalButtons(
-                onCancel = {
-                    onCancel()
-                    onDismiss()
-                },
-                onConfirm = onConfirm,
-                isConfirming = uiState.state == VoiceScheduleState.CONFIRMING,
-                modifier = Modifier.padding(16.dp)
-            )
-        }
+        // 底部浮框确认已移除，确认操作统一在消息气泡内完成
     }
 }
 
@@ -153,6 +146,7 @@ private fun ApprovalButtons(
     onCancel: () -> Unit,
     onConfirm: () -> Unit,
     isConfirming: Boolean,
+    confirmButtonText: String = "✓ 确认保存",
     modifier: Modifier = Modifier
 ) {
     Column(modifier = modifier) {
@@ -190,7 +184,7 @@ private fun ApprovalButtons(
                 )
             ) {
                 Text(
-                    text = "✓ 确认保存",
+                    text = confirmButtonText,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 14.sp
                 )

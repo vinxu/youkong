@@ -12,6 +12,7 @@ import com.youkong.core.network.model.AgentStatusRequest
 import com.youkong.core.network.model.BatteryDataRequest
 import com.youkong.core.network.model.ConnectionDataRequest
 import com.youkong.core.network.model.DisplayDataRequest
+import com.youkong.core.network.model.ExtendedLocationDataRequest
 import com.youkong.core.network.model.HolmesFullResult
 import com.youkong.core.network.model.LocationDataRequest
 import com.youkong.core.network.model.ModeDataRequest
@@ -313,6 +314,7 @@ class AgentDataViewModel @Inject constructor(
         return AgentStatusRequest(
             screen = null,
             location = locationData?.let { convertLocationData(it) },
+            extendedLocation = locationData?.let { convertExtendedLocationData(it) },
             battery = deviceStateData?.let { convertBatteryData(it) },
             mode = deviceStateData?.let { convertModeData(it) },
             connection = deviceStateData?.let { convertConnectionData(it) },
@@ -324,6 +326,17 @@ class AgentDataViewModel @Inject constructor(
         return LocationDataRequest(
             placeType = PlaceType.UNKNOWN.name.lowercase(),
             atPlaceSinceMinutes = 0,
+            city = local.city,
+        )
+    }
+
+    private fun convertExtendedLocationData(local: LocalLocationData): ExtendedLocationDataRequest {
+        return ExtendedLocationDataRequest(
+            placeType = PlaceType.UNKNOWN.name.lowercase(),
+            placeName = local.placeName,
+            atPlaceSinceMinutes = 0,
+            latitude = local.latitude,
+            longitude = local.longitude,
         )
     }
 

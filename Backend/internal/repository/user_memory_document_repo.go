@@ -22,7 +22,7 @@ func NewUserMemoryDocumentRepository(db *sqlx.DB) *UserMemoryDocumentRepository 
 // GetByUserID 根据用户 ID 获取记忆文档
 func (r *UserMemoryDocumentRepository) GetByUserID(ctx context.Context, userID string) (*model.UserMemoryDocument, error) {
 	var doc model.UserMemoryDocument
-	query := `SELECT user_id, version, preferences, schedule_patterns, interaction_style, key_facts, session_summaries, created_at, updated_at
+	query := `SELECT user_id, version, preferences, schedule_patterns, interaction_style, key_facts, session_summaries, structured_schedule, created_at, updated_at
               FROM user_memory_documents WHERE user_id = ?`
 	err := r.db.GetContext(ctx, &doc, query, userID)
 	if err != nil {
@@ -36,8 +36,8 @@ func (r *UserMemoryDocumentRepository) GetByUserID(ctx context.Context, userID s
 
 // Create 创建记忆文档
 func (r *UserMemoryDocumentRepository) Create(ctx context.Context, doc *model.UserMemoryDocument) error {
-	query := `INSERT INTO user_memory_documents (user_id, version, preferences, schedule_patterns, interaction_style, key_facts, session_summaries, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO user_memory_documents (user_id, version, preferences, schedule_patterns, interaction_style, key_facts, session_summaries, structured_schedule, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	now := time.Now()
 	_, err := r.db.ExecContext(ctx, query,
 		doc.UserID,
@@ -47,6 +47,7 @@ func (r *UserMemoryDocumentRepository) Create(ctx context.Context, doc *model.Us
 		doc.InteractionStyle,
 		doc.KeyFacts,
 		doc.SessionSummaries,
+		doc.StructuredSchedule,
 		now,
 		now,
 	)
@@ -62,6 +63,7 @@ func (r *UserMemoryDocumentRepository) Update(ctx context.Context, doc *model.Us
               interaction_style = ?,
               key_facts = ?,
               session_summaries = ?,
+              structured_schedule = ?,
               updated_at = ?
               WHERE user_id = ?`
 	_, err := r.db.ExecContext(ctx, query,
@@ -70,6 +72,7 @@ func (r *UserMemoryDocumentRepository) Update(ctx context.Context, doc *model.Us
 		doc.InteractionStyle,
 		doc.KeyFacts,
 		doc.SessionSummaries,
+		doc.StructuredSchedule,
 		time.Now(),
 		doc.UserID,
 	)
@@ -78,8 +81,8 @@ func (r *UserMemoryDocumentRepository) Update(ctx context.Context, doc *model.Us
 
 // Upsert 插入或更新记忆文档
 func (r *UserMemoryDocumentRepository) Upsert(ctx context.Context, doc *model.UserMemoryDocument) error {
-	query := `INSERT INTO user_memory_documents (user_id, version, preferences, schedule_patterns, interaction_style, key_facts, session_summaries, created_at, updated_at)
-              VALUES (?, 1, ?, ?, ?, ?, ?, NOW(), NOW())
+	query := `INSERT INTO user_memory_documents (user_id, version, preferences, schedule_patterns, interaction_style, key_facts, session_summaries, structured_schedule, created_at, updated_at)
+              VALUES (?, 1, ?, ?, ?, ?, ?, ?, NOW(), NOW())
               ON DUPLICATE KEY UPDATE
               version = version + 1,
               preferences = VALUES(preferences),
@@ -87,6 +90,7 @@ func (r *UserMemoryDocumentRepository) Upsert(ctx context.Context, doc *model.Us
               interaction_style = VALUES(interaction_style),
               key_facts = VALUES(key_facts),
               session_summaries = VALUES(session_summaries),
+              structured_schedule = VALUES(structured_schedule),
               updated_at = NOW()`
 	_, err := r.db.ExecContext(ctx, query,
 		doc.UserID,
@@ -95,6 +99,7 @@ func (r *UserMemoryDocumentRepository) Upsert(ctx context.Context, doc *model.Us
 		doc.InteractionStyle,
 		doc.KeyFacts,
 		doc.SessionSummaries,
+		doc.StructuredSchedule,
 	)
 	return err
 }

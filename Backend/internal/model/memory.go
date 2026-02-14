@@ -499,3 +499,19 @@ type UserStatusMemory struct {
 	Source    string    `json:"source" db:"source"`   // 来源: user_confirmed | ai_auto | ai_oneclick | unknown
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 }
+
+// DailyActivitySummary 日维度传感器摘要
+type DailyActivitySummary struct {
+	ID                int64   `json:"id" db:"id"`
+	UserID            string  `json:"user_id" db:"user_id"`
+	SummaryDate       string  `json:"summary_date" db:"summary_date"`
+	HomeHours         float64 `json:"home_hours" db:"home_hours"`
+	WorkHours         float64 `json:"work_hours" db:"work_hours"`
+	TransitHours      float64 `json:"transit_hours" db:"transit_hours"`
+	ScreenActiveHours float64 `json:"screen_active_hours" db:"screen_active_hours"`
+	TotalSteps        int     `json:"total_steps" db:"total_steps"`
+	MostActivePeriod  string  `json:"most_active_period" db:"most_active_period"`
+	SampleCount       int     `json:"sample_count" db:"sample_count"`
+	TextSummary       string  `json:"text_summary" db:"text_summary"`
+	CreatedAt         string  `json:"created_at" db:"created_at"`
+}

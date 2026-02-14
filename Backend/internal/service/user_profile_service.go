@@ -66,8 +66,8 @@ func (s *UserProfileService) DeleteProfile(userID string) error {
 	return s.profileRepo.Delete(userID)
 }
 
-// 简化保存用户画像（只保存 profile_type）
-func (s *UserProfileService) SaveSimpleProfile(userID string, profileType string) error {
+// 简化保存用户画像（保存 profile_type + gender + mbti）
+func (s *UserProfileService) SaveSimpleProfile(userID string, profileType string, gender string, mbti string) error {
 	// 映射 profile_type 到 occupation_type
 	occupationType := model.MapProfileTypeToOccupation(profileType)
 
@@ -82,6 +82,13 @@ func (s *UserProfileService) SaveSimpleProfile(userID string, profileType string
 		FrequentLocations: model.FrequentLocations{},            // 空数组
 		Preferences:       model.Preferences{},                  // 空 map
 		UpdatedAt:         time.Now(),
+	}
+
+	if gender != "" {
+		profile.Gender = &gender
+	}
+	if mbti != "" {
+		profile.MBTI = &mbti
 	}
 
 	return s.profileRepo.Upsert(profile)

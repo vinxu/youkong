@@ -1,6 +1,5 @@
 package com.youkong.feature.settings.viewmodel
 
-import android.app.Activity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.youkong.core.permission.PermissionManager
@@ -15,9 +14,9 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 data class PermissionSetupUiState(
-    val currentStep: Int = 0,
     val permissionState: PermissionState = PermissionState(),
     val isComplete: Boolean = false,
+    val skippedPermissions: Set<RequiredPermission> = emptySet(),
 )
 
 @HiltViewModel
@@ -28,13 +27,11 @@ class PermissionSetupViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(PermissionSetupUiState())
     val uiState: StateFlow<PermissionSetupUiState> = _uiState.asStateFlow()
 
-    // 权限请求顺序
+    // 权限请求顺序：位置 → 运动数据 → 日历
     private val permissionOrder = listOf(
-        RequiredPermission.USAGE_STATS,
         RequiredPermission.LOCATION,
-        RequiredPermission.CONTACTS,
-        RequiredPermission.NOTIFICATION,
-        RequiredPermission.BACKGROUND_LOCATION,
+        RequiredPermission.ACTIVITY_RECOGNITION,
+        RequiredPermission.CALENDAR,
     )
 
     init {
@@ -59,33 +56,26 @@ class PermissionSetupViewModel @Inject constructor(
     }
 
     fun getCurrentPermission(): RequiredPermission? {
-        val state = _uiState.value.permissionState
-        val missingPermissions = state.getMissingPermissions()
-        return permissionOrder.firstOrNull { it in missingPermissions }
-    }
-
-    fun openUsageStatsSettings(activity: Activity) {
-        permissionManager.openUsageStatsSettings(activity)
+        val state = _uiState.value
+        val missingPermissions = state.permissionState.getMissingPermissions()
+        return permissionOrder.firstOrNull { it in missingPermissions && it !in state.skippedPermissions }
     }
 
     fun getLocationPermissions(): Array<String> {
         return permissionManager.getLocationPermissions()
     }
 
-    fun getBackgroundLocationPermission(): String? {
-        return permissionManager.getBackgroundLocationPermission()
+    fun getActivityRecognitionPermission(): String? {
+        return permissionManager.getActivityRecognitionPermission()
     }
 
-    fun getContactsPermission(): String {
-        return permissionManager.getContactsPermission()
+    fun getCalendarPermission(): String {
+        return permissionManager.getCalendarPermission()
     }
 
-    fun getNotificationPermission(): String? {
-        return permissionManager.getNotificationPermission()
-    }
-
-    fun nextStep() {
-        _uiState.update { it.copy(currentStep = it.currentStep + 1) }
+    fun skipCurrentPermission() {
+        val current = getCurrentPermission() ?: return
+        _uiState.update { it.copy(skippedPermissions = it.skippedPermissions + current) }
     }
 
     fun skipToComplete() {

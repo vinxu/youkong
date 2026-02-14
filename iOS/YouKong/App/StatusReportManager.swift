@@ -1,9 +1,12 @@
 import Foundation
 import Factory
+import BackgroundTasks
 
 @MainActor
 class StatusReportManager: ObservableObject {
     static let shared = StatusReportManager()
+
+    static let bgTaskIdentifier = "com.youkong.app.statusReport"
 
     @Published var isReporting = false
     @Published var lastReportTime: Date?
@@ -14,7 +17,69 @@ class StatusReportManager: ObservableObject {
     /// 最小上报间隔（秒），防止前后台快速切换时频繁上报
     private let minReportInterval: TimeInterval = 60
 
+    /// 定时上报间隔（秒），与 Android 15 分钟对齐
+    private let periodicInterval: TimeInterval = 15 * 60
+
+    private var periodicTimer: Timer?
+
     private init() {}
+
+    // MARK: - 定时上报（App 活跃期间）
+
+    /// 启动 15 分钟定时上报（App 前台时运行）
+    func startPeriodicReporting() {
+        stopPeriodicReporting()
+        periodicTimer = Timer.scheduledTimer(withTimeInterval: periodicInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.reportIfNeeded()
+            }
+        }
+        print("[STATUS REPORT] Periodic timer started (15min)")
+    }
+
+    /// 停止定时上报
+    func stopPeriodicReporting() {
+        periodicTimer?.invalidate()
+        periodicTimer = nil
+    }
+
+    // MARK: - BGAppRefreshTask（App 后台时）
+
+    /// 注册后台任务（在 AppDelegate didFinishLaunchingWithOptions 中调用）
+    static func registerBackgroundTask() {
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: bgTaskIdentifier, using: nil) { task in
+            guard let refreshTask = task as? BGAppRefreshTask else { return }
+            Task { @MainActor in
+                await StatusReportManager.shared.handleBackgroundRefresh(refreshTask)
+            }
+        }
+        print("[STATUS REPORT] Background task registered")
+    }
+
+    /// 调度下一次后台刷新
+    func scheduleBackgroundRefresh() {
+        let request = BGAppRefreshTaskRequest(identifier: Self.bgTaskIdentifier)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: periodicInterval)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            print("[STATUS REPORT] Background refresh scheduled in \(Int(periodicInterval))s")
+        } catch {
+            print("[STATUS REPORT] Failed to schedule background refresh: \(error)")
+        }
+    }
+
+    /// 处理后台刷新任务
+    private func handleBackgroundRefresh(_ task: BGAppRefreshTask) async {
+        // 调度下一次
+        scheduleBackgroundRefresh()
+
+        task.expirationHandler = {
+            task.setTaskCompleted(success: false)
+        }
+
+        await reportStatus()
+        task.setTaskCompleted(success: true)
+    }
 
     /// 场景切换触发的自动上报（带冷却）
     func reportIfNeeded() async {

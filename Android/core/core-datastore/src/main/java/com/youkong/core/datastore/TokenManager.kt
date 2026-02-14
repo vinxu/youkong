@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -32,6 +33,8 @@ class TokenManager @Inject constructor(
     }
 
     val isLoggedIn: Flow<Boolean> = accessToken.map { !it.isNullOrBlank() }
+
+    suspend fun getAccessToken(): String? = accessToken.first()
 
     suspend fun saveAccessToken(token: String) {
         context.tokenDataStore.edit { preferences ->

@@ -11,6 +11,7 @@ struct OnboardingChatView: View {
     @StateObject private var viewModel = VoiceScheduleViewModel()
     @State private var inputText = ""
     @State private var showChips = true
+    @State private var isFirstMessage = true
     @FocusState private var isInputFocused: Bool
 
     var body: some View {
@@ -128,9 +129,9 @@ struct OnboardingChatView: View {
 
     private var bottomSection: some View {
         VStack(spacing: 12) {
-            // Approval buttons (when schedule is ready)
-            if viewModel.state == .awaitingApproval && viewModel.canApprove {
-                approvalButtons
+            // Error state: show retry button
+            if case .error(let msg) = viewModel.state {
+                errorRetryBar(message: msg)
             }
 
             // Suggestion chips (first interaction only)
@@ -138,8 +139,12 @@ struct OnboardingChatView: View {
                 suggestionChips
             }
 
-            // Text input bar
-            textInputBar
+            // Text input bar (hide when error)
+            if case .error = viewModel.state {
+                // hidden
+            } else {
+                textInputBar
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -154,8 +159,9 @@ struct OnboardingChatView: View {
             ForEach(chips, id: \.self) { chip in
                 Button {
                     showChips = false
+                    let textToSend = withContextPrefix(chip)
                     Task {
-                        await viewModel.submitText(chip)
+                        await viewModel.submitText(textToSend)
                     }
                 } label: {
                     Text(chip)
@@ -178,17 +184,25 @@ struct OnboardingChatView: View {
 
     private var textInputBar: some View {
         HStack(spacing: 8) {
-            TextField("告诉我你的安排...", text: $inputText)
-                .font(.cliBody)
-                .foregroundColor(CLIColors.textPrimary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(CLIColors.backgroundSecondary)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4)
-                        .stroke(CLIColors.border, lineWidth: 1)
-                )
-                .focused($isInputFocused)
+            ZStack(alignment: .leading) {
+                if inputText.isEmpty {
+                    Text("告诉我你的安排...")
+                        .font(.cliBody)
+                        .foregroundColor(CLIColors.textSecondary)
+                        .padding(.horizontal, 12)
+                }
+                TextField("", text: $inputText)
+                    .font(.cliBody)
+                    .foregroundColor(CLIColors.textPrimary)
+                    .padding(.horizontal, 12)
+            }
+            .padding(.vertical, 10)
+            .background(CLIColors.backgroundSecondary)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(CLIColors.border, lineWidth: 1)
+            )
+            .focused($isInputFocused)
                 .onSubmit {
                     sendMessage()
                 }
@@ -253,19 +267,65 @@ struct OnboardingChatView: View {
         }
     }
 
+    // MARK: - Error Retry
+
+    private func errorRetryBar(message: String) -> some View {
+        VStack(spacing: 8) {
+            Text(message)
+                .font(.cliCaption)
+                .foregroundColor(CLIColors.red)
+
+            HStack(spacing: 12) {
+                Button {
+                    viewModel.reset()
+                    showChips = true
+                } label: {
+                    Text("重试")
+                        .font(.cliBody)
+                        .foregroundColor(CLIColors.background)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(CLIColors.cyan)
+                        .cornerRadius(4)
+                }
+
+                Button {
+                    onSkip()
+                } label: {
+                    Text("跳过")
+                        .font(.cliBody)
+                        .foregroundColor(CLIColors.textSecondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(CLIColors.border, lineWidth: 1)
+                        )
+                }
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     private func sendMessage() {
         let text = inputText.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return }
 
+        let textToSend = withContextPrefix(text)
         inputText = ""
         showChips = false
         isInputFocused = false
 
         Task {
-            await viewModel.submitText(text)
+            await viewModel.submitText(textToSend)
         }
+    }
+
+    /// Onboarding 不注入当前状态前缀，避免 LLM 把历史推断状态塞进时间表
+    private func withContextPrefix(_ text: String) -> String {
+        isFirstMessage = false
+        return text
     }
 
     private func buildGreeting() -> String {
@@ -282,16 +342,7 @@ struct OnboardingChatView: View {
         default: timeGreeting = "夜深了"
         }
 
-        let activityHint: String
-        if inferredActivity.contains("放松") || inferredActivity.contains("休息") {
-            activityHint = "\(inferredEmoji) \(inferredActivity)呢～"
-        } else if inferredActivity.contains("工作") || inferredActivity.contains("办公") {
-            activityHint = "\(inferredEmoji) 正在\(inferredActivity)呀～"
-        } else {
-            activityHint = "\(inferredEmoji) \(inferredActivity)呢～"
-        }
-
-        return "\(timeGreeting)！\(activityHint)\n告诉我接下来的安排，我帮你生成时间表 📋"
+        return "\(timeGreeting)！我是你的 AI 助手 👋\n告诉我接下来的安排，我帮你生成今天的时间表"
     }
 
     private func buildSuggestionChips() -> [String] {
@@ -299,21 +350,18 @@ struct OnboardingChatView: View {
 
         if hour < 12 {
             return [
-                "帮我规划今天的安排",
-                "下午有空，想找点事做",
-                "现在在忙，晚点有空"
+                "帮我安排今天的时间表",
+                "下午两点到四点想去健身"
             ]
         } else if hour < 18 {
             return [
-                "帮我规划今天剩余时间",
-                "晚上有空，想约朋友",
-                "现在在加班"
+                "帮我安排今天剩下的时间",
+                "晚上七点到九点想去运动"
             ]
         } else {
             return [
-                "帮我规划明天的安排",
-                "明天下午有空",
-                "现在在家休息"
+                "帮我安排明天的时间表",
+                "明天上午十点有个会议"
             ]
         }
     }

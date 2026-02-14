@@ -193,6 +193,9 @@ func main() {
 		logger.Warn("LLM_API_KEY 未配置，将使用默认理由生成")
 	}
 
+	// 初始化位置学习服务（激活 learned_places 聚类）
+	locationService := service.NewLocationService(db.DB)
+
 	// 初始化Service
 	smsService := service.NewSMSService(smsClient, redisClient)
 	authService := service.NewAuthService(userRepo, smsService, jwtManager)
@@ -203,7 +206,7 @@ func main() {
 	invitationService := service.NewInvitationService(invitationRepo, circleRepo, userRepo, friendshipRepo, cfg.Invitation.BaseURL)
 	friendshipService := service.NewFriendshipService(friendshipRepo, userRepo, invitationRepo, circleRepo, friendRequestRepo)
 	userProfileService := service.NewUserProfileService(userProfileRepo)
-	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, memoryRepo, scheduleRepo, userProfileService, llmClient)
+	agentService := service.NewAgentService(redisClient, userRepo, friendshipRepo, memoryRepo, scheduleRepo, userProfileService, llmClient, locationService)
 	memoryService := service.NewMemoryService(memoryRepo, redisClient, llmClient)
 	contactService := service.NewContactService(userRepo, friendshipRepo)
 	homeService := service.NewHomeService(friendshipRepo, userRepo, memoryRepo, scheduleRepo, redisClient)
@@ -212,7 +215,7 @@ func main() {
 		scheduleRepo, memoryRepo, memoryDocRepo, userProfileService,
 		redisClient, asrClient, cfg.LLM.APIKey, cfg.LLM.Model,
 		friendshipService, conversationService, agentService,
-		contactService,
+		contactService, locationService,
 	)
 	predictionService := service.NewPredictionService(predictionRepo, scheduleRepo, memoryRepo, userProfileService, llmClient)
 	bookingService := service.NewBookingService(bookingRepo, scheduleRepo, conversationService, userRepo, notificationService, messageRepo)
@@ -310,7 +313,7 @@ func main() {
 	// 初始化场景测试引擎
 	scenarioEngine := service.NewScenarioEngine(
 		voiceScheduleServiceV4, agentService, scheduleRepo, memoryRepo, redisClient,
-		service.ScenarioConfig{DaysToSimulate: 30, Concurrency: 3},
+		service.ScenarioConfig{DaysToSimulate: 30, Concurrency: 10},
 	)
 	agentHandler.SetScenarioEngine(scenarioEngine)
 	logger.Info("V4 场景测试引擎已初始化")
@@ -587,15 +590,17 @@ func main() {
 	statusScheduler.SetBookingRepo(bookingRepo)
 	statusScheduler.SetNotificationSender(notificationService)
 	statusScheduler.SetUserSettingsRepo(userSettingsRepo)
-	// 注入个性化 persona 生成服务
+	// 注入个性化 persona 生成服务 + 结构化时间表生成
 	if cfg.LLM.APIKey != "" {
 		inferencePersonaService := service.NewInferencePersonaService(
 			memoryRepo, scheduleRepo, userProfileService,
 			cfg.LLM.APIKey, cfg.LLM.Model,
 		)
 		statusScheduler.SetPersonaService(inferencePersonaService)
+		statusScheduler.SetScheduleGenService(inferencePersonaService)
 		logger.Info("StatusScheduler 个性化 Persona 服务已注入")
 	}
+	statusScheduler.SetMemoryDocRepo(memoryDocRepo)
 	// 注入 V4 推断服务（用于自动推测下一状态）
 	statusScheduler.SetInferenceAgent(voiceScheduleServiceV4)
 	logger.Info("StatusScheduler V4 推断服务已注入")

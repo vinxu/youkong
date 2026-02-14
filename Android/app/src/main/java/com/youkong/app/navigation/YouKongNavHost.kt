@@ -14,16 +14,17 @@ import com.youkong.app.debug.ApiDebugScreen
 import com.youkong.feature.auth.navigation.AUTH_GRAPH_ROUTE
 import com.youkong.feature.auth.navigation.authGraph
 import com.youkong.feature.auth.navigation.navigateToPhoneInput
-import com.youkong.feature.message.navigation.navigateToChat
 import com.youkong.feature.message.navigation.navigateToChatWithPartner
-import com.youkong.feature.friends.navigation.FRIENDS_ROUTE
 import com.youkong.feature.friends.navigation.addFriendScreen
 import com.youkong.feature.friends.navigation.friendsScreen
 import com.youkong.feature.friends.navigation.navigateToAddFriend
 import com.youkong.feature.friends.navigation.navigateToFriends
 import com.youkong.feature.home.navigation.HOME_ROUTE
-import com.youkong.feature.home.navigation.homeScreen
+import com.youkong.feature.home.navigation.gridHomeScreen
+import com.youkong.feature.home.navigation.friendScheduleScreen
+import com.youkong.feature.home.navigation.navigateToFriendSchedule
 import com.youkong.feature.home.navigation.navigateToHome
+import com.youkong.feature.home.navigation.onboardingScreen
 import com.youkong.feature.message.navigation.messagesGraph
 import com.youkong.feature.message.navigation.navigateToMessages
 import com.youkong.feature.profile.navigation.navigateToProfile
@@ -54,7 +55,7 @@ fun YouKongNavHost(
     val startDestination = when {
         uiState.isLoading -> AUTH_GRAPH_ROUTE
         uiState.isLoggedIn -> {
-            if (uiState.hasRequiredPermissions) FRIENDS_ROUTE else ONBOARDING_PERMISSION_ROUTE
+            if (uiState.hasRequiredPermissions) HOME_ROUTE else ONBOARDING_PERMISSION_ROUTE
         }
         else -> AUTH_GRAPH_ROUTE
     }
@@ -70,7 +71,7 @@ fun YouKongNavHost(
                     navController.navigateToOnboardingPermission()
                 }
                 else -> {
-                    navController.navigateToFriends()
+                    navController.navigateToHome()
                 }
             }
         }
@@ -85,25 +86,41 @@ fun YouKongNavHost(
         authGraph(
             navController = navController,
             onLoginSuccess = {
-                // 登录成功后，刷新权限状态
                 viewModel.refreshPermissions()
-                // 导航会由 LaunchedEffect 处理
             },
         )
 
-        // 权限引导页面 (首次登录引导)
+        // 引导流程（3 屏 + Chat 覆盖层，对齐 iOS）
         composable(route = ONBOARDING_PERMISSION_ROUTE) {
-            com.youkong.feature.settings.screen.PermissionSetupScreen(
-                onBackClick = { /* 首次引导不允许返回 */ },
+            com.youkong.feature.home.screen.OnboardingScreen(
                 onComplete = {
                     viewModel.refreshPermissions()
-                    navController.navigateToFriends()
-                },
-                isOnboarding = true,
+                    navController.navigateToHome()
+                }
             )
         }
 
-        // 好友列表 (主页面)
+        // 宫格首页 (主页面)
+        gridHomeScreen(
+            onNavigateToSettings = {
+                navController.navigateToSettings()
+            },
+            onNavigateToAddFriend = {
+                navController.navigateToAddFriend()
+            },
+            onNavigateToChat = { userId ->
+                navController.navigateToChatWithPartner(userId)
+            },
+        )
+
+        // 好友时刻表页面
+        friendScheduleScreen(
+            onDismiss = {
+                navController.popBackStack()
+            },
+        )
+
+        // 好友列表
         friendsScreen(
             onNavigateToChat = { userId ->
                 navController.navigateToChatWithPartner(userId)
@@ -130,36 +147,24 @@ fun YouKongNavHost(
         )
 
         // 聊天和消息
-        messagesGraph(navController = navController)
+        messagesGraph(
+            navController = navController,
+            onNavigateToFriendSchedule = { userId, friendName ->
+                navController.navigateToFriendSchedule(userId, friendName)
+            },
+        )
 
         // 设置
         settingsGraph(navController = navController)
 
-        // ========== 保留的旧模块（可选） ==========
-
-        // 旧版首页 (保留兼容)
-        homeScreen(
-            onNavigateToCreateAvailability = { },
-            onNavigateToCircles = { },
-            onNavigateToMessages = {
-                navController.navigateToMessages()
-            },
-            onNavigateToProfile = {
-                navController.navigateToProfile()
-            },
-        )
-
-        // 消息 (保留兼容)
-        messagesGraph(navController = navController)
-
-        // 个人资料 (保留兼容)
+        // 个人资料
         profileScreen(
             navController = navController,
             onLogout = {
                 navController.navigateToPhoneInput()
             },
             onNavigateToFriends = {
-                navController.navigateToFriends()
+                navController.navigateToHome()
             },
             onNavigateToInvitations = { },
         )

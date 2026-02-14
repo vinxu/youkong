@@ -11,6 +11,17 @@
     <!-- 录音权限 (语音发状态功能) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- 位置权限 (后台状态上报) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+    <!-- 日历权限 (日程收集) -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+
+    <!-- 活动识别权限 (运动状态) -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+
     <application
         android:name=".YouKongApplication"
         android:allowBackup="true"
@@ -34,6 +45,8 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustNothing"
             android:theme="@style/Theme.YouKong.Splash">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

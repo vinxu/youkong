@@ -8,6 +8,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // 设置通知中心代理
         UNUserNotificationCenter.current().delegate = self
 
+        // 注册后台状态上报任务
+        StatusReportManager.registerBackgroundTask()
+
         // 监听 App 状态变化
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,

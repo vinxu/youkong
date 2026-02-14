@@ -3,6 +3,7 @@ package com.youkong.core.network.sse
 import android.util.Log
 import com.youkong.core.network.BuildConfig
 import com.youkong.core.network.model.AgentStatusRequest
+import com.youkong.core.network.model.InferenceV2SseEvent
 import com.youkong.core.network.model.SseEvent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
@@ -32,6 +33,93 @@ class AgentSseClient @Inject constructor(
         .readTimeout(5, TimeUnit.MINUTES)  // SSE 需要长时间读取
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
+
+    /**
+     * V2 流式推断请求（Agent-based）
+     */
+    fun streamInferenceV2(request: AgentStatusRequest, token: String): Flow<InferenceV2SseEvent> = callbackFlow {
+        val requestBody = json.encodeToString(AgentStatusRequest.serializer(), request)
+            .toRequestBody("application/json".toMediaType())
+
+        val httpRequest = Request.Builder()
+            .url("${baseUrl}agent/infer-status-v2/stream")
+            .post(requestBody)
+            .addHeader("Authorization", "Bearer $token")
+            .addHeader("Accept", "text/event-stream")
+            .addHeader("Cache-Control", "no-cache")
+            .build()
+
+        val call = sseClient.newCall(httpRequest)
+
+        withContext(Dispatchers.IO) {
+            try {
+                val response = call.execute()
+                Log.d("SSE-V2", "Response code: ${response.code}")
+
+                if (!response.isSuccessful) {
+                    trySend(InferenceV2SseEvent(type = "error", message = "HTTP ${response.code}"))
+                    close()
+                    return@withContext
+                }
+
+                val source: BufferedSource? = response.body?.source()
+                if (source == null) {
+                    trySend(InferenceV2SseEvent(type = "error", message = "Empty response"))
+                    close()
+                    return@withContext
+                }
+
+                var lineCount = 0
+                Log.d("SSE-V2", "Starting to read lines...")
+
+                while (isActive && !source.exhausted()) {
+                    val line = source.readUtf8Line() ?: break
+                    lineCount++
+
+                    // 跳过空行和心跳注释行
+                    if (line.isEmpty() || line.startsWith(":")) {
+                        continue
+                    }
+
+                    if (!line.startsWith("data: ")) {
+                        Log.d("SSE-V2", "Line #$lineCount: unexpected: ${line.take(50)}")
+                        continue
+                    }
+
+                    val jsonStr = line.removePrefix("data: ").trim()
+
+                    // 检测流结束标记
+                    if (jsonStr == "[DONE]") {
+                        Log.d("SSE-V2", "Received [DONE]")
+                        break
+                    }
+
+                    if (jsonStr.isNotEmpty()) {
+                        try {
+                            val event = json.decodeFromString(InferenceV2SseEvent.serializer(), jsonStr)
+                            Log.d("SSE-V2", "Event: ${event.type} - ${event.message?.take(20) ?: ""}")
+                            trySend(event)
+                            if (event.type == "result" || event.type == "error") break
+                        } catch (e: Exception) {
+                            Log.e("SSE-V2", "Parse error: ${e.message}, json: ${jsonStr.take(80)}")
+                        }
+                    }
+                }
+
+                Log.d("SSE-V2", "Finished. Total lines: $lineCount")
+
+                source.close()
+                response.close()
+            } catch (e: Exception) {
+                Log.e("SSE-V2", "Stream error: ${e.message}")
+                trySend(InferenceV2SseEvent(type = "error", message = e.message ?: "Unknown error"))
+            }
+
+            close()
+        }
+
+        awaitClose { call.cancel() }
+    }
 
     /**
      * 发起流式推理请求

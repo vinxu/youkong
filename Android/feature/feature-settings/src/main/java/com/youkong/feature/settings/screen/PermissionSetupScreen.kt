@@ -1,6 +1,5 @@
 package com.youkong.feature.settings.screen
 
-import android.app.Activity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -15,10 +14,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Phone
+import androidx.compose.ui.unit.sp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -37,8 +35,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -60,7 +56,6 @@ fun PermissionSetupScreen(
     viewModel: PermissionSetupViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    val context = LocalContext.current
     val currentPermission = viewModel.getCurrentPermission()
 
     // 监听页面回来时刷新权限状态
@@ -84,31 +79,24 @@ fun PermissionSetupScreen(
         }
     }
 
-    // 位置权限请求
+    // 位置权限请求（多个权限）
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
+    ) { _ ->
         viewModel.refreshPermissions()
     }
 
-    // 后台位置权限请求
-    val backgroundLocationLauncher = rememberLauncherForActivityResult(
+    // 运动数据权限请求
+    val activityRecognitionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
+    ) { _ ->
         viewModel.refreshPermissions()
     }
 
-    // 通讯录权限请求
-    val contactsPermissionLauncher = rememberLauncherForActivityResult(
+    // 日历权限请求
+    val calendarPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        viewModel.refreshPermissions()
-    }
-
-    // 通知权限请求
-    val notificationPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
+    ) { _ ->
         viewModel.refreshPermissions()
     }
 
@@ -147,8 +135,8 @@ fun PermissionSetupScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            if (currentPermission == null) {
-                // 所有权限已授予
+            if (currentPermission == null || uiState.isComplete) {
+                // 所有权限已授予或已跳过
                 PermissionCompleteContent(
                     onContinue = onComplete,
                 )
@@ -158,30 +146,20 @@ fun PermissionSetupScreen(
                     permission = currentPermission,
                     onRequest = {
                         when (currentPermission) {
-                            RequiredPermission.USAGE_STATS -> {
-                                (context as? Activity)?.let {
-                                    viewModel.openUsageStatsSettings(it)
-                                }
-                            }
                             RequiredPermission.LOCATION -> {
                                 locationPermissionLauncher.launch(viewModel.getLocationPermissions())
                             }
-                            RequiredPermission.BACKGROUND_LOCATION -> {
-                                viewModel.getBackgroundLocationPermission()?.let {
-                                    backgroundLocationLauncher.launch(it)
-                                }
+                            RequiredPermission.ACTIVITY_RECOGNITION -> {
+                                viewModel.getActivityRecognitionPermission()?.let {
+                                    activityRecognitionLauncher.launch(it)
+                                } ?: viewModel.refreshPermissions()
                             }
-                            RequiredPermission.CONTACTS -> {
-                                contactsPermissionLauncher.launch(viewModel.getContactsPermission())
-                            }
-                            RequiredPermission.NOTIFICATION -> {
-                                viewModel.getNotificationPermission()?.let {
-                                    notificationPermissionLauncher.launch(it)
-                                }
+                            RequiredPermission.CALENDAR -> {
+                                calendarPermissionLauncher.launch(viewModel.getCalendarPermission())
                             }
                         }
                     },
-                    onSkip = { viewModel.nextStep() },
+                    onSkip = { viewModel.skipCurrentPermission() },
                     isOnboarding = isOnboarding,
                 )
             }
@@ -196,21 +174,18 @@ private fun PermissionRequestContent(
     onSkip: () -> Unit,
     isOnboarding: Boolean = false,
 ) {
-    val icon = when (permission) {
-        RequiredPermission.USAGE_STATS -> Icons.Default.Phone
-        RequiredPermission.LOCATION, RequiredPermission.BACKGROUND_LOCATION -> Icons.Default.LocationOn
-        RequiredPermission.CONTACTS -> Icons.Default.Person
-        RequiredPermission.NOTIFICATION -> Icons.Default.Notifications
+    val emoji = when (permission) {
+        RequiredPermission.LOCATION -> "📍"
+        RequiredPermission.ACTIVITY_RECOGNITION -> "🏃"
+        RequiredPermission.CALENDAR -> "📅"
     }
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            modifier = Modifier.size(80.dp),
-            tint = Primary,
+        Text(
+            text = emoji,
+            fontSize = 64.sp,
         )
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -270,13 +245,7 @@ private fun PermissionRequestContent(
             onClick = onRequest,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text(
-                text = if (permission == RequiredPermission.USAGE_STATS) {
-                    "前往设置"
-                } else {
-                    "授予权限"
-                }
-            )
+            Text(text = "授予权限")
         }
 
         if (!isOnboarding) {

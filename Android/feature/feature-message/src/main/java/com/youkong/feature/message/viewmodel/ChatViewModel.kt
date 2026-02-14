@@ -25,6 +25,7 @@ import javax.inject.Inject
 
 data class ChatUiState(
     val messages: List<Message> = emptyList(),
+    val partnerId: String? = null,
     val partnerName: String? = null,
     val currentUserId: String? = null,
     val isLoading: Boolean = true,
@@ -123,7 +124,7 @@ class ChatViewModel @Inject constructor(
                 messageRepository.getOrCreateConversation(partnerIdParam)
                     .onSuccess { conversation ->
                         conversationId = conversation.id
-                        _uiState.update { it.copy(partnerName = conversation.partner.nickname) }
+                        _uiState.update { it.copy(partnerId = conversation.partner.id, partnerName = conversation.partner.nickname) }
                         loadMessages()
                     }
                     .onFailure { e ->
@@ -223,7 +224,7 @@ class ChatViewModel @Inject constructor(
             messageRepository.getOrCreateConversation(partnerId)
                 .onSuccess { conversation ->
                     conversationId = conversation.id
-                    _uiState.update { it.copy(partnerName = conversation.partner.nickname) }
+                    _uiState.update { it.copy(partnerId = conversation.partner.id, partnerName = conversation.partner.nickname) }
                     loadMessages()
                 }
                 .onFailure { e ->

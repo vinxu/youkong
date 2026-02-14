@@ -40,6 +40,7 @@ data class SimpleApiResponse(
     }
 }
 
+@Keep
 @Serializable
 data class ApiResponse<T>(
     val code: Int,
@@ -89,6 +90,22 @@ class ApiException(
     }
 }
 
+// MARK: - App 版本检查
+
+@Keep
+@Serializable
+data class AppVersionResponse(
+    @SerialName("latest_version")
+    val latestVersion: String,
+    @SerialName("min_version")
+    val minVersion: String,
+    @SerialName("update_url")
+    val updateUrl: String,
+    val changelog: String,
+    @SerialName("force_update")
+    val forceUpdate: Boolean,
+)
+
 // MARK: - 用户设置
 
 /**
@@ -97,7 +114,9 @@ class ApiException(
 @Serializable
 data class UserSettingsRequest(
     @SerialName("auto_predict_enabled")
-    val autoPredictEnabled: Boolean? = null
+    val autoPredictEnabled: Boolean? = null,
+    @SerialName("show_city")
+    val showCity: Boolean? = null,
 )
 
 /**
@@ -106,5 +125,9 @@ data class UserSettingsRequest(
 @Serializable
 data class UserSettingsResponse(
     @SerialName("auto_predict_enabled")
-    val autoPredictEnabled: Boolean
+    val autoPredictEnabled: Boolean,
+    @SerialName("show_city")
+    val showCity: Boolean = true,
+    @SerialName("ai_ready_details")
+    val aiReadyDetails: AIReadyDetails? = null,
 )

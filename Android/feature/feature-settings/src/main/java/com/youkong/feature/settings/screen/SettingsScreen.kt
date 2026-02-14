@@ -13,10 +13,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -24,8 +26,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -52,6 +56,16 @@ fun SettingsScreen(
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     var showLogoutDialog by remember { mutableStateOf(false) }
+    var showNicknameDialog by remember { mutableStateOf(false) }
+    var nicknameInput by remember { mutableStateOf("") }
+
+    // 昵称修改成功后关闭对话框
+    LaunchedEffect(uiState.nicknameUpdateSuccess) {
+        if (uiState.nicknameUpdateSuccess) {
+            showNicknameDialog = false
+            viewModel.consumeNicknameSuccess()
+        }
+    }
 
     // 监听页面回来时刷新权限状态
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -134,6 +148,17 @@ fun SettingsScreen(
             item { TerminalDivider() }
 
             item {
+                SettingsSwitchItem(
+                    title = "显示城市",
+                    subtitle = "开启后，你的城市信息将显示在首页好友卡片上",
+                    checked = uiState.showCity,
+                    onCheckedChange = { viewModel.setShowCity(it) },
+                )
+            }
+
+            item { TerminalDivider() }
+
+            item {
                 SettingsClickItem(
                     title = "我的 Agent 数据",
                     subtitle = "查看当前收集到的数据",
@@ -172,6 +197,20 @@ fun SettingsScreen(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
                 )
             }
+
+            item {
+                SettingsClickItem(
+                    title = "修改昵称",
+                    subtitle = uiState.nickname.ifEmpty { "未设置" },
+                    onClick = {
+                        nicknameInput = uiState.nickname
+                        viewModel.clearNicknameError()
+                        showNicknameDialog = true
+                    },
+                )
+            }
+
+            item { TerminalDivider() }
 
             item {
                 SettingsClickItem(
@@ -218,6 +257,85 @@ fun SettingsScreen(
                 TerminalButton(
                     text = "N",
                     onClick = { showLogoutDialog = false },
+                    style = TerminalButtonStyle.GHOST
+                )
+            },
+            containerColor = CLIColors.Background
+        )
+    }
+
+    // 修改昵称对话框
+    if (showNicknameDialog) {
+        AlertDialog(
+            onDismissRequest = { showNicknameDialog = false },
+            title = {
+                Text(
+                    text = "$ nickname --edit",
+                    fontFamily = FontFamily.Monospace,
+                    color = CLIColors.TextPrimary
+                )
+            },
+            text = {
+                Column {
+                    BasicTextField(
+                        value = nicknameInput,
+                        onValueChange = {
+                            nicknameInput = it
+                            viewModel.clearNicknameError()
+                        },
+                        textStyle = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 16.sp,
+                            color = CLIColors.Green,
+                        ),
+                        cursorBrush = SolidColor(CLIColors.Green),
+                        singleLine = true,
+                        decorationBox = { innerTextField ->
+                            Row {
+                                Text(
+                                    text = "> ",
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 16.sp,
+                                    color = CLIColors.Green,
+                                )
+                                innerTextField()
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(CLIColors.BackgroundSecondary)
+                            .padding(12.dp),
+                    )
+                    if (uiState.nicknameUpdateError != null) {
+                        Text(
+                            text = "ERROR: ${uiState.nicknameUpdateError}",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            color = CLIColors.Red,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                    Text(
+                        text = "2-20 个字符",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = CLIColors.TextSecondary,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                TerminalButton(
+                    text = if (uiState.isUpdatingNickname) "..." else "OK",
+                    onClick = { viewModel.updateNickname(nicknameInput) },
+                    style = TerminalButtonStyle.PRIMARY,
+                    enabled = !uiState.isUpdatingNickname,
+                )
+            },
+            dismissButton = {
+                TerminalButton(
+                    text = "取消",
+                    onClick = { showNicknameDialog = false },
                     style = TerminalButtonStyle.GHOST
                 )
             },

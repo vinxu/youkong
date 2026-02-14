@@ -2,6 +2,8 @@ package com.youkong.core.network.sse
 
 import android.util.Log
 import com.youkong.core.network.BuildConfig
+import com.youkong.core.network.model.AgentStatusRequest
+import com.youkong.core.network.model.InferenceV2SseEvent
 import com.youkong.core.network.model.VoiceScheduleEvent
 import com.youkong.core.network.model.VoiceScheduleInteractionData
 import com.youkong.core.network.model.VoiceScheduleInteractionRequest
@@ -134,10 +136,20 @@ class VoiceScheduleSseClient @Inject constructor(
                                 Log.d(TAG, "Parsed event: ${event.type}")
                                 trySend(event)
 
-                                // error 或 confirmed 时结束
-                                if (event.type == com.youkong.core.network.model.VoiceScheduleEventType.ERROR ||
-                                    event.type == com.youkong.core.network.model.VoiceScheduleEventType.CONFIRMED
-                                ) {
+                                // 终态事件时结束（防止 [DONE] 未收到时卡住）
+                                val terminalTypes = setOf(
+                                    com.youkong.core.network.model.VoiceScheduleEventType.ERROR,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.CONFIRMED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.SCHEDULE_SAVED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.STATUS_UPDATED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.MESSAGE_SENT,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.INVITE_SENT,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.DELETE_PREVIEW,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.SCHEDULE_DELETED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.FRIEND_REMOVED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.INVITE_RESPONDED,
+                                )
+                                if (event.type in terminalTypes) {
                                     break
                                 }
                             } catch (e: Exception) {
@@ -250,9 +262,18 @@ class VoiceScheduleSseClient @Inject constructor(
                                 )
                                 trySend(event)
 
-                                if (event.type == com.youkong.core.network.model.VoiceScheduleEventType.ERROR ||
-                                    event.type == com.youkong.core.network.model.VoiceScheduleEventType.CONFIRMED
-                                ) {
+                                val terminalTypes = setOf(
+                                    com.youkong.core.network.model.VoiceScheduleEventType.ERROR,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.CONFIRMED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.SCHEDULE_SAVED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.STATUS_UPDATED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.MESSAGE_SENT,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.INVITE_SENT,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.SCHEDULE_DELETED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.FRIEND_REMOVED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.INVITE_RESPONDED,
+                                )
+                                if (event.type in terminalTypes) {
                                     break
                                 }
                             } catch (e: Exception) {
@@ -272,6 +293,203 @@ class VoiceScheduleSseClient @Inject constructor(
                         message = e.message ?: "Unknown error"
                     )
                 )
+            }
+
+            close()
+        }
+
+        awaitClose {
+            call.cancel()
+        }
+    }
+
+    /**
+     * V4 文本输入（用于确认、补充等交互）
+     * 通过 /voice-schedule/text 端点发送文本，走 V4 Agent 循环
+     */
+    fun streamTextInput(
+        sessionId: String?,
+        text: String,
+        token: String,
+        sensorData: com.youkong.core.network.model.AgentStatusRequest? = null
+    ): Flow<VoiceScheduleEvent> = callbackFlow {
+        val bodyJson = buildString {
+            append("{")
+            if (sessionId != null) append("\"session_id\":\"$sessionId\",")
+            append("\"text\":\"$text\"")
+            if (sensorData != null) {
+                append(",\"sensor_data\":")
+                append(json.encodeToString(com.youkong.core.network.model.AgentStatusRequest.serializer(), sensorData))
+            }
+            append("}")
+        }
+
+        val requestBody = bodyJson.toRequestBody("application/json".toMediaType())
+
+        val request = Request.Builder()
+            .url("${baseUrl}agent/voice-schedule/text")
+            .post(requestBody)
+            .addHeader("Authorization", "Bearer $token")
+            .addHeader("Accept", "text/event-stream")
+            .addHeader("Cache-Control", "no-cache")
+            .addHeader("Content-Type", "application/json")
+            .build()
+
+        val call = sseClient.newCall(request)
+
+        withContext(Dispatchers.IO) {
+            try {
+                val response = call.execute()
+                Log.d(TAG, "Text input response: ${response.code}")
+
+                if (!response.isSuccessful) {
+                    trySend(VoiceScheduleEvent(
+                        type = com.youkong.core.network.model.VoiceScheduleEventType.ERROR,
+                        message = "HTTP ${response.code}: ${response.message}"
+                    ))
+                    close()
+                    return@withContext
+                }
+
+                val source: BufferedSource? = response.body?.source()
+                if (source == null) {
+                    trySend(VoiceScheduleEvent(
+                        type = com.youkong.core.network.model.VoiceScheduleEventType.ERROR,
+                        message = "Empty response body"
+                    ))
+                    close()
+                    return@withContext
+                }
+
+                while (isActive && !source.exhausted()) {
+                    val line = source.readUtf8Line() ?: break
+                    Log.d(TAG, "Text Line: ${line.take(100)}...")
+
+                    if (line == "data: [DONE]") break
+
+                    if (line.startsWith("data: ")) {
+                        val jsonStr = line.removePrefix("data: ").trim()
+                        if (jsonStr.isNotEmpty()) {
+                            try {
+                                val event = json.decodeFromString(
+                                    VoiceScheduleEvent.serializer(),
+                                    jsonStr
+                                )
+                                trySend(event)
+
+                                val terminalTypes = setOf(
+                                    com.youkong.core.network.model.VoiceScheduleEventType.ERROR,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.CONFIRMED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.SCHEDULE_SAVED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.STATUS_UPDATED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.MESSAGE_SENT,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.INVITE_SENT,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.SCHEDULE_DELETED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.FRIEND_REMOVED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.INVITE_RESPONDED,
+                                )
+                                if (event.type in terminalTypes) {
+                                    break
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Parse error: ${e.message}")
+                            }
+                        }
+                    }
+                }
+
+                source.close()
+                response.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "Text input error: ${e.message}")
+                trySend(VoiceScheduleEvent(
+                    type = com.youkong.core.network.model.VoiceScheduleEventType.ERROR,
+                    message = e.message ?: "Unknown error"
+                ))
+            }
+
+            close()
+        }
+
+        awaitClose {
+            call.cancel()
+        }
+    }
+
+    /**
+     * 流式状态推断（调用推断专用 SSE 端点）
+     * POST /agent/infer-status-v2/stream
+     */
+    fun streamInferStatus(
+        sensorData: AgentStatusRequest,
+        token: String,
+    ): Flow<InferenceV2SseEvent> = callbackFlow {
+        val bodyJson = json.encodeToString(AgentStatusRequest.serializer(), sensorData)
+        val requestBody = bodyJson.toRequestBody("application/json".toMediaType())
+
+        val request = Request.Builder()
+            .url("${baseUrl}agent/infer-status-v2/stream")
+            .post(requestBody)
+            .addHeader("Authorization", "Bearer $token")
+            .addHeader("Accept", "text/event-stream")
+            .addHeader("Cache-Control", "no-cache")
+            .addHeader("Content-Type", "application/json")
+            .build()
+
+        val call = sseClient.newCall(request)
+
+        withContext(Dispatchers.IO) {
+            try {
+                val response = call.execute()
+                Log.d(TAG, "Infer status response: ${response.code}")
+
+                if (!response.isSuccessful) {
+                    trySend(InferenceV2SseEvent(type = "error", message = "HTTP ${response.code}: ${response.message}"))
+                    close()
+                    return@withContext
+                }
+
+                val source: BufferedSource? = response.body?.source()
+                if (source == null) {
+                    trySend(InferenceV2SseEvent(type = "error", message = "Empty response body"))
+                    close()
+                    return@withContext
+                }
+
+                while (isActive && !source.exhausted()) {
+                    val line = source.readUtf8Line() ?: break
+                    Log.d(TAG, "Infer Line: ${line.take(100)}...")
+
+                    if (line == "data: [DONE]") break
+
+                    // 跳过 keepalive 注释
+                    if (line.startsWith(":")) continue
+
+                    if (line.startsWith("data: ")) {
+                        val jsonStr = line.removePrefix("data: ").trim()
+                        if (jsonStr.isNotEmpty()) {
+                            try {
+                                val event = json.decodeFromString(
+                                    InferenceV2SseEvent.serializer(),
+                                    jsonStr
+                                )
+                                trySend(event)
+
+                                if (event.type == "error" || event.type == "result") {
+                                    // result 是最终事件，但不立即 break，等 [DONE]
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Infer parse error: ${e.message}")
+                            }
+                        }
+                    }
+                }
+
+                source.close()
+                response.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "Infer status error: ${e.message}")
+                trySend(InferenceV2SseEvent(type = "error", message = e.message ?: "Unknown error"))
             }
 
             close()
@@ -358,9 +576,18 @@ class VoiceScheduleSseClient @Inject constructor(
                                 )
                                 trySend(event)
 
-                                if (event.type == com.youkong.core.network.model.VoiceScheduleEventType.ERROR ||
-                                    event.type == com.youkong.core.network.model.VoiceScheduleEventType.CONFIRMED
-                                ) {
+                                val terminalTypes = setOf(
+                                    com.youkong.core.network.model.VoiceScheduleEventType.ERROR,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.CONFIRMED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.SCHEDULE_SAVED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.STATUS_UPDATED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.MESSAGE_SENT,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.INVITE_SENT,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.SCHEDULE_DELETED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.FRIEND_REMOVED,
+                                    com.youkong.core.network.model.VoiceScheduleEventType.INVITE_RESPONDED,
+                                )
+                                if (event.type in terminalTypes) {
                                     break
                                 }
                             } catch (e: Exception) {

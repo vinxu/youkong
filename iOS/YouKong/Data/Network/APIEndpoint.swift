@@ -198,11 +198,18 @@ extension APIEndpoint {
     }
 
     /// 保存简化的用户画像 - 引导流程
-    static func saveSimpleProfile(profileType: String) -> APIEndpoint {
+    static func saveSimpleProfile(profileType: String, gender: String? = nil, mbti: String? = nil) -> APIEndpoint {
+        var params: [String: String] = ["profile_type": profileType]
+        if let gender = gender {
+            params["gender"] = gender
+        }
+        if let mbti = mbti {
+            params["mbti"] = mbti
+        }
         return APIEndpoint(
             path: "/api/v1/profile/simple",
             method: .post,
-            body: ["profile_type": profileType]
+            body: params
         )
     }
 

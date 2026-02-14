@@ -1,8 +1,21 @@
 package com.youkong.app
 
 import android.app.Application
+import android.util.Log
 import androidx.hilt.work.HiltWorkerFactory
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.work.Configuration
+import androidx.work.Constraints
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.NetworkType
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import com.youkong.core.agent.worker.StatusReportTrigger
+import com.youkong.core.agent.worker.StatusReportWorker
+import java.util.concurrent.TimeUnit
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import com.youkong.app.push.TPNSHelper
@@ -49,6 +62,12 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
     @Inject
     lateinit var unreadPreferences: com.youkong.core.datastore.UnreadPreferences
 
+    @Inject
+    lateinit var workManager: WorkManager
+
+    @Inject
+    lateinit var statusReportTrigger: StatusReportTrigger
+
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     override val workManagerConfiguration: Configuration
@@ -81,10 +100,14 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
             // 监听登录状态，连接 WebSocket
             observeAuthState()
 
-            // ✅ 已删除自动 Worker 调度（改为手动触发）
+            // 后台定时上报传感器数据（登录时启动，登出时取消）
+            scheduleStatusReportWorker()
 
             // 监听 WebSocket 消息，处理未读计数
             observeWebSocketMessages()
+
+            // App 前台/后台切换时自动上报（60s cooldown，与 iOS 对齐）
+            observeAppForeground()
         } else {
             android.util.Log.d("YouKongApplication", "Non-main process (${getCurrentProcessName()}), skipping WebSocket and workers")
         }
@@ -128,8 +151,63 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
         }
     }
 
-    // ✅ 移除自动 Worker 调度逻辑
-    // 数据收集改为手动触发（在 AgentDataScreen 点击分析按钮时）
+    private fun scheduleStatusReportWorker() {
+        applicationScope.launch {
+            tokenManager.isLoggedIn
+                .distinctUntilChanged()
+                .collect { isLoggedIn ->
+                    if (isLoggedIn) {
+                        val constraints = Constraints.Builder()
+                            .setRequiredNetworkType(NetworkType.CONNECTED)
+                            .build()
+                        val workRequest = PeriodicWorkRequestBuilder<StatusReportWorker>(
+                            15, TimeUnit.MINUTES
+                        ).setConstraints(constraints).build()
+                        workManager.enqueueUniquePeriodicWork(
+                            StatusReportWorker.WORK_NAME,
+                            ExistingPeriodicWorkPolicy.KEEP,
+                            workRequest,
+                        )
+                        // 登录时立即触发一次上报
+                        statusReportTrigger.triggerNow()
+                        Log.d("YouKongApplication", "StatusReportWorker scheduled (15min) + immediate")
+                    } else {
+                        workManager.cancelUniqueWork(StatusReportWorker.WORK_NAME)
+                        Log.d("YouKongApplication", "StatusReportWorker cancelled")
+                    }
+                }
+        }
+    }
+
+    /**
+     * 监听 App 前台/后台切换，自动上报状态（60s cooldown）
+     * 对齐 iOS RootView.onChange(of: scenePhase)
+     */
+    private fun observeAppForeground() {
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) {
+                // App 进入前台
+                applicationScope.launch {
+                    val isLoggedIn = tokenManager.isLoggedIn.first()
+                    if (isLoggedIn) {
+                        statusReportTrigger.triggerIfNeeded()
+                        Log.d("YouKongApplication", "App foreground → triggerIfNeeded")
+                    }
+                }
+            }
+
+            override fun onStop(owner: LifecycleOwner) {
+                // App 进入后台（与 iOS 一致，后台也触发一次）
+                applicationScope.launch {
+                    val isLoggedIn = tokenManager.isLoggedIn.first()
+                    if (isLoggedIn) {
+                        statusReportTrigger.triggerIfNeeded()
+                        Log.d("YouKongApplication", "App background → triggerIfNeeded")
+                    }
+                }
+            }
+        })
+    }
 
     /**
      * 监听 WebSocket 消息，处理未读计数

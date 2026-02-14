@@ -32,6 +32,7 @@ fun NavController.navigateToChatWithPartner(partnerId: String) {
 
 fun NavGraphBuilder.messagesGraph(
     navController: NavController,
+    onNavigateToFriendSchedule: (userId: String, friendName: String) -> Unit = { _, _ -> },
 ) {
     navigation(
         route = MESSAGES_GRAPH_ROUTE,
@@ -63,6 +64,7 @@ fun NavGraphBuilder.messagesGraph(
         ) {
             ChatScreen(
                 onBackClick = { navController.popBackStack() },
+                onNavigateToFriendSchedule = onNavigateToFriendSchedule,
             )
         }
     }

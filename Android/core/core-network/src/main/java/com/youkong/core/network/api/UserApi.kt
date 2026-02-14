@@ -1,6 +1,7 @@
 package com.youkong.core.network.api
 
 import com.youkong.core.network.model.ApiResponse
+import com.youkong.core.network.model.AppVersionResponse
 import com.youkong.core.network.model.MyInviteResponse
 import com.youkong.core.network.model.UpdateUserRequest
 import com.youkong.core.network.model.UserProfileResponse
@@ -35,4 +36,10 @@ interface UserApi {
 
     @PUT("users/settings")
     suspend fun updateUserSettings(@Body request: UserSettingsRequest): ApiResponse<UserSettingsResponse>
+
+    @GET("app/version")
+    suspend fun checkAppVersion(
+        @Query("platform") platform: String,
+        @Query("current_version") currentVersion: String,
+    ): ApiResponse<AppVersionResponse>
 }

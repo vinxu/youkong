@@ -108,7 +108,7 @@ func (h *UserProfileHandler) SaveSimpleProfile(c *gin.Context) {
 		return
 	}
 
-	err := h.profileService.SaveSimpleProfile(userID, req.ProfileType)
+	err := h.profileService.SaveSimpleProfile(userID, req.ProfileType, req.Gender, req.MBTI)
 	if err != nil {
 		response.Error(c, http.StatusInternalServerError, "保存用户画像失败")
 		return
@@ -117,5 +117,7 @@ func (h *UserProfileHandler) SaveSimpleProfile(c *gin.Context) {
 	response.Success(c, gin.H{
 		"message":      "画像已保存",
 		"profile_type": req.ProfileType,
+		"gender":       req.Gender,
+		"mbti":         req.MBTI,
 	})
 }

@@ -106,8 +106,10 @@ class LocationDataCollector: NSObject, ObservableObject {
             return .transit
         }
 
-        // 默认视为休闲场所
-        return .leisure
+        // 已学习 home → 确实不在家/公司 → 在外面
+        if homeLocation != nil { return .leisure }
+        // 冷启动：还没学到 home → 诚实报告不确定，让服务端/LLM 自行判断
+        return .unknown
     }
 
     // MARK: - Learn Places

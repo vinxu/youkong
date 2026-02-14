@@ -11,6 +11,7 @@ type User struct {
 	PhoneHash    string     `db:"phone_hash" json:"-"`
 	Nickname     string     `db:"nickname" json:"nickname"`
 	Avatar       string     `db:"avatar" json:"avatar,omitempty"`
+	City         *string    `db:"city" json:"city,omitempty"`
 	WechatBound  bool       `db:"wechat_bound" json:"wechatBound"`
 	CreatedAt    time.Time  `db:"created_at" json:"createdAt"`
 	UpdatedAt    time.Time  `db:"updated_at" json:"updatedAt"`

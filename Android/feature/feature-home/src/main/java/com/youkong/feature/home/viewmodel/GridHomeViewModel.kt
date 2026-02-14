@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.youkong.core.domain.manager.UnreadMessageManager
 import com.youkong.core.domain.repository.MessageRepository
+import com.youkong.core.agent.worker.StatusReportTrigger
 import com.youkong.core.network.api.HomeApi
 import com.youkong.core.network.model.FriendGridItem
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -19,7 +20,8 @@ import javax.inject.Inject
 @HiltViewModel
 class GridHomeViewModel @Inject constructor(
     private val homeApi: HomeApi,
-    private val messageRepository: MessageRepository
+    private val messageRepository: MessageRepository,
+    private val statusReportTrigger: StatusReportTrigger,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(GridHomeUiState())
@@ -53,6 +55,9 @@ class GridHomeViewModel @Inject constructor(
     // MARK: - Load Grid Data
 
     fun loadGrid() {
+        // 后台上报状态（与 iOS GridHomeViewModel 对齐）
+        statusReportTrigger.triggerIfNeeded()
+
         viewModelScope.launch {
             // 首次加载时显示 loading
             if (_uiState.value.friends.isEmpty()) {
@@ -83,7 +88,8 @@ class GridHomeViewModel @Inject constructor(
                     )
                 }
 
-                android.util.Log.d("GridHome", "📬 加载完成，好友: ${sortedFriends.size}, 会话映射: ${friendConversationMap.size}")
+                val availableList = sortedFriends.filter { it.isAvailable }.map { it.nickname }
+                android.util.Log.d("GridHome", "📬 加载完成，好友: ${sortedFriends.size}, 有空: $availableList, 会话映射: ${friendConversationMap.size}")
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
@@ -148,9 +154,8 @@ class GridHomeViewModel @Inject constructor(
     private fun calculateGridSize(count: Int): Int {
         return when {
             count <= 1 -> 1
-            count <= 4 -> 2
-            count <= 9 -> 3
-            else -> 4
+            count <= 2 -> 2
+            else -> 3
         }
     }
 
@@ -177,9 +182,8 @@ class GridHomeViewModel @Inject constructor(
 data class GridHomeUiState(
     val friends: List<FriendGridItem> = emptyList(),
     val gridSize: Int = 1,
-    val isLoading: Boolean = false,
+    val isLoading: Boolean = true,
     val isRefreshing: Boolean = false,
     val errorMessage: String? = null,
-    val unreadCounts: Map<String, Int> = emptyMap(),
-    val showScheduleSheet: Boolean = false
+    val unreadCounts: Map<String, Int> = emptyMap()
 )

@@ -1,13 +1,19 @@
 package com.youkong.feature.home.viewmodel
 
+import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.youkong.core.network.api.ScheduleApi
+import com.youkong.core.network.api.UserApi
+import com.youkong.core.network.model.AIReadyDetails
 import com.youkong.core.network.model.ScheduleGroup
 import com.youkong.core.network.model.ScheduleItem
 import com.youkong.core.network.model.UpdateScheduleItemRequest
+import com.youkong.core.network.model.UserSettingsRequest
+import com.youkong.core.permission.PermissionManager
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -33,7 +39,10 @@ object ScheduleChangeNotifier {
 
 @HiltViewModel
 class ScheduleTimelineViewModel @Inject constructor(
-    private val scheduleApi: ScheduleApi
+    private val scheduleApi: ScheduleApi,
+    private val userApi: UserApi,
+    private val permissionManager: PermissionManager,
+    @ApplicationContext private val appContext: Context
 ) : ViewModel() {
 
     companion object {
@@ -84,6 +93,88 @@ class ScheduleTimelineViewModel @Inject constructor(
                         isLoading = false
                     )
                 }
+            }
+        }
+
+        loadSettings()
+    }
+
+    // MARK: - AI Auto Predict Settings
+
+    fun loadSettings() {
+        viewModelScope.launch {
+            try {
+                val response = userApi.getUserSettings()
+                val settings = response.getOrNull() ?: return@launch
+
+                // 用本地权限状态覆盖服务器权限字段（消除竞态条件）
+                permissionManager.refreshPermissionState()
+                val permState = permissionManager.permissionState.value
+
+                val localDetails = AIReadyDetails(
+                    permLocation = permState.hasLocationPermission,
+                    permMotion = permState.hasActivityRecognitionPermission,
+                    permCalendar = permState.hasCalendarPermission,
+                    hasInvitedFriend = settings.aiReadyDetails?.hasInvitedFriend ?: false,
+                    hasVoiceSchedule = settings.aiReadyDetails?.hasVoiceSchedule ?: false,
+                )
+
+                val localAiReady = localDetails.permLocation
+                        && localDetails.permMotion
+                        && localDetails.permCalendar
+                        && localDetails.hasInvitedFriend
+                        && localDetails.hasVoiceSchedule
+
+                var autoPredictEnabled = settings.autoPredictEnabled
+
+                // 若开关打开但条件不满足 → 自动关闭
+                if (autoPredictEnabled && !localAiReady) {
+                    autoPredictEnabled = false
+                    disableAutoPredict()
+                }
+
+                _uiState.update {
+                    it.copy(
+                        autoPredictEnabled = autoPredictEnabled,
+                        aiReady = localAiReady,
+                        aiReadyDetails = localDetails,
+                    )
+                }
+
+                Log.d(TAG, "Settings loaded: autoPredict=$autoPredictEnabled, aiReady=$localAiReady")
+            } catch (e: Exception) {
+                Log.e(TAG, "加载设置失败: ${e.message}")
+            }
+        }
+    }
+
+    fun toggleAutoPredict() {
+        val currentState = _uiState.value
+        val newValue = !currentState.autoPredictEnabled
+
+        // 乐观更新
+        _uiState.update { it.copy(autoPredictEnabled = newValue, isTogglingAutoPredict = true) }
+
+        viewModelScope.launch {
+            try {
+                userApi.updateUserSettings(UserSettingsRequest(autoPredictEnabled = newValue))
+                _uiState.update { it.copy(isTogglingAutoPredict = false) }
+                Log.d(TAG, "Auto predict toggled: $newValue")
+            } catch (e: Exception) {
+                // 失败回滚
+                Log.e(TAG, "切换自动推测失败: ${e.message}")
+                _uiState.update { it.copy(autoPredictEnabled = !newValue, isTogglingAutoPredict = false) }
+            }
+        }
+    }
+
+    private fun disableAutoPredict() {
+        viewModelScope.launch {
+            try {
+                userApi.updateUserSettings(UserSettingsRequest(autoPredictEnabled = false))
+                Log.d(TAG, "Auto predict disabled (conditions not met)")
+            } catch (e: Exception) {
+                Log.e(TAG, "静默关闭自动推测失败: ${e.message}")
             }
         }
     }
@@ -232,11 +323,16 @@ class ScheduleTimelineViewModel @Inject constructor(
                 editHighlight = item.highlight ?: false,
                 editStartTime = item.startTime,
                 editEndTime = item.endTime,
+                editRemindBefore = item.remindBefore ?: 0,
                 editConflictItems = emptyList(),
                 showEditSheet = true,
                 isSavingEdit = false,
             )
         }
+    }
+
+    fun updateEditRemindBefore(minutes: Int) {
+        _uiState.update { it.copy(editRemindBefore = minutes) }
     }
 
     fun adjustStartTime(byMinutes: Int) {
@@ -350,8 +446,22 @@ class ScheduleTimelineViewModel @Inject constructor(
                         emoji = state.editEmoji,
                         status = state.editStatus,
                         highlight = state.editHighlight,
+                        remindBefore = state.editRemindBefore,
                     )
                 )
+                // 清理旧提醒
+                VoiceScheduleViewModel.removeCalendarReminder(appContext, date, item.startTime)
+                // 创建新提醒
+                if (state.editRemindBefore > 0) {
+                    val updatedItem = ScheduleItem(
+                        startTime = state.editStartTime,
+                        endTime = state.editEndTime,
+                        emoji = state.editEmoji,
+                        status = state.editStatus,
+                        remindBefore = state.editRemindBefore,
+                    )
+                    VoiceScheduleViewModel.scheduleReminders(appContext, listOf(updatedItem), date)
+                }
                 _uiState.update {
                     it.copy(showEditSheet = false, editingItem = null, isSavingEdit = false)
                 }
@@ -386,6 +496,11 @@ class ScheduleTimelineViewModel @Inject constructor(
         val state = _uiState.value
         val item = state.deletingItem ?: return
         val date = state.deletingGroupDate ?: return
+
+        // 清理系统提醒
+        if ((item.remindBefore ?: 0) > 0) {
+            VoiceScheduleViewModel.removeCalendarReminder(appContext, date, item.startTime)
+        }
 
         // 乐观删除：先从本地移除
         _uiState.update { s ->
@@ -482,8 +597,14 @@ data class ScheduleTimelineUiState(
     val editEndTime: String = "",
     val editConflictItems: List<ScheduleItem> = emptyList(),
     val isSavingEdit: Boolean = false,
+    val editRemindBefore: Int = 0,
     // 删除确认状态
     val deletingItem: ScheduleItem? = null,
     val deletingGroupDate: String? = null,
     val showDeleteConfirm: Boolean = false,
+    // AI 自动推测
+    val autoPredictEnabled: Boolean = false,
+    val aiReady: Boolean = false,
+    val aiReadyDetails: AIReadyDetails? = null,
+    val isTogglingAutoPredict: Boolean = false,
 )

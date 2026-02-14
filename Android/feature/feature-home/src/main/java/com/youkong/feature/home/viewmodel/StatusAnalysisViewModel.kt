@@ -137,7 +137,17 @@ class StatusAnalysisViewModel @Inject constructor(
             location = locationData?.let {
                 LocationDataRequest(
                     placeType = "unknown", // 简化处理，暂不推断位置类型
-                    atPlaceSinceMinutes = 0
+                    atPlaceSinceMinutes = 0,
+                    city = it.city,
+                )
+            },
+            extendedLocation = locationData?.let {
+                ExtendedLocationDataRequest(
+                    placeType = "unknown",
+                    placeName = it.placeName,
+                    atPlaceSinceMinutes = 0,
+                    latitude = it.latitude,
+                    longitude = it.longitude,
                 )
             },
             battery = BatteryDataRequest(

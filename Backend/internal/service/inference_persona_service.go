@@ -359,6 +359,135 @@ func ExtractCurrentSlotDistribution(statsJSON string, now time.Time) string {
 		weekdays[weekday], hour, hour+1, strings.Join(parts, ", "))
 }
 
+// GenerateStructuredSchedule 从用户历史数据生成结构化时间表模板
+func (s *InferencePersonaService) GenerateStructuredSchedule(ctx context.Context, userID string) (*model.StructuredScheduleTemplate, error) {
+	// 读取最近 200 条用户状态记忆
+	memories, err := s.memoryRepo.GetRecentUserStatusMemory(ctx, userID, 200)
+	if err != nil {
+		return nil, fmt.Errorf("get recent status memory: %w", err)
+	}
+	if len(memories) < 10 {
+		return nil, nil // 数据不足，不生成
+	}
+
+	// 按 hour + isWeekend 分桶
+	type bucketKey struct {
+		Hour      int
+		IsWeekend bool
+	}
+	type activityCount struct {
+		Emoji string
+		Count int
+	}
+	buckets := make(map[bucketKey]map[string]*activityCount) // key -> activity -> count
+
+	for _, m := range memories {
+		// 只用用户确认的数据
+		if m.Source == "ai_auto" {
+			continue
+		}
+		hour := m.CreatedAt.Hour()
+		weekday := m.CreatedAt.Weekday()
+		isWeekend := weekday == time.Saturday || weekday == time.Sunday
+
+		key := bucketKey{Hour: hour, IsWeekend: isWeekend}
+		if buckets[key] == nil {
+			buckets[key] = make(map[string]*activityCount)
+		}
+		activity := normalizeActivity(m.Status)
+		if buckets[key][activity] == nil {
+			buckets[key][activity] = &activityCount{Emoji: m.Emoji}
+		}
+		buckets[key][activity].Count++
+		if m.Emoji != "" {
+			buckets[key][activity].Emoji = m.Emoji
+		}
+	}
+
+	// 每个桶取最高频活动，count >= 2 时生成模板
+	var weekdaySlots, weekendSlots []model.TimeSlotTemplate
+	for key, activities := range buckets {
+		var bestActivity string
+		var bestCount int
+		var bestEmoji string
+		totalCount := 0
+		for act, ac := range activities {
+			totalCount += ac.Count
+			if ac.Count > bestCount {
+				bestCount = ac.Count
+				bestActivity = act
+				bestEmoji = ac.Emoji
+			}
+		}
+		if bestCount < 2 {
+			continue
+		}
+		confidence := float64(bestCount) / float64(totalCount)
+		if confidence < 0.3 {
+			continue
+		}
+		slot := model.TimeSlotTemplate{
+			StartHour:  key.Hour,
+			EndHour:    key.Hour + 1,
+			Emoji:      bestEmoji,
+			Activity:   bestActivity,
+			Confidence: math.Round(confidence*100) / 100,
+			Samples:    bestCount,
+		}
+		if key.IsWeekend {
+			weekendSlots = append(weekendSlots, slot)
+		} else {
+			weekdaySlots = append(weekdaySlots, slot)
+		}
+	}
+
+	// 合并相邻同活动时段
+	weekdaySlots = mergeAdjacentSlots(weekdaySlots)
+	weekendSlots = mergeAdjacentSlots(weekendSlots)
+
+	if len(weekdaySlots) == 0 && len(weekendSlots) == 0 {
+		return nil, nil
+	}
+
+	return &model.StructuredScheduleTemplate{
+		WeekdayTemplate: weekdaySlots,
+		WeekendTemplate: weekendSlots,
+		GeneratedAt:     time.Now().Format(time.RFC3339),
+	}, nil
+}
+
+// mergeAdjacentSlots 合并相邻且相同活动的时段
+func mergeAdjacentSlots(slots []model.TimeSlotTemplate) []model.TimeSlotTemplate {
+	if len(slots) <= 1 {
+		return slots
+	}
+	// 按 StartHour 排序
+	for i := 0; i < len(slots)-1; i++ {
+		for j := i + 1; j < len(slots); j++ {
+			if slots[j].StartHour < slots[i].StartHour {
+				slots[i], slots[j] = slots[j], slots[i]
+			}
+		}
+	}
+	var merged []model.TimeSlotTemplate
+	current := slots[0]
+	for i := 1; i < len(slots); i++ {
+		if slots[i].StartHour == current.EndHour && slots[i].Activity == current.Activity {
+			// 合并：扩展 EndHour，取加权平均 confidence
+			totalSamples := current.Samples + slots[i].Samples
+			current.Confidence = (current.Confidence*float64(current.Samples) + slots[i].Confidence*float64(slots[i].Samples)) / float64(totalSamples)
+			current.Confidence = math.Round(current.Confidence*100) / 100
+			current.Samples = totalSamples
+			current.EndHour = slots[i].EndHour
+		} else {
+			merged = append(merged, current)
+			current = slots[i]
+		}
+	}
+	merged = append(merged, current)
+	return merged
+}
+
 // ========== 辅助函数 ==========
 
 func addToDistribution(dist map[string]map[string]int, hour, activity string, weight int) {

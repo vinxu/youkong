@@ -1,7 +1,7 @@
 package com.youkong.core.network.di
 
+import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import com.youkong.core.network.BuildConfig
-import com.youkong.core.network.converter.SafeKotlinxSerializationConverterFactory
 import com.youkong.core.network.api.AgentApi
 import com.youkong.core.network.api.AuthApi
 import com.youkong.core.network.api.AvailabilityApi
@@ -78,8 +78,7 @@ object NetworkModule {
         return Retrofit.Builder()
             .baseUrl(BuildConfig.BASE_URL)
             .client(okHttpClient)
-            // 使用自定义 Converter，解决 R8 泛型类型擦除导致的反序列化崩溃
-            .addConverterFactory(SafeKotlinxSerializationConverterFactory.create(json, contentType))
+            .addConverterFactory(json.asConverterFactory(contentType))
             .build()
     }
 

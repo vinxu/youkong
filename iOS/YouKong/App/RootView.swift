@@ -23,9 +23,7 @@ private struct AppVersionInfo: Decodable {
 // MARK: - Onboarding Wow Phase
 
 enum OnboardingWowPhase: Equatable {
-    case inference
     case chat(emoji: String, activity: String)
-    case preview(emoji: String, status: String)
 }
 
 // MARK: - Root View
@@ -55,12 +53,6 @@ struct RootView: View {
                 } else if hasCompletedOnboarding {
                     // 已完成引导，直接进入主页面
                     MainTabView()
-                        #if DEBUG
-                        .onLongPressGesture(minimumDuration: 3) {
-                            // 长按 3 秒触发 Wow 链路（调试用）
-                            onboardingWowPhase = .inference
-                        }
-                        #endif
                         .task {
                             // 🔔 请求通知权限
                             await notificationManager.requestPermissionIfNeeded()
@@ -73,54 +65,53 @@ struct RootView: View {
                             await permissionManager.checkAllPermissions()
                             // 启动数据收集
                             startDataCollection()
+                            // 启动 15 分钟定时上报（与 Android 对齐）
+                            StatusReportManager.shared.startPeriodicReporting()
                             // 刷新未读消息 Badge
                             await notificationManager.refreshBadgeFromServer()
                             // 检查版本更新
                             await checkAppVersion()
                         }
-                } else if permissionManager.isChecking {
-                    // 正在检查权限状态
-                    ProgressView("检查权限...")
-                } else if permissionManager.status.allGranted {
-                    // 权限都已授权，启动数据收集并进入 Wow 链路
-                    Color.clear.task {
-                        hasCompletedOnboarding = true
-                        startDataCollection()
-                        onboardingWowPhase = .inference
-                    }
                 } else {
-                    // 显示完整引导流程（4屏）
-                    OnboardingView(isCompleted: $hasCompletedOnboarding)
-                        .onChange(of: hasCompletedOnboarding) { completed in
-                            if completed {
-                                startDataCollection()
-                                onboardingWowPhase = .inference
-                            }
+                    // 显示完整引导流程（3屏：欢迎→权限→综合画像）
+                    OnboardingView(
+                        isCompleted: $hasCompletedOnboarding,
+                        onProfileConfirm: { emoji, activity in
+                            startDataCollection()
+                            onboardingWowPhase = .chat(emoji: emoji, activity: activity)
                         }
+                    )
                 }
             } else {
                 LoginView()
             }
         }
         .task {
-            // APP 启动时检查权限状态
-            if authManager.isAuthenticated && !hasCompletedOnboarding {
-                await permissionManager.checkAllPermissions()
-            }
+            // 无需预检权限，引导流程中统一处理
         }
         .animation(.easeInOut, value: authManager.isAuthenticated)
         .animation(.easeInOut, value: hasCompletedOnboarding)
         .onChange(of: authManager.isAuthenticated) { isAuth in
-            if !isAuth {
+            if isAuth {
+                // 登录时立即上报（与 Android 对齐）
+                Task { await StatusReportManager.shared.reportStatus() }
+            } else {
                 WebSocketManager.shared.disconnect()
+                StatusReportManager.shared.stopPeriodicReporting()
             }
         }
         .onChange(of: scenePhase) { newPhase in
             guard authManager.isAuthenticated && hasCompletedOnboarding else { return }
             switch newPhase {
-            case .active, .background:
-                // 前台/后台切换时自动上报状态（带 60s 冷却）
+            case .active:
+                // 前台：上报 + 启动定时器
                 Task { await StatusReportManager.shared.reportIfNeeded() }
+                StatusReportManager.shared.startPeriodicReporting()
+            case .background:
+                // 后台：上报 + 停止定时器 + 调度后台刷新
+                Task { await StatusReportManager.shared.reportIfNeeded() }
+                StatusReportManager.shared.stopPeriodicReporting()
+                StatusReportManager.shared.scheduleBackgroundRefresh()
             default:
                 break
             }
@@ -169,39 +160,14 @@ struct RootView: View {
     @ViewBuilder
     private func wowPhaseView(phase: OnboardingWowPhase) -> some View {
         switch phase {
-        case .inference:
-            OnboardingInferenceView(
-                onConfirm: { emoji, activity in
-                    withAnimation {
-                        onboardingWowPhase = .chat(emoji: emoji, activity: activity)
-                    }
-                },
-                onSkip: {
-                    // 跳过到主页，不用动画（避免 MainTabView 被反复创建导致请求取消）
-                    onboardingWowPhase = nil
-                }
-            )
         case .chat(let emoji, let activity):
             OnboardingChatView(
                 inferredEmoji: emoji,
                 inferredActivity: activity,
                 onComplete: {
-                    withAnimation {
-                        onboardingWowPhase = .preview(emoji: emoji, status: activity)
-                    }
+                    onboardingWowPhase = nil
                 },
                 onSkip: {
-                    onboardingWowPhase = nil
-                }
-            )
-        case .preview(let emoji, let status):
-            OnboardingPreviewView(
-                emoji: emoji,
-                status: status,
-                onInvite: {
-                    // Share sheet is handled inside OnboardingPreviewView
-                },
-                onEnter: {
                     onboardingWowPhase = nil
                 }
             )

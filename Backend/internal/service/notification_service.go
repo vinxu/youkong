@@ -107,6 +107,11 @@ func (s *NotificationService) NotifyNewMessageToUser(ctx context.Context, recipi
 	return nil
 }
 
+// SendPushToUser 向指定用户发送推送通知
+func (s *NotificationService) SendPushToUser(ctx context.Context, userID, title, body string) error {
+	return s.NotifyNewMessageToUser(ctx, userID, title, body, nil)
+}
+
 // buildMessageNotification 构建消息通知
 func (s *NotificationService) buildMessageNotification(message *model.Message, sender *model.User) *push.Notification {
 	title := sender.Nickname

@@ -3,7 +3,7 @@ import SwiftUI
 struct PermissionRequestView: View {
     @StateObject private var permissionManager = PermissionManager.shared
     @State private var currentStep = 0
-    @Binding var isCompleted: Bool
+    let onComplete: () -> Void
 
     private let permissions = PermissionType.requiredPermissions
 
@@ -116,9 +116,9 @@ struct PermissionRequestView: View {
         VStack(spacing: 12) {
             if permissionManager.status.allGranted {
                 Button {
-                    isCompleted = true
+                    onComplete()
                 } label: {
-                    Text("[✓] 开始使用")
+                    Text("[→] 下一步")
                         .font(.system(size: 16, design: .monospaced))
                         .foregroundColor(.green)
                         .padding(.vertical, 12)
@@ -221,7 +221,7 @@ struct PermissionRequestView: View {
         if currentStep < permissions.count - 1 {
             currentStep += 1
         } else {
-            isCompleted = true
+            onComplete()
         }
     }
 
@@ -232,8 +232,8 @@ struct PermissionRequestView: View {
                 return
             }
         }
-        // 所有权限都已授权，直接完成
-        isCompleted = true
+        // 所有权限都已授权，currentStep 指向末尾，等用户点击"开始使用"
+        currentStep = permissions.count
     }
 }
 
@@ -347,5 +347,5 @@ extension PermissionType {
 }
 
 #Preview {
-    PermissionRequestView(isCompleted: .constant(false))
+    PermissionRequestView(onComplete: {})
 }

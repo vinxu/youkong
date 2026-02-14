@@ -169,3 +169,18 @@ func (r *MessageRepository) GetTotalUnreadCount(ctx context.Context, userID stri
 	err := r.db.GetContext(ctx, &count, query, userID, userID, userID)
 	return count, err
 }
+
+// UpdateMessageMetadataStatus 更新邀请消息的 metadata 中的 status 字段
+func (r *MessageRepository) UpdateMessageMetadataStatus(ctx context.Context, conversationID, bookingID, status string) error {
+	query := `
+		UPDATE messages
+		SET metadata = JSON_SET(COALESCE(metadata, '{}'), '$.status', ?)
+		WHERE conversation_id = ?
+		  AND type = 'SCHEDULE_INVITE'
+		  AND JSON_EXTRACT(metadata, '$.booking_id') = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+	_, err := r.db.ExecContext(ctx, query, status, conversationID, bookingID)
+	return err
+}

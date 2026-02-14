@@ -50,7 +50,7 @@ func NewScenarioEngine(
 		config.DaysToSimulate = 30
 	}
 	if config.Concurrency <= 0 {
-		config.Concurrency = 3
+		config.Concurrency = 10
 	}
 	return &ScenarioEngine{
 		voiceService: voiceService,
@@ -320,6 +320,8 @@ func (e *ScenarioEngine) runPersonaScenario(
 		today := e.simDate(day)
 		_ = e.scheduleRepo.CancelUserSchedulesByDate(ctx, testUserID, today)
 
+		// A/B/C 三场景串行执行（共享同一 testUserID，并行会互相干扰锁和 schedule）
+
 		// 场景 A: 一键生成（每天选 1-2 个时段）
 		if e.config.EnableOneClick && len(slots) > 0 {
 			slotIdx := rand.Intn(len(slots))
@@ -342,9 +344,6 @@ func (e *ScenarioEngine) runPersonaScenario(
 				convResults = append(convResults, result)
 			}
 		}
-
-		// 速率限制
-		time.Sleep(100 * time.Millisecond)
 	}
 
 	return ocResults, aiResults, convResults
@@ -374,13 +373,16 @@ func (e *ScenarioEngine) runOneClickTest(
 	// 构造传感器数据
 	sensorData := e.buildSensorData(slot)
 
+	// 构建推断上下文（注入用户画像，让 LLM 了解职业、作息等）
+	inferenceContext := e.buildOneClickContext(persona)
+
 	// 清理推断锁
 	e.redisClient.Del(ctx, fmt.Sprintf("infer:lock:%s", testUserID))
 
 	// Step 1: 调用 InferStatus（推断模式）
 	var inferEvents []model.V4Event
 	inferResp, err := e.voiceService.InferStatus(
-		ctx, testUserID, sensorData, "",
+		ctx, testUserID, sensorData, inferenceContext,
 		func(event *model.V4Event) {
 			inferEvents = append(inferEvents, *event)
 		},
@@ -806,6 +808,41 @@ func (e *ScenarioEngine) buildSensorData(slot *SimTimeSlot) *model.ExtendedStatu
 	}
 }
 
+// buildOneClickContext 为场景A构建推断上下文（注入用户画像信息）
+func (e *ScenarioEngine) buildOneClickContext(persona *SimPersona) string {
+	var sb strings.Builder
+
+	sb.WriteString("# 用户画像\n")
+	sb.WriteString(fmt.Sprintf("- occupation_type: %s\n", persona.OccupationType))
+	sb.WriteString(fmt.Sprintf("- occupation_name: %s\n", model.GetProfileTypeName(string(persona.OccupationType))))
+	sb.WriteString(fmt.Sprintf("- work_schedule: %s\n", persona.WorkSchedule))
+
+	if persona.LifestyleType != "" {
+		lifestyleNames := map[model.LifestyleType]string{
+			model.LifestyleEarlyBird: "早起型",
+			model.LifestyleNightOwl:  "夜猫子",
+			model.LifestyleBalanced:  "规律型",
+		}
+		if name, ok := lifestyleNames[persona.LifestyleType]; ok {
+			sb.WriteString(fmt.Sprintf("- lifestyle_type: %s\n", name))
+		}
+	}
+
+	if persona.City != "" {
+		sb.WriteString(fmt.Sprintf("- city: %s\n", persona.City))
+	}
+
+	// 为特殊职业添加推断提示
+	if persona.WorkSchedule == model.WorkScheduleShift {
+		sb.WriteString(fmt.Sprintf("- 注意: 该用户是轮班制工作者(%s)，深夜/凌晨在工作地点可能是在值班工作，而非睡觉\n", persona.Name))
+	}
+	if persona.OccupationType == model.OccupationStudent {
+		sb.WriteString("- 注意: 该用户是学生，在图书馆/学校+屏幕不活跃+专注模式 = 学习/自习\n")
+	}
+
+	return sb.String()
+}
+
 // simDate 获取模拟日期
 func (e *ScenarioEngine) simDate(day int) time.Time {
 	base := time.Now()
@@ -1141,16 +1178,16 @@ func GenerateScenarioReport(report *ScenarioFullReport) string {
 	}
 	sb.WriteString("\n")
 
-	// 失败案例（取 top 10）
+	// 失败案例（场景A取前30，场景B取前15，场景C取前5）
 	sb.WriteString("## 5. 失败案例\n\n")
-	failCount := 0
+	failCountA := 0
 
 	for _, r := range report.OneClickResults {
-		if failCount >= 10 {
+		if failCountA >= 30 {
 			break
 		}
 		if !r.Pass {
-			failCount++
+			failCountA++
 			sb.WriteString(fmt.Sprintf("### [场景A] %s Day%d %02d:00\n", r.PersonaID, r.Day, r.Hour))
 			sb.WriteString(fmt.Sprintf("- 推断: %s %s\n", r.Emoji, r.Activity))
 			sb.WriteString(fmt.Sprintf("- 期望关键词: %s\n", strings.Join(r.ExpectedKeywords, "/")))
@@ -1163,12 +1200,13 @@ func GenerateScenarioReport(report *ScenarioFullReport) string {
 		}
 	}
 
+	failCountB := 0
 	for _, r := range report.AutoInferResults {
-		if failCount >= 10 {
+		if failCountB >= 15 {
 			break
 		}
 		if !r.Pass {
-			failCount++
+			failCountB++
 			sb.WriteString(fmt.Sprintf("### [场景B] %s Day%d %s\n", r.PersonaID, r.Day, r.SubCase))
 			sb.WriteString(fmt.Sprintf("- 推断: %s\n", r.Activity))
 			sb.WriteString(fmt.Sprintf("- 触发=%v 锁=%v 集成=%v\n",
@@ -1180,12 +1218,13 @@ func GenerateScenarioReport(report *ScenarioFullReport) string {
 		}
 	}
 
+	failCountC := 0
 	for _, r := range report.ConversationResults {
-		if failCount >= 10 {
+		if failCountC >= 5 {
 			break
 		}
 		if !r.Pass {
-			failCount++
+			failCountC++
 			sb.WriteString(fmt.Sprintf("### [场景C] %s Day%d %s\n", r.PersonaID, r.Day, r.TemplateID))
 			sb.WriteString(fmt.Sprintf("- 创建=%v 时间=%v 事件=%v item=%d/%d\n",
 				r.ScheduleCreated, r.TimeCorrect, r.EventSequence, r.ItemCount, r.ExpectedCount))
@@ -1196,7 +1235,7 @@ func GenerateScenarioReport(report *ScenarioFullReport) string {
 		}
 	}
 
-	if failCount == 0 {
+	if failCountA+failCountB+failCountC == 0 {
 		sb.WriteString("无失败案例 ✅\n\n")
 	}
 
