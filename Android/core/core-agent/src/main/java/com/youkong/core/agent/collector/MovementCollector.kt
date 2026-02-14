@@ -5,8 +5,6 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import com.google.android.gms.location.ActivityRecognition
-import com.google.android.gms.location.ActivityRecognitionClient
 import com.google.android.gms.location.DetectedActivity
 import com.youkong.core.agent.model.MovementData
 import com.youkong.core.agent.model.MovementType
@@ -27,10 +25,6 @@ import kotlin.coroutines.resume
 class MovementCollector @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
-    private val activityRecognitionClient: ActivityRecognitionClient by lazy {
-        ActivityRecognition.getClient(context)
-    }
-
     private val sensorManager: SensorManager by lazy {
         context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     }
@@ -114,33 +108,71 @@ class MovementCollector @Inject constructor(
     }
 
     /**
-     * 请求活动更新
+     * 请求活动更新 - 使用步数传感器推断运动状态
+     * Activity Recognition API 需要 BroadcastReceiver，这里用加速度传感器做轻量检测
      */
     private suspend fun requestActivityUpdate(): DetectedActivity? {
-        return suspendCancellableCoroutine { continuation ->
-            try {
-                // 使用 Activity Transition API 获取当前活动
-                // 注意：这是简化实现，实际应该注册 PendingIntent 接收更新
-                val task = activityRecognitionClient.requestActivityUpdates(
-                    0L, // 立即
-                    android.app.PendingIntent.getBroadcast(
-                        context,
-                        0,
-                        android.content.Intent(),
-                        android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_NO_CREATE
-                    )
-                )
-
-                // 由于 Activity Recognition 是异步的，这里返回缓存值
-                if (continuation.isActive) {
-                    continuation.resume(lastDetectedActivity)
+        val stepSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+        if (stepSensor != null) {
+            // 用步数检测器：3秒内有步数事件 → walking，否则 → stationary
+            val hasSteps = withTimeoutOrNull(3000L) {
+                suspendCancellableCoroutine<Boolean> { cont ->
+                    val listener = object : SensorEventListener {
+                        override fun onSensorChanged(event: SensorEvent) {
+                            sensorManager.unregisterListener(this)
+                            if (cont.isActive) cont.resume(true)
+                        }
+                        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+                    }
+                    sensorManager.registerListener(listener, stepSensor, SensorManager.SENSOR_DELAY_FASTEST)
+                    cont.invokeOnCancellation { sensorManager.unregisterListener(listener) }
                 }
-            } catch (e: Exception) {
-                if (continuation.isActive) {
-                    continuation.resume(null)
+            } ?: false
+
+            val activity = if (hasSteps) {
+                DetectedActivity(DetectedActivity.WALKING, 80)
+            } else {
+                DetectedActivity(DetectedActivity.STILL, 80)
+            }
+            updateDetectedActivity(activity)
+            return activity
+        }
+
+        // 回退：用加速度传感器判断
+        val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        if (accelerometer != null) {
+            val accelMag = withTimeoutOrNull(2000L) {
+                suspendCancellableCoroutine<Float?> { cont ->
+                    val listener = object : SensorEventListener {
+                        override fun onSensorChanged(event: SensorEvent) {
+                            sensorManager.unregisterListener(this)
+                            val mag = Math.sqrt(
+                                (event.values[0] * event.values[0] +
+                                 event.values[1] * event.values[1] +
+                                 event.values[2] * event.values[2]).toDouble()
+                            ).toFloat()
+                            if (cont.isActive) cont.resume(mag)
+                        }
+                        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+                    }
+                    sensorManager.registerListener(listener, accelerometer, SensorManager.SENSOR_DELAY_NORMAL)
+                    cont.invokeOnCancellation { sensorManager.unregisterListener(listener) }
                 }
             }
+
+            if (accelMag != null) {
+                // 重力约 9.8，超过 11 认为在运动中
+                val activity = if (accelMag > 11f) {
+                    DetectedActivity(DetectedActivity.WALKING, 60)
+                } else {
+                    DetectedActivity(DetectedActivity.STILL, 60)
+                }
+                updateDetectedActivity(activity)
+                return activity
+            }
         }
+
+        return lastDetectedActivity
     }
 
     /**

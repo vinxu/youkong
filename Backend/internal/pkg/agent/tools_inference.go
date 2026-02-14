@@ -438,7 +438,24 @@ func gatherDeviceSignals(ctx context.Context, deps *InferenceToolDeps) map[strin
 	}
 
 	if sensorData.Movement != nil {
-		result["movement"] = sensorData.Movement
+		mv := sensorData.Movement
+		// 当客户端运动类型为 unknown 时，从位置历史计算速度做兜底
+		if mv.MovementType == "" || mv.MovementType == "unknown" {
+			speed := estimateSpeedFromLocationHistory(ctx, deps.RedisClient, deps.UserID)
+			if speed > 0 {
+				switch {
+				case speed > 10.0: // >10 km/h → 开车/乘车
+					mv.MovementType = "driving"
+					mv.IsMoving = true
+					fmt.Printf("[运动兜底] user=%s speed=%.1fkm/h → driving\n", deps.UserID, speed)
+				case speed > 3.0: // >3 km/h → 步行/骑行
+					mv.MovementType = "walking"
+					mv.IsMoving = true
+					fmt.Printf("[运动兜底] user=%s speed=%.1fkm/h → walking\n", deps.UserID, speed)
+				}
+			}
+		}
+		result["movement"] = mv
 	}
 	if sensorData.Calendar != nil {
 		result["calendar"] = sensorData.Calendar

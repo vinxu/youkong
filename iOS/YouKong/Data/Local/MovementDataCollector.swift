@@ -131,7 +131,25 @@ class MovementDataCollector: ObservableObject {
         isMonitoring = true
         lastStationaryTime = Date()
 
-        // 监控运动活动
+        // 立即查询最近 5 分钟的活动历史，获取初始运动类型
+        let now = Date()
+        let fiveMinutesAgo = now.addingTimeInterval(-300)
+        activityManager.queryActivityStarting(from: fiveMinutesAgo, to: now, to: .main) { [weak self] activities, error in
+            guard let self = self else { return }
+            if let activities = activities, let lastActivity = activities.last {
+                let type = self.mapActivityToMovementType(lastActivity)
+                print("[Movement] 初始活动类型(历史查询): \(type.rawValue)")
+                self.currentMovementType = type
+                if type == .stationary {
+                    self.lastStationaryTime = lastActivity.startDate
+                }
+                self.updateStatus()
+            } else if let error = error {
+                print("[Movement] 查询历史活动失败: \(error.localizedDescription)")
+            }
+        }
+
+        // 监控运动活动（实时更新）
         activityManager.startActivityUpdates(to: .main) { [weak self] activity in
             guard let self = self, let activity = activity else { return }
 
@@ -171,11 +189,13 @@ class MovementDataCollector: ObservableObject {
             return .noPermission
         }
 
-        // 如果没有在监控，尝试同步获取一次
+        // 如果没有在监控，启动监控（会触发历史查询获取初始值）
         if !isMonitoring {
-            print("[Movement] Not monitoring, returning cached status: \(currentStatus)")
+            print("[Movement] Not monitoring, starting monitoring...")
+            startMonitoring()
         }
 
+        print("[Movement] getCurrentStatus: type=\(currentMovementType.rawValue)")
         return currentStatus
     }
 
@@ -184,6 +204,11 @@ class MovementDataCollector: ObservableObject {
         guard isAuthorized else {
             print("[Movement] Not authorized")
             return .noPermission
+        }
+
+        // 如果运动类型仍为 unknown，查询最近 5 分钟的活动历史
+        if currentMovementType == .unknown {
+            await queryRecentActivity()
         }
 
         let stepsToday = await getTodaySteps()
@@ -210,11 +235,30 @@ class MovementDataCollector: ObservableObject {
             self.currentStatus = status
         }
 
-        print("[Movement] Fetched status: steps=\(stepsToday), moving=\(isMoving)")
+        print("[Movement] Fetched status: type=\(currentMovementType.rawValue), steps=\(stepsToday), moving=\(isMoving)")
         return status
     }
 
     // MARK: - Private Methods
+
+    /// 查询最近 5 分钟活动历史，更新 currentMovementType
+    private func queryRecentActivity() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let now = Date()
+            let fiveMinutesAgo = now.addingTimeInterval(-300)
+            activityManager.queryActivityStarting(from: fiveMinutesAgo, to: now, to: .main) { [weak self] activities, error in
+                if let activities = activities, let lastActivity = activities.last, let self = self {
+                    let type = self.mapActivityToMovementType(lastActivity)
+                    print("[Movement] 活动类型(实时查询): \(type.rawValue)")
+                    self.currentMovementType = type
+                    if type == .stationary {
+                        self.lastStationaryTime = lastActivity.startDate
+                    }
+                }
+                continuation.resume()
+            }
+        }
+    }
 
     private func updateStatus() {
         Task {

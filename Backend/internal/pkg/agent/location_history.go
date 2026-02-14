@@ -171,3 +171,56 @@ func haversineDistance(lat1, lng1, lat2, lng2 float64) float64 {
 func degToRad(deg float64) float64 {
 	return deg * math.Pi / 180
 }
+
+// estimateSpeedFromLocationHistory 从最近的位置历史计算移动速度（km/h）
+// estimateSpeedFromLocationHistory 从最近位置历史估算移动速度（km/h）
+// 要求两点间隔 ≥30秒（过滤 GPS 漂移），速度上限 200km/h（过滤异常值）
+func estimateSpeedFromLocationHistory(ctx context.Context, redisClient *tencent.RedisClient, userID string) float64 {
+	if redisClient == nil {
+		return 0
+	}
+	key := locHistKeyPrefix + userID
+	// 取最近 10 条（扩大范围以找到间隔足够的点对）
+	entries, err := redisClient.LRange(ctx, key, 0, 9)
+	if err != nil || len(entries) < 2 {
+		return 0
+	}
+
+	var points []LocationHistoryEntry
+	tenMinAgo := time.Now().Add(-10 * time.Minute).Unix()
+	for _, raw := range entries {
+		var e LocationHistoryEntry
+		if json.Unmarshal([]byte(raw), &e) != nil {
+			continue
+		}
+		if e.Timestamp >= tenMinAgo {
+			points = append(points, e)
+		}
+	}
+	if len(points) < 2 {
+		return 0
+	}
+
+	// 找间隔 ≥30秒的点对，取最大合理速度
+	const minGapSec = 30.0  // 最小时间间隔（秒）
+	const maxSpeedCap = 200.0 // 速度上限（km/h），超过视为 GPS 异常
+	var bestSpeed float64
+
+	for i := 0; i < len(points)-1; i++ {
+		for j := i + 1; j < len(points); j++ {
+			dt := math.Abs(float64(points[i].Timestamp - points[j].Timestamp))
+			if dt < minGapSec {
+				continue // 间隔太短，GPS 漂移噪声大
+			}
+			dist := haversineDistance(points[i].Lat, points[i].Lng, points[j].Lat, points[j].Lng)
+			speedKmh := (dist / dt) * 3.6
+			if speedKmh > maxSpeedCap {
+				continue // 超过 200km/h，视为 GPS 异常
+			}
+			if speedKmh > bestSpeed {
+				bestSpeed = speedKmh
+			}
+		}
+	}
+	return bestSpeed
+}
