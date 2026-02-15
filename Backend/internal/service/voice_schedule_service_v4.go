@@ -3400,11 +3400,12 @@ func (s *VoiceScheduleServiceV4) enrichSensorLocation(ctx context.Context, userI
 		return
 	}
 
-	// 覆写客户端 place_type 为服务端分类结果
+	// 覆写客户端 place_type 为服务端分类结果（两个字段都覆写，保持一致）
 	serverType := model.PlaceType(classification.PlaceType)
 	if data.ExtendedLocation != nil {
 		data.ExtendedLocation.PlaceType = serverType
-	} else if data.Location != nil {
+	}
+	if data.Location != nil {
 		data.Location.PlaceType = serverType
 	}
 }

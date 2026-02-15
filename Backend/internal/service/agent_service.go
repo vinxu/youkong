@@ -1839,6 +1839,24 @@ func (s *AgentService) PersistCityFromExtendedReport(ctx context.Context, userID
 		return
 	}
 
+	// 用服务端聚类覆写客户端 place_type（客户端可能错误分类为 leisure）
+	enrichedLocation := *req.Location
+	if s.locationService != nil {
+		var lat, lng float64
+		if req.ExtendedLocation != nil {
+			lat, lng = req.ExtendedLocation.Latitude, req.ExtendedLocation.Longitude
+		} else {
+			lat, lng = req.Location.Latitude, req.Location.Longitude
+		}
+		if lat != 0 || lng != 0 {
+			if result := s.locationService.ClassifyLocation(ctx, userID, lat, lng); result != nil {
+				if classification, ok := result.(*LocationClassification); ok && classification.PlaceType != "" && classification.PlaceType != "first_visit" {
+					enrichedLocation.PlaceType = model.PlaceType(classification.PlaceType)
+				}
+			}
+		}
+	}
+
 	key := fmt.Sprintf(keyUserStatus, userID)
 	data, err := s.redisClient.Get(ctx, key)
 	if err != nil {
@@ -1848,7 +1866,7 @@ func (s *AgentService) PersistCityFromExtendedReport(ctx context.Context, userID
 			UpdatedAt: time.Now(),
 			City:      req.Location.City,
 		}
-		status.Location = *req.Location
+		status.Location = enrichedLocation
 		if req.Screen != nil {
 			status.Screen = *req.Screen
 		}
@@ -1857,15 +1875,13 @@ func (s *AgentService) PersistCityFromExtendedReport(ctx context.Context, userID
 		return
 	}
 
-	// key 已存在，更新 City 字段
+	// key 已存在，更新 City 和 Location
 	var status model.UserRealtimeStatus
 	if err := json.Unmarshal([]byte(data), &status); err != nil {
 		return
 	}
 	status.City = req.Location.City
-	if req.Location != nil {
-		status.Location = *req.Location
-	}
+	status.Location = enrichedLocation
 	newData, _ := json.Marshal(status)
 	_ = s.redisClient.Set(ctx, key, newData, statusTTL)
 }
