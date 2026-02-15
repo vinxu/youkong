@@ -45,7 +45,7 @@ class PermissionSetupViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         permissionState = state,
-                        isComplete = state.allCorePermissionsGranted,
+                        isComplete = state.hasBasicPermissions,
                     )
                 }
             }

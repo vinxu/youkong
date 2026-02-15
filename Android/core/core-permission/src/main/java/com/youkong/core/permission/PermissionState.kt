@@ -10,10 +10,16 @@ data class PermissionState(
     val hasUsageStatsPermission: Boolean = false,
 ) {
     /**
-     * 是否所有核心权限都已授权
+     * 基础权限是否已授权（位置、运动、日历 — 用于引导页判断）
+     */
+    val hasBasicPermissions: Boolean
+        get() = hasLocationPermission && hasActivityRecognitionPermission && hasCalendarPermission
+
+    /**
+     * 是否所有权限都已授权（含 USAGE_STATS — 用于设置页权限管理）
      */
     val allCorePermissionsGranted: Boolean
-        get() = hasLocationPermission && hasActivityRecognitionPermission && hasCalendarPermission && hasUsageStatsPermission
+        get() = hasBasicPermissions && hasUsageStatsPermission
 
     /**
      * 获取缺失的权限列表

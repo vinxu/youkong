@@ -50,7 +50,7 @@ class MainViewModel @Inject constructor(
             permissionManager.permissionState.collect { permissionState ->
                 _uiState.update {
                     it.copy(
-                        hasRequiredPermissions = permissionState.allCorePermissionsGranted,
+                        hasRequiredPermissions = permissionState.hasBasicPermissions,
                     )
                 }
             }
