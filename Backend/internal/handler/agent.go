@@ -53,6 +53,7 @@ type AgentHandler struct {
 	inferencePersonaService *service.InferencePersonaService // Persona 生成服务（测试用）
 	memoryRepo              *repository.MemoryRepository      // Memory repo（persona 查询）
 	scenarioEngine          *service.ScenarioEngine           // 场景测试引擎
+	sceneService            *service.SceneService             // 像素场景生成服务
 	// STS 配置
 	stsSecretID  string
 	stsSecretKey string
@@ -381,6 +382,9 @@ func (h *AgentHandler) ReportStatus(c *gin.Context) {
 
 	// 自动推测：如果用户开启了自动推测且当前无状态，用推断结果填充 schedule
 	go h.maybeAutoFillSchedule(userID, inference)
+
+	// 异步生成像素场景+互动选项（不阻塞推断返回）
+	go h.enrichInferenceScene(userID, inference)
 
 	response.Success(c, gin.H{
 		"success":  true,
@@ -3201,6 +3205,26 @@ func (h *AgentHandler) TestInferenceABReport(c *gin.Context) {
 // SetScenarioEngine 设置场景测试引擎
 func (h *AgentHandler) SetScenarioEngine(engine *service.ScenarioEngine) {
 	h.scenarioEngine = engine
+}
+
+// SetSceneService 设置像素场景生成服务
+func (h *AgentHandler) SetSceneService(ss *service.SceneService) {
+	h.sceneService = ss
+}
+
+// enrichInferenceScene 推断完成后异步生成像素场景+互动选项
+func (h *AgentHandler) enrichInferenceScene(userID string, inference *model.CurrentStatusInference) {
+	if h.sceneService == nil || inference == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := h.sceneService.GenerateScene(ctx, userID, inference)
+	if err != nil {
+		fmt.Printf("[场景] 生成失败 user=%s error=%v\n", userID, err)
+	}
 }
 
 // TestScenarioFull 运行完整场景测试（30 画像 × 30 天）

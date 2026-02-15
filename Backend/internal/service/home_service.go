@@ -13,11 +13,13 @@ import (
 
 // HomeService 首页服务
 type HomeService struct {
-	friendshipRepo *repository.FriendshipRepository
-	userRepo       *repository.UserRepository
-	memoryRepo     *repository.MemoryRepository
-	scheduleRepo   *repository.ScheduleRepository
-	redisClient    *tencent.RedisClient
+	friendshipRepo  *repository.FriendshipRepository
+	userRepo        *repository.UserRepository
+	memoryRepo      *repository.MemoryRepository
+	scheduleRepo    *repository.ScheduleRepository
+	redisClient     *tencent.RedisClient
+	sceneService    *SceneService
+	interactionService *InteractionService
 }
 
 // NewHomeService 创建首页服务
@@ -29,6 +31,16 @@ func NewHomeService(friendshipRepo *repository.FriendshipRepository, userRepo *r
 		scheduleRepo:   scheduleRepo,
 		redisClient:    redisClient,
 	}
+}
+
+// SetSceneService 设置场景服务
+func (s *HomeService) SetSceneService(ss *SceneService) {
+	s.sceneService = ss
+}
+
+// SetInteractionService 设置互动服务
+func (s *HomeService) SetInteractionService(is *InteractionService) {
+	s.interactionService = is
 }
 
 // FriendGridItem 宫格中的好友项
@@ -46,6 +58,16 @@ type FriendGridItem struct {
 	GiphyQuery    string `json:"giphy_query,omitempty"` // Giphy 搜索词（客户端可自行搜索）
 	UseGif        bool   `json:"use_gif"`               // 是否使用 GIF 显示模式
 	NeedsSchedule bool   `json:"needs_schedule"`        // 自己当前无行程，需要设置
+	// 像素场景
+	ScenePose       string                   `json:"scene_pose,omitempty"`
+	SceneArms       string                   `json:"scene_arms,omitempty"`
+	SceneExpression string                   `json:"scene_expression,omitempty"`
+	SceneProp       string                   `json:"scene_prop,omitempty"`
+	SceneSurface    string                   `json:"scene_surface,omitempty"`
+	// AI 生成的互动选项
+	Interactions    []model.InteractionOption `json:"interactions,omitempty"`
+	// 今日互动计数
+	InteractionCount int                     `json:"interaction_count"`
 }
 
 // GridResponse 宫格响应
@@ -183,7 +205,10 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 		}
 	}
 
-	// 7. 计算宫格大小
+	// 8. 填充场景+互动数据
+	s.enrichFriendsWithScene(ctx, friends)
+
+	// 9. 计算宫格大小
 	gridSize := calculateGridSize(len(friends))
 
 	return &GridResponse{
@@ -333,4 +358,49 @@ func (s *HomeService) getUserScheduleStatus(ctx context.Context, userIDs []strin
 	}
 
 	return
+}
+
+// enrichFriendsWithScene 为好友列表填充场景+互动数据
+func (s *HomeService) enrichFriendsWithScene(ctx context.Context, friends []FriendGridItem) {
+	if len(friends) == 0 {
+		return
+	}
+
+	// 收集所有好友 ID
+	friendIDs := make([]string, 0, len(friends))
+	for _, f := range friends {
+		friendIDs = append(friendIDs, f.UserID)
+	}
+
+	// 批量获取场景缓存
+	sceneMap := make(map[string]*model.SceneEnrichment)
+	if s.sceneService != nil {
+		sceneMap = s.sceneService.GetCachedScenes(ctx, friendIDs)
+	}
+
+	// 批量获取今日互动计数
+	interactionCountMap := make(map[string]int)
+	if s.interactionService != nil {
+		if counts, err := s.interactionService.GetTodayCounts(ctx, friendIDs); err == nil {
+			interactionCountMap = counts
+		}
+	}
+
+	// 填充到每个好友项
+	for i := range friends {
+		uid := friends[i].UserID
+
+		if scene, ok := sceneMap[uid]; ok {
+			friends[i].ScenePose = scene.Scene.Pose
+			friends[i].SceneArms = scene.Scene.Arms
+			friends[i].SceneExpression = scene.Scene.Expression
+			friends[i].SceneProp = scene.Scene.Prop
+			friends[i].SceneSurface = scene.Scene.Surface
+			friends[i].Interactions = scene.Interactions
+		}
+
+		if count, ok := interactionCountMap[uid]; ok {
+			friends[i].InteractionCount = count
+		}
+	}
 }

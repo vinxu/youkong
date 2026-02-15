@@ -221,6 +221,19 @@ func main() {
 	bookingService := service.NewBookingService(bookingRepo, scheduleRepo, conversationService, userRepo, notificationService, messageRepo)
 	voiceScheduleServiceV4.SetBookingService(bookingService)
 
+	// 初始化互动服务
+	interactionRepo := repository.NewInteractionRepository(db)
+	interactionService := service.NewInteractionService(interactionRepo, friendshipRepo, userRepo, notificationService)
+	homeService.SetInteractionService(interactionService)
+
+	// 初始化场景服务（像素人+AI互动）
+	var sceneService *service.SceneService
+	if cfg.LLM.APIKey != "" {
+		sceneService = service.NewSceneService(memoryRepo, userRepo, cfg.LLM.APIKey, cfg.LLM.Model, redisClient)
+		homeService.SetSceneService(sceneService)
+		logger.Info("场景服务初始化成功（像素人+AI互动）")
+	}
+
 	// 初始化 Agent Chat Service（Tool Agent 框架）
 	var agentChatService *service.AgentChatService
 	if cfg.LLM.APIKey != "" {
@@ -260,6 +273,9 @@ func main() {
 		agentHandler.SetInferencePersonaService(testPersonaService, memoryRepo)
 	}
 	agentHandler.SetBookingService(bookingService)                 // 设置预约服务（可见性过滤）
+	if sceneService != nil {
+		agentHandler.SetSceneService(sceneService)                 // 设置场景服务（像素人）
+	}
 	agentHandler.SetRedisClient(redisClient)                       // 设置 Redis（权限追踪）
 	agentHandler.SetUserSettingsRepo(userSettingsRepo)             // 设置用户设置（自动推测）
 	// 设置 STS 配置（用于客户端直传 COS）
@@ -325,6 +341,7 @@ func main() {
 	userProfileHandler := handler.NewUserProfileHandler(userProfileService)
 	predictionHandler := handler.NewPredictionHandler(predictionService)
 	bookingHandler := handler.NewBookingHandler(bookingService)
+	interactionHandler := handler.NewInteractionHandler(interactionService)
 
 	// 设置Gin模式
 	gin.SetMode(cfg.Server.Mode)
@@ -457,6 +474,9 @@ func main() {
 				friends.POST("/requests/:id/handle", friendshipHandler.HandleFriendRequest)
 				friends.GET("/requests/count", friendshipHandler.GetPendingRequestCount)
 			}
+
+			// 互动模块
+			authorized.POST("/interact", interactionHandler.SendInteraction)
 
 			// 预约模块
 			bookings := authorized.Group("/bookings")
