@@ -722,26 +722,33 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 	// ========== 推断模式（V4 替代 V3 StatusInferenceAgent）==========
 	// 设计原则：prompt 引导思考方向，不硬编码规则；推理在 thinking tokens 中完成
 	if session.InferenceMode {
+		// 生成节日/文化上下文
+		holidayContext := getChineseHolidayContext(time.Now())
+
 		sb.WriteString(`【推断模式】
 你是「有空」状态推断引擎。分析实时设备信号，推断用户此刻的具体活动，然后调用 set_status 工具。不要输出文字给用户。
 
-# 你的思考过程应该覆盖：
-1. **信号优先级**：实时设备信号（屏幕、位置、运动、日历）是此刻状态的直接证据，优先级最高。时刻表和历史记录是辅助参考。AI 推测与实时信号矛盾时忽略。
-2. **具体化**：用户状态应该是具体的日常活动（2-4字），不要使用"娱乐中""在家休息""居家休闲"等笼统描述。想象你是用户的朋友，你会怎样用最简短的口语描述他现在在做什么？比如"刷手机""工作""睡觉""刷剧""聊微信""开车上班"。
+# 推断原则
+1. **信号驱动**：实时设备信号（屏幕、位置、运动、日历）是此刻状态的直接证据，优先级最高。时刻表和历史记录是辅助参考。AI 推测与实时信号矛盾时忽略。
+2. **具体化**：用户状态应该是具体的日常活动（2-4字），不要使用笼统描述。想象你是用户的朋友，你会怎样用最简短的口语描述他现在在做什么。
 3. **时间语境**：工作日和周末的同一信号可能意味着不同活动。深夜、清晨、午间有各自的合理推断。
-4. **is_available 含义**：表示用户此刻是否方便被打扰/有空社交。工作、开会、通勤、睡觉、运动等通常为 false；在家休闲、空闲、午休等通常为 true。
+4. **is_available 含义**：表示用户此刻是否方便被打扰/有空社交。
 5. **用户修正**：修正历史中纠正过的推断不能再犯。
-6. **深夜/凌晨规则**：22:00-06:00 + 在家 + 屏幕长时间不活跃(>60min) → 大概率在睡觉。但如果用户是轮班工作者且在工作地点，则可能在值班。
-7. **职业参考**：注意用户画像中的职业类型和工作时间。轮班制(护士/保安等)深夜在工作地点=值班而非睡觉；学生在学校/图书馆+专注模式=学习而非摸鱼。
+6. **深夜/凌晨**：22:00-06:00 + 在家 + 屏幕长时间不活跃(>60min) → 大概率在睡觉。轮班工作者在工作地点则可能在值班。
+7. **职业参考**：注意用户画像中的职业类型和工作时间。
+8. **多样性**：人的日常活动是丰富多样的。同样的"在家+静止"信号，在不同时间段意味着完全不同的活动。根据时间、信号组合和生活常识独立推理，不要重复输出相同的状态。
+9. **屏幕信号解读**：screen.is_active=true 且 activity_type 为具体类型（entertainment/productivity/communication）时，才据此推断屏幕相关活动。activity_type=idle 或无屏幕数据时，不要假设用户在用手机，应根据时间和其他信号推断。
 
 # status 格式
-- 2-4字，口语化动词短语。如：刷手机、工作、睡觉、刷剧、聊微信、开车上班、午休、散步
-- 不要加地点前缀（如"在家""居家"）和修饰词（如"专注""深夜"），这些信息已在 emoji 中体现
+- 2-4字，口语化动词短语，不要加地点前缀和修饰词
 
 # emoji 选择
-用 1-3 个 emoji 组合反映地点+活动，例如 📱🏠 表示在家用手机、💼💻 表示在办公。
+用 1-3 个 emoji 组合反映地点+活动。
 
 `)
+		if holidayContext != "" {
+			sb.WriteString(fmt.Sprintf("# 文化上下文\n%s\n\n", holidayContext))
+		}
 		if session.InferenceContext != "" {
 			sb.WriteString("【多维上下文数据】\n")
 			sb.WriteString(session.InferenceContext)
@@ -768,6 +775,55 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 	}
 
 	return sb.String()
+}
+
+// getChineseHolidayContext 返回当前日期的中国节日/文化上下文
+func getChineseHolidayContext(now time.Time) string {
+	month := int(now.Month())
+	day := now.Day()
+	weekday := now.Weekday()
+
+	// 公历固定节日
+	switch {
+	case month == 1 && day == 1:
+		return "今天是元旦，法定假日。很多人在家休息、出游、聚会。"
+	case month == 2 && day == 14:
+		return "今天是情人节。情侣可能在约会、吃饭、看电影。单身的人日常如常或和朋友聚会。"
+	case month == 3 && day == 8:
+		return "今天是妇女节/女神节。很多公司女性员工放半天假。"
+	case month == 4 && day == 5:
+		return "今天是清明节前后，可能是假期。很多人扫墓、踏青、出游。"
+	case month == 5 && day == 1:
+		return "今天是五一劳动节，法定假日。很多人出游、购物、聚会。"
+	case month == 5 && day >= 1 && day <= 5:
+		return "五一假期期间，很多人在出游、休息、聚会。"
+	case month == 6 && day == 1:
+		return "今天是六一儿童节。有孩子的家庭可能在陪孩子活动。"
+	case month == 9 && day == 10:
+		return "今天是教师节。学生和老师可能有相关活动。"
+	case month == 10 && day >= 1 && day <= 7:
+		return "国庆假期期间，大部分人在休假。出游、聚会、回家探亲是常见活动。"
+	case month == 11 && day == 11:
+		return "今天是双十一购物节。很多人在网购、抢购。"
+	case month == 12 && day == 24:
+		return "今天是平安夜。年轻人可能在聚会、逛街、约会。"
+	case month == 12 && day == 25:
+		return "今天是圣诞节。年轻人可能在聚会、约会。"
+	case month == 12 && day == 31:
+		return "今天是跨年夜。很多人在聚会、倒数、看演出。"
+	}
+
+	// 周末提示
+	if weekday == time.Saturday || weekday == time.Sunday {
+		return "今天是周末，大部分人不上班/不上课。休息、出游、聚会、睡懒觉是常见活动。"
+	}
+
+	// 周五晚上
+	if weekday == time.Friday && now.Hour() >= 18 {
+		return "周五晚上，工作日结束。很多人在放松、聚餐、社交。"
+	}
+
+	return ""
 }
 
 // formatSensorData 将传感器数据格式化为自然语言
@@ -855,8 +911,20 @@ func formatSensorData(data *model.ExtendedStatusReportRequest) string {
 	// 连接
 	if data.Connection != nil {
 		c := data.Connection
-		sb.WriteString(fmt.Sprintf("- connection: network=%s, headphones=%v\n",
-			c.NetworkType, c.IsHeadphonesConnected))
+		parts := fmt.Sprintf("- connection: network=%s, headphones=%v", c.NetworkType, c.IsHeadphonesConnected)
+		if c.WifiSSID != "" {
+			parts += fmt.Sprintf(", wifi_ssid=%s", c.WifiSSID)
+		}
+		if c.BluetoothDeviceType != "" {
+			parts += fmt.Sprintf(", bluetooth_device=%s", c.BluetoothDeviceType)
+		}
+		sb.WriteString(parts + "\n")
+	}
+
+	// 环境光照
+	if data.AmbientLight != nil {
+		al := data.AmbientLight
+		sb.WriteString(fmt.Sprintf("- ambient_light: %.0f lux (%s)\n", al.Lux, al.Environment))
 	}
 
 	return sb.String()
@@ -3302,6 +3370,7 @@ func (s *VoiceScheduleServiceV4) cacheSensorDataForInference(ctx context.Context
 	// 位置学习：记录到 MySQL 聚类 + Redis 历史
 	RecordLocationFromReport(ctx, s.locationService, s.redisClient, userID, data)
 
+	data.ReportedAt = time.Now().UnixMilli()
 	extKey := fmt.Sprintf("agent:extended:%s", userID)
 	jsonData, err := json.Marshal(data)
 	if err != nil {

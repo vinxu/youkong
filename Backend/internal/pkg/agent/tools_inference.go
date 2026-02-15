@@ -230,7 +230,7 @@ func PreGatherContext(ctx context.Context, deps *InferenceToolDeps) *model.Agent
 	ic := &model.AgentInferenceContext{}
 
 	// 1. 设备信号（Redis 缓存）
-	ic.DeviceSignals = gatherDeviceSignals(ctx, deps)
+	ic.DeviceSignals, ic.SignalDataAgeMinutes = gatherDeviceSignals(ctx, deps)
 
 	// 2. 今日时刻表 + 修正记录 + 最近状态
 	gatherHistoryData(ctx, deps, ic)
@@ -257,8 +257,14 @@ func FormatContextForPrompt(ic *model.AgentInferenceContext) string {
 
 	// === 高可信度: 实时设备信号 ===
 	if len(ic.DeviceSignals) > 0 {
-		sb.WriteString("# 实时设备信号（推断的主要依据）\n")
-		signalOrder := []string{"screen", "location", "movement", "calendar", "battery", "mode", "connection"}
+		if ic.SignalDataAgeMinutes > 30 {
+			sb.WriteString(fmt.Sprintf("# 设备信号（%d分钟前采集，数据可能已过时，请谨慎依赖）\n", ic.SignalDataAgeMinutes))
+		} else if ic.SignalDataAgeMinutes > 0 {
+			sb.WriteString(fmt.Sprintf("# 实时设备信号（%d分钟前采集，推断的主要依据）\n", ic.SignalDataAgeMinutes))
+		} else {
+			sb.WriteString("# 实时设备信号（推断的主要依据）\n")
+		}
+		signalOrder := []string{"screen", "location", "movement", "calendar", "battery", "mode", "connection", "ambient_light"}
 		for _, k := range signalOrder {
 			if v, ok := ic.DeviceSignals[k]; ok {
 				data, _ := json.Marshal(v)
@@ -399,10 +405,17 @@ func sourceToLabel(source string) string {
 
 // ========== 数据收集子函数 ==========
 
-func gatherDeviceSignals(ctx context.Context, deps *InferenceToolDeps) map[string]interface{} {
+func gatherDeviceSignals(ctx context.Context, deps *InferenceToolDeps) (map[string]interface{}, int) {
 	sensorData := getCachedSensorForInference(ctx, deps.RedisClient, deps.UserID)
 	if sensorData == nil {
-		return nil
+		return nil, 0
+	}
+
+	// 计算数据年龄（分钟）
+	dataAgeMinutes := 0
+	if sensorData.ReportedAt > 0 {
+		ageMs := time.Now().UnixMilli() - sensorData.ReportedAt
+		dataAgeMinutes = int(ageMs / 60000)
 	}
 
 	result := make(map[string]interface{})
@@ -476,16 +489,29 @@ func gatherDeviceSignals(ctx context.Context, deps *InferenceToolDeps) map[strin
 		}
 	}
 	if sensorData.Connection != nil {
-		result["connection"] = map[string]interface{}{
+		conn := map[string]interface{}{
 			"is_headphones_connected": sensorData.Connection.IsHeadphonesConnected,
 			"network_type":            sensorData.Connection.NetworkType,
+		}
+		if sensorData.Connection.WifiSSID != "" {
+			conn["wifi_ssid"] = sensorData.Connection.WifiSSID
+		}
+		if sensorData.Connection.BluetoothDeviceType != "" {
+			conn["bluetooth_device_type"] = sensorData.Connection.BluetoothDeviceType
+		}
+		result["connection"] = conn
+	}
+	if sensorData.AmbientLight != nil {
+		result["ambient_light"] = map[string]interface{}{
+			"lux":         sensorData.AmbientLight.Lux,
+			"environment": sensorData.AmbientLight.Environment,
 		}
 	}
 
 	if len(result) == 0 {
-		return nil
+		return nil, 0
 	}
-	return result
+	return result, dataAgeMinutes
 }
 
 func gatherHistoryData(ctx context.Context, deps *InferenceToolDeps, ic *model.AgentInferenceContext) {

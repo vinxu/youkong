@@ -259,4 +259,5 @@ type AgentInferenceContext struct {
 	PrevInference        *CurrentStatusInference  `json:"prev_inference,omitempty"`
 	Preferences          []string                 `json:"preferences,omitempty"`
 	TimeslotCorrections  []TimeslotCorrectionSummary `json:"timeslot_corrections,omitempty"`
+	SignalDataAgeMinutes int                         `json:"signal_data_age_minutes,omitempty"` // 传感器数据距今多少分钟
 }

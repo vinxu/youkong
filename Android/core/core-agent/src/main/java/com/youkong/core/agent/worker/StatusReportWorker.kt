@@ -12,6 +12,9 @@ import com.youkong.core.agent.collector.CalendarCollector
 import com.youkong.core.agent.collector.DeviceStateCollector
 import com.youkong.core.agent.collector.LocationCollector
 import com.youkong.core.agent.collector.MovementCollector
+import com.youkong.core.agent.collector.ScreenUsageCollector
+import com.youkong.core.agent.location.PlaceLearner
+import com.youkong.core.network.model.ScreenDataRequest
 import com.youkong.core.datastore.TokenManager
 import com.youkong.core.network.api.AgentApi
 import com.youkong.core.network.model.AgentStatusRequest
@@ -23,6 +26,7 @@ import com.youkong.core.network.model.ExtendedLocationDataRequest
 import com.youkong.core.network.model.LocationDataRequest
 import com.youkong.core.network.model.ModeDataRequest
 import com.youkong.core.network.model.MovementDataRequest
+import com.youkong.core.network.model.AmbientLightDataRequest
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.flow.first
@@ -37,6 +41,8 @@ class StatusReportWorker @AssistedInject constructor(
     private val calendarCollector: CalendarCollector,
     private val movementCollector: MovementCollector,
     private val deviceStateCollector: DeviceStateCollector,
+    private val screenUsageCollector: ScreenUsageCollector,
+    private val placeLearner: PlaceLearner,
 ) : CoroutineWorker(appContext, workerParams) {
 
     companion object {
@@ -91,18 +97,32 @@ class StatusReportWorker @AssistedInject constructor(
                 }
             } else null
 
-            // 6. 组装请求
+            // 6. 屏幕使用（需要特殊权限）
+            val screenData = try {
+                screenUsageCollector.collect()
+            } catch (e: Exception) {
+                Log.w(TAG, "Screen usage failed: ${e.message}")
+                null
+            }
+
+            // 7. 组装请求
+            val placeType = locationData?.let {
+                placeLearner.classifyLocation(it.latitude, it.longitude)
+            } ?: "unknown"
+            Log.d(TAG, "placeType=$placeType, lat=${locationData?.latitude}, lng=${locationData?.longitude}, placeName=${locationData?.placeName}")
+
             val request = AgentStatusRequest(
+                screen = screenData,
                 location = locationData?.let {
                     LocationDataRequest(
-                        placeType = "unknown",
+                        placeType = placeType,
                         atPlaceSinceMinutes = 0,
                         city = it.city,
                     )
                 },
                 extendedLocation = locationData?.let {
                     ExtendedLocationDataRequest(
-                        placeType = "unknown",
+                        placeType = placeType,
                         placeName = it.placeName,
                         atPlaceSinceMinutes = 0,
                         latitude = it.latitude,
@@ -121,6 +141,8 @@ class StatusReportWorker @AssistedInject constructor(
                 connection = ConnectionDataRequest(
                     isHeadphonesConnected = deviceState.isHeadphonesConnected,
                     networkType = deviceState.networkType.name,
+                    wifiSSID = deviceState.wifiSSID,
+                    bluetoothDeviceType = deviceState.bluetoothDeviceType,
                 ),
                 display = DisplayDataRequest(
                     screenBrightness = deviceState.screenBrightness,
@@ -143,10 +165,16 @@ class StatusReportWorker @AssistedInject constructor(
                         stationaryMinutes = it.stationaryMinutes,
                     )
                 },
+                ambientLight = deviceState.ambientLightLux?.let {
+                    AmbientLightDataRequest(
+                        lux = it,
+                        environment = classifyLightEnvironment(it),
+                    )
+                },
             )
 
-            // 7. 上报
-            Log.d(TAG, "Reporting: loc=${locationData != null} cal=${calendarData != null} mov=${movementData != null}")
+            // 8. 上报
+            Log.d(TAG, "Reporting: loc=${locationData != null} cal=${calendarData != null} mov=${movementData != null} scr=${screenData != null}")
             agentApi.reportStatus(request)
             Log.d(TAG, "=== StatusReportWorker success ===")
 
@@ -161,5 +189,16 @@ class StatusReportWorker @AssistedInject constructor(
         return ContextCompat.checkSelfPermission(
             applicationContext, permission
         ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun classifyLightEnvironment(lux: Float): String {
+        return when {
+            lux < 10 -> "dark"
+            lux < 50 -> "dim"
+            lux < 300 -> "indoor"
+            lux < 1000 -> "bright"
+            lux < 10000 -> "outdoor"
+            else -> "sunlight"
+        }
     }
 }

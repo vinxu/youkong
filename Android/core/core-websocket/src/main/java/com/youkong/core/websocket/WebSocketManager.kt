@@ -134,7 +134,8 @@ class WebSocketManager @Inject constructor(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket failure: ${t.message}, response code: ${response?.code}, body: ${response?.body?.string()}", t)
+                val bodyStr = try { response?.body?.string() } catch (_: Exception) { null }
+                Log.e(TAG, "WebSocket failure: ${t.message}, response code: ${response?.code}, body: $bodyStr", t)
                 pingJob?.cancel()
                 isConnecting = false
                 isConnected = false

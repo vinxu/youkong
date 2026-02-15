@@ -553,6 +553,7 @@ func (s *AgentService) ReportExtendedStatus(ctx context.Context, userID string, 
 	}
 
 	// 2. 保存扩展状态到 Redis（用于福尔摩斯分析）
+	req.ReportedAt = time.Now().UnixMilli()
 	extData, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal extended status: %w", err)
@@ -619,6 +620,7 @@ func (s *AgentService) ReportExtendedStatusStream(ctx context.Context, userID st
 	}
 
 	// 2. 保存扩展状态到 Redis
+	req.ReportedAt = time.Now().UnixMilli()
 	extData, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal extended status: %w", err)
@@ -1225,6 +1227,7 @@ func (s *AgentService) ReportExtendedStatus2Stream(ctx context.Context, userID s
 	}
 
 	// 2. 保存扩展状态到 Redis
+	req.ReportedAt = time.Now().UnixMilli()
 	extData, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal extended status: %w", err)

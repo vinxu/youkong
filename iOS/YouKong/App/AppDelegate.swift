@@ -1,5 +1,6 @@
 import UIKit
 import UserNotifications
+import CoreLocation
 
 class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
 
@@ -10,6 +11,15 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         // 注册后台状态上报任务
         StatusReportManager.registerBackgroundTask()
+
+        // 检查是否因位置变化被唤醒
+        if launchOptions?[.location] != nil {
+            print("[AppDelegate] App launched by significant location change")
+            LocationDataCollector.shared.resumeSignificantLocationMonitoringIfNeeded()
+            Task {
+                await StatusReportManager.shared.reportStatus()
+            }
+        }
 
         // 监听 App 状态变化
         NotificationCenter.default.addObserver(

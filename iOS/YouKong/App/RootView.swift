@@ -178,6 +178,19 @@ struct RootView: View {
         // 启动位置数据收集
         if permissionManager.status.location {
             LocationDataCollector.shared.startMonitoring()
+
+            // 如果已有 Always 权限，启动 significant location change 监听
+            if permissionManager.isAlwaysLocationGranted {
+                LocationDataCollector.shared.startSignificantLocationMonitoring()
+            } else {
+                // 请求 Always 权限升级（从 whenInUse → always）
+                Task {
+                    let granted = await permissionManager.requestAlwaysLocationPermission()
+                    if granted {
+                        LocationDataCollector.shared.startSignificantLocationMonitoring()
+                    }
+                }
+            }
         }
 
         // ⚠️ 屏幕使用数据收集已禁用（方案 C）
@@ -217,7 +230,7 @@ struct RootView: View {
         // ⚠️ 屏幕数据已禁用（方案 C）
         // let screenStatus = ScreenDataCollector.shared.getCurrentStatus()
         let locationStatus = LocationDataCollector.shared.getCurrentStatus()
-        let deviceStatus = DeviceStatusCollector.shared.getCurrentStatus()
+        let deviceStatus = await DeviceStatusCollector.shared.getCurrentStatusAsync()
         let calendarStatus = CalendarDataCollector.shared.getCurrentStatus()
         let movementStatus = MovementDataCollector.shared.getCurrentStatus()
 
@@ -258,7 +271,9 @@ struct RootView: View {
 
         let connectionData = ConnectionRequestData(
             isHeadphonesConnected: deviceStatus.isHeadphonesConnected,
-            networkType: deviceStatus.networkType.rawValue
+            networkType: deviceStatus.networkType.rawValue,
+            wifiSSID: deviceStatus.wifiSSID,
+            bluetoothDeviceType: deviceStatus.bluetoothDeviceType
         )
 
         let displayData = DisplayRequestData(

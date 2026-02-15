@@ -7,12 +7,13 @@ data class PermissionState(
     val hasLocationPermission: Boolean = false,
     val hasActivityRecognitionPermission: Boolean = false,
     val hasCalendarPermission: Boolean = false,
+    val hasUsageStatsPermission: Boolean = false,
 ) {
     /**
      * 是否所有核心权限都已授权
      */
     val allCorePermissionsGranted: Boolean
-        get() = hasLocationPermission && hasActivityRecognitionPermission && hasCalendarPermission
+        get() = hasLocationPermission && hasActivityRecognitionPermission && hasCalendarPermission && hasUsageStatsPermission
 
     /**
      * 获取缺失的权限列表
@@ -22,6 +23,7 @@ data class PermissionState(
             if (!hasLocationPermission) add(RequiredPermission.LOCATION)
             if (!hasActivityRecognitionPermission) add(RequiredPermission.ACTIVITY_RECOGNITION)
             if (!hasCalendarPermission) add(RequiredPermission.CALENDAR)
+            if (!hasUsageStatsPermission) add(RequiredPermission.USAGE_STATS)
         }
     }
 }
@@ -48,5 +50,10 @@ enum class RequiredPermission(
         title = "日历",
         description = "读取日程安排，智能判断有空时段",
         whyNeed = "读取您的日历事件，了解您的日程安排，在没有会议或活动时判断您更可能有空。"
+    ),
+    USAGE_STATS(
+        title = "屏幕使用",
+        description = "了解当前使用的应用类型，提供更精准的状态推断",
+        whyNeed = "检测您是否在使用社交、办公或娱乐类应用，帮助判断您当前在做什么以及是否有空。"
     ),
 }

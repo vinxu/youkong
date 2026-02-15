@@ -21,7 +21,7 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
         let calendarCollector = CalendarDataCollector.shared
         let movementCollector = MovementDataCollector.shared
 
-        let deviceStatus = deviceCollector.currentStatus
+        let deviceStatus = await deviceCollector.getCurrentStatusAsync()
         let locationStatus = await locationCollector.currentStatus
         let calendarStatus = await calendarCollector.currentStatus
         let movementStatus = await movementCollector.currentStatus
@@ -52,7 +52,9 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
             ),
             connection: ConnectionRequestData(
                 isHeadphonesConnected: deviceStatus.isHeadphonesConnected,
-                networkType: deviceStatus.networkType.rawValue
+                networkType: deviceStatus.networkType.rawValue,
+                wifiSSID: deviceStatus.wifiSSID,
+                bluetoothDeviceType: deviceStatus.bluetoothDeviceType
             ),
             display: DisplayRequestData(
                 screenBrightness: deviceStatus.screenBrightness

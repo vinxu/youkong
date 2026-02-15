@@ -646,7 +646,7 @@ class AIStatusInferenceViewModel: ObservableObject {
         try? await Task.sleep(nanoseconds: 500_000_000)
 
         // 2. 构建传感器数据
-        let sensorData = buildSensorData()
+        let sensorData = await buildSensorData()
 
         // 3. 展示收集到的传感器线索
         streamingPhase = "正在收集数据..."
@@ -1020,8 +1020,8 @@ class AIStatusInferenceViewModel: ObservableObject {
 
     // MARK: - Build Sensor Data
 
-    private func buildSensorData() -> StatusReportRequest {
-        let deviceStatus = deviceCollector.currentStatus
+    private func buildSensorData() async -> StatusReportRequest {
+        let deviceStatus = await deviceCollector.getCurrentStatusAsync()
         let locationStatus = locationCollector.currentStatus
 
         return StatusReportRequest(
@@ -1049,7 +1049,9 @@ class AIStatusInferenceViewModel: ObservableObject {
             ),
             connection: ConnectionRequestData(
                 isHeadphonesConnected: deviceStatus.isHeadphonesConnected,
-                networkType: deviceStatus.networkType.rawValue
+                networkType: deviceStatus.networkType.rawValue,
+                wifiSSID: deviceStatus.wifiSSID,
+                bluetoothDeviceType: deviceStatus.bluetoothDeviceType
             ),
             display: DisplayRequestData(
                 screenBrightness: deviceStatus.screenBrightness

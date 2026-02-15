@@ -55,8 +55,9 @@ class StatusAnalysisViewModel @Inject constructor(
             try {
                 val response = agentApi.reportStatus(request)
 
-                if (response.data?.analysis != null) {
-                    displayAnalysisResult(response.data!!.analysis!!)
+                val analysis = response.data?.analysis
+                if (analysis != null) {
+                    displayAnalysisResult(analysis)
                     _uiState.update {
                         it.copy(
                             isAnalyzing = false,

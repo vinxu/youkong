@@ -1,29 +1,43 @@
 package com.youkong.core.agent.collector
 
+import android.Manifest
 import android.app.NotificationManager
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothHeadset
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.Log
+import androidx.core.content.ContextCompat
 import com.youkong.core.agent.model.DeviceStateData
 import com.youkong.core.agent.model.NetworkType
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.datetime.Clock
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.resume
+
+private const val TAG = "DeviceStateCollector"
 
 /**
  * 设备状态数据收集器
- * 收集勿扰模式、充电状态、耳机连接、网络类型、低电量模式等
+ * 收集勿扰模式、充电状态、耳机连接、网络类型、低电量模式、WiFi SSID、蓝牙设备类型、环境光照等
  */
 @Singleton
 class DeviceStateCollector @Inject constructor(
@@ -46,26 +60,33 @@ class DeviceStateCollector @Inject constructor(
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     }
 
+    private val sensorManager: SensorManager by lazy {
+        context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    }
+
     /**
      * 收集设备状态数据
      */
-    fun collect(): DeviceStateData {
+    suspend fun collect(): DeviceStateData {
+        val ambientLight = getAmbientLight()
         return DeviceStateData(
             isDoNotDisturbEnabled = isDoNotDisturbEnabled(),
             isCharging = isCharging(),
             batteryLevel = getBatteryLevel(),
             isPowerSaveMode = isPowerSaveMode(),
             isHeadphonesConnected = isHeadphonesConnected(),
+            bluetoothDeviceType = getBluetoothDeviceType(),
             networkType = getNetworkType(),
+            wifiSSID = getWiFiSSID(),
             ringerMode = getRingerMode(),
             screenBrightness = getScreenBrightness(),
+            ambientLightLux = ambientLight,
             timestamp = Clock.System.now(),
         )
     }
 
-    /**
-     * 检查勿扰模式是否开启
-     */
+    // ==================== 勿扰模式 ====================
+
     private fun isDoNotDisturbEnabled(): Boolean {
         return try {
             val filter = notificationManager.currentInterruptionFilter
@@ -77,9 +98,8 @@ class DeviceStateCollector @Inject constructor(
         }
     }
 
-    /**
-     * 检查是否正在充电
-     */
+    // ==================== 电池 ====================
+
     private fun isCharging(): Boolean {
         return try {
             val batteryStatus = context.registerReceiver(
@@ -94,9 +114,6 @@ class DeviceStateCollector @Inject constructor(
         }
     }
 
-    /**
-     * 获取电池电量 (0-100)
-     */
     private fun getBatteryLevel(): Int {
         return try {
             val batteryStatus = context.registerReceiver(
@@ -115,9 +132,6 @@ class DeviceStateCollector @Inject constructor(
         }
     }
 
-    /**
-     * 检查是否开启省电模式
-     */
     private fun isPowerSaveMode(): Boolean {
         return try {
             powerManager.isPowerSaveMode
@@ -126,27 +140,19 @@ class DeviceStateCollector @Inject constructor(
         }
     }
 
-    /**
-     * 检查是否连接了耳机
-     */
+    // ==================== 耳机/蓝牙 ====================
+
     private fun isHeadphonesConnected(): Boolean {
         return try {
-            // 检查有线耳机
             val wiredConnected = audioManager.isWiredHeadsetOn
-
-            // 检查蓝牙耳机
-            val bluetoothConnected = isBluetoothHeadsetConnected()
-
+            val bluetoothConnected = isBluetoothAudioConnected()
             wiredConnected || bluetoothConnected
         } catch (e: Exception) {
             false
         }
     }
 
-    /**
-     * 检查蓝牙耳机是否连接
-     */
-    private fun isBluetoothHeadsetConnected(): Boolean {
+    private fun isBluetoothAudioConnected(): Boolean {
         return try {
             val bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
             bluetoothAdapter?.getProfileConnectionState(BluetoothProfile.HEADSET) == BluetoothProfile.STATE_CONNECTED ||
@@ -157,8 +163,74 @@ class DeviceStateCollector @Inject constructor(
     }
 
     /**
-     * 获取当前网络类型
+     * 获取连接的蓝牙设备类型
+     * 返回: headphones / car / speaker / null
      */
+    @Suppress("MissingPermission")
+    private fun getBluetoothDeviceType(): String? {
+        return try {
+            val bluetoothAdapter = BluetoothAdapter.getDefaultAdapter() ?: return null
+
+            // 检查是否有蓝牙音频连接
+            val hasHeadset = bluetoothAdapter.getProfileConnectionState(BluetoothProfile.HEADSET) == BluetoothProfile.STATE_CONNECTED
+            val hasA2dp = bluetoothAdapter.getProfileConnectionState(BluetoothProfile.A2DP) == BluetoothProfile.STATE_CONNECTED
+            if (!hasHeadset && !hasA2dp) return null
+
+            // 尝试从已配对设备中找到已连接的设备，获取详细类型
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                return "headphones" // 无权限时默认返回 headphones
+            }
+
+            val bondedDevices = bluetoothAdapter.bondedDevices ?: return "headphones"
+            for (device in bondedDevices) {
+                if (isDeviceConnected(device)) {
+                    val type = classifyBluetoothDevice(device)
+                    if (type != null) return type
+                }
+            }
+
+            "headphones" // 默认
+        } catch (e: Exception) {
+            Log.w(TAG, "获取蓝牙设备类型失败: ${e.message}")
+            null
+        }
+    }
+
+    private fun isDeviceConnected(device: BluetoothDevice): Boolean {
+        return try {
+            val method = device.javaClass.getMethod("isConnected")
+            method.invoke(device) as Boolean
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun classifyBluetoothDevice(device: BluetoothDevice): String? {
+        val deviceClass = device.bluetoothClass?.deviceClass ?: return null
+        val majorClass = deviceClass shr 8
+        val minorClass = deviceClass and 0xFF
+
+        // Audio/Video 大类
+        if (majorClass == 0x04) {
+            return when (minorClass) {
+                0x02 -> "car"         // Hands-Free
+                0x08 -> "car"         // Car Audio
+                0x05 -> "speaker"     // Loudspeaker
+                0x0A -> "speaker"     // HiFi Audio
+                0x06 -> "headphones"  // Headphones
+                0x01 -> "headphones"  // Wearable Headset
+                else -> "headphones"
+            }
+        }
+
+        return null
+    }
+
+    // ==================== 网络/WiFi ====================
+
     private fun getNetworkType(): NetworkType {
         return try {
             val network = connectivityManager.activeNetwork
@@ -177,8 +249,37 @@ class DeviceStateCollector @Inject constructor(
     }
 
     /**
-     * 获取响铃模式
+     * 获取当前连接的 WiFi SSID
+     * 需要 ACCESS_FINE_LOCATION + ACCESS_WIFI_STATE 权限
      */
+    @Suppress("MissingPermission")
+    private fun getWiFiSSID(): String? {
+        return try {
+            // 先检查是否连接 WiFi
+            val network = connectivityManager.activeNetwork ?: return null
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return null
+            if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return null
+
+            // 检查位置权限（获取 SSID 需要）
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED
+            ) return null
+
+            val wifiManager = context.applicationContext
+                .getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val ssid = wifiManager.connectionInfo?.ssid ?: return null
+
+            // 过滤无效值
+            val cleaned = ssid.removeSurrounding("\"")
+            if (cleaned == "<unknown ssid>" || cleaned.isBlank()) null else cleaned
+        } catch (e: Exception) {
+            Log.w(TAG, "获取 WiFi SSID 失败: ${e.message}")
+            null
+        }
+    }
+
+    // ==================== 音频/铃声 ====================
+
     private fun getRingerMode(): String {
         return try {
             when (audioManager.ringerMode) {
@@ -192,9 +293,8 @@ class DeviceStateCollector @Inject constructor(
         }
     }
 
-    /**
-     * 获取屏幕亮度 (0.0-1.0)
-     */
+    // ==================== 显示 ====================
+
     private fun getScreenBrightness(): Float {
         return try {
             val brightness = Settings.System.getInt(
@@ -202,10 +302,42 @@ class DeviceStateCollector @Inject constructor(
                 Settings.System.SCREEN_BRIGHTNESS,
                 128
             )
-            // Android 亮度范围是 0-255，转换为 0.0-1.0
             (brightness / 255f).coerceIn(0f, 1f)
         } catch (e: Exception) {
-            0.5f // 默认返回中等亮度
+            0.5f
+        }
+    }
+
+    // ==================== 环境光照 ====================
+
+    /**
+     * 读取环境光传感器的 lux 值
+     * 无需权限，超时 2 秒
+     */
+    private suspend fun getAmbientLight(): Float? {
+        val lightSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT) ?: return null
+
+        return withTimeoutOrNull(2000L) {
+            suspendCancellableCoroutine { cont ->
+                val listener = object : SensorEventListener {
+                    override fun onSensorChanged(event: SensorEvent) {
+                        sensorManager.unregisterListener(this)
+                        if (cont.isActive) {
+                            cont.resume(event.values[0])
+                        }
+                    }
+
+                    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+                }
+
+                sensorManager.registerListener(
+                    listener, lightSensor, SensorManager.SENSOR_DELAY_NORMAL
+                )
+
+                cont.invokeOnCancellation {
+                    sensorManager.unregisterListener(listener)
+                }
+            }
         }
     }
 }

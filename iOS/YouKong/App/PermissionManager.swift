@@ -13,6 +13,7 @@ class PermissionManager: NSObject, ObservableObject {
 
     @Published var status = PermissionStatus.initial
     @Published var isChecking = false
+    @Published var isAlwaysLocationGranted = false
 
     private let locationManager = CLLocationManager()
     private var locationContinuation: CheckedContinuation<Bool, Never>?
@@ -31,6 +32,7 @@ class PermissionManager: NSObject, ObservableObject {
 
         // 检查位置权限
         status.location = checkLocationPermission()
+        isAlwaysLocationGranted = locationManager.authorizationStatus == .authorizedAlways
 
         // 检查日历权限
         status.calendar = checkCalendarPermission()
@@ -67,6 +69,26 @@ class PermissionManager: NSObject, ObservableObject {
             status.location = false
             return false
         @unknown default:
+            return false
+        }
+    }
+
+    // MARK: - Always Location Permission
+
+    func requestAlwaysLocationPermission() async -> Bool {
+        let currentStatus = locationManager.authorizationStatus
+
+        switch currentStatus {
+        case .authorizedAlways:
+            isAlwaysLocationGranted = true
+            return true
+        case .authorizedWhenInUse:
+            // Upgrade from whenInUse to always
+            return await withCheckedContinuation { continuation in
+                self.locationContinuation = continuation
+                self.locationManager.requestAlwaysAuthorization()
+            }
+        default:
             return false
         }
     }
@@ -207,6 +229,7 @@ extension PermissionManager: CLLocationManagerDelegate {
             let granted = manager.authorizationStatus == .authorizedWhenInUse ||
                          manager.authorizationStatus == .authorizedAlways
             status.location = granted
+            isAlwaysLocationGranted = manager.authorizationStatus == .authorizedAlways
 
             if let continuation = locationContinuation {
                 locationContinuation = nil

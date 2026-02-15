@@ -11,9 +11,12 @@ data class DeviceStateData(
     val batteryLevel: Int,                // 电池电量 (0-100)
     val isPowerSaveMode: Boolean,         // 省电模式
     val isHeadphonesConnected: Boolean,   // 耳机连接
+    val bluetoothDeviceType: String?,     // 蓝牙设备类型: headphones/car/speaker/null
     val networkType: NetworkType,         // 网络类型
+    val wifiSSID: String?,                // WiFi SSID（已连接时）
     val ringerMode: String,               // 响铃模式: silent, vibrate, normal
     val screenBrightness: Float,          // 屏幕亮度 (0.0-1.0)
+    val ambientLightLux: Float?,          // 环境光照 lux 值
     val timestamp: Instant,               // 数据获取时间
 )
 

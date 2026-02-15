@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import AVFoundation
 import Network
+import NetworkExtension
 
 // MARK: - Device Status
 
@@ -13,6 +14,8 @@ struct DeviceStatus {
     let isHeadphonesConnected: Bool
     let networkType: NetworkType
     let screenBrightness: Float       // 0-1
+    let bluetoothDeviceType: String?  // headphones/car/speaker
+    var wifiSSID: String?             // WiFi 名称
 
     var isCharging: Bool {
         batteryState == .charging || batteryState == .full
@@ -25,7 +28,9 @@ struct DeviceStatus {
         isFocusModeOn: false,
         isHeadphonesConnected: false,
         networkType: .unknown,
-        screenBrightness: 0.5
+        screenBrightness: 0.5,
+        bluetoothDeviceType: nil,
+        wifiSSID: nil
     )
 }
 
@@ -175,6 +180,9 @@ class DeviceStatusCollector: ObservableObject {
         // 屏幕亮度
         let screenBrightness = UIScreen.main.brightness
 
+        // 蓝牙设备类型
+        let bluetoothDeviceType = getBluetoothDeviceType()
+
         currentStatus = DeviceStatus(
             batteryLevel: device.batteryLevel,
             batteryState: batteryState,
@@ -182,7 +190,9 @@ class DeviceStatusCollector: ObservableObject {
             isFocusModeOn: isFocusModeOn,
             isHeadphonesConnected: isHeadphonesConnected,
             networkType: currentNetworkType,
-            screenBrightness: Float(screenBrightness)
+            screenBrightness: Float(screenBrightness),
+            bluetoothDeviceType: bluetoothDeviceType,
+            wifiSSID: currentStatus.wifiSSID  // 保留上次的 WiFi SSID（异步更新）
         )
     }
 
@@ -219,6 +229,50 @@ class DeviceStatusCollector: ObservableObject {
     func getCurrentStatus() -> DeviceStatus {
         updateStatus()
         return currentStatus
+    }
+
+    // MARK: - Bluetooth Device Type
+
+    private func getBluetoothDeviceType() -> String? {
+        let audioSession = AVAudioSession.sharedInstance()
+        let currentRoute = audioSession.currentRoute
+
+        for output in currentRoute.outputs {
+            switch output.portType {
+            case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE:
+                let name = output.portName.lowercased()
+                if name.contains("car") || name.contains("vehicle") || name.contains("carplay") {
+                    return "car"
+                }
+                return "headphones"
+            case .airPlay:
+                return "speaker"
+            case .headphones:
+                return "headphones"
+            default:
+                continue
+            }
+        }
+        return nil
+    }
+
+    // MARK: - WiFi SSID
+
+    func fetchWiFiSSID() async -> String? {
+        await withCheckedContinuation { continuation in
+            NEHotspotNetwork.fetchCurrent { network in
+                continuation.resume(returning: network?.ssid)
+            }
+        }
+    }
+
+    /// 异步获取完整状态（包含 WiFi SSID）
+    func getCurrentStatusAsync() async -> DeviceStatus {
+        updateStatus()
+        let ssid = await fetchWiFiSSID()
+        var status = currentStatus
+        status.wifiSSID = ssid
+        return status
     }
 
     // 转换为可上报的字典格式

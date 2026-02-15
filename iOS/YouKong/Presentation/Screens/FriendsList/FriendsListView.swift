@@ -667,7 +667,7 @@ struct MyAgentDataSheet: View {
         appendCommand("$ holmes collect --local")
         try? await Task.sleep(nanoseconds: 200_000_000)
 
-        loadData()
+        await loadData()
         let calendarStatus = CalendarDataCollector.shared.getCurrentStatus()
         let movementStatus = MovementDataCollector.shared.getCurrentStatus()
 
@@ -812,6 +812,10 @@ struct MyAgentDataSheet: View {
         appendLine("🔅 亮度: \(Int(deviceStatus.screenBrightness * 100))%", type: .output)
         appendLine("📶 网络: \(deviceStatus.networkType.rawValue)", type: .output)
         appendLine("🎧 耳机: \(deviceStatus.isHeadphonesConnected ? "已连接" : "未连接")", type: .output)
+        if let btType = deviceStatus.bluetoothDeviceType {
+            appendLine("🔵 蓝牙设备: \(btType)", type: .output)
+        }
+        appendLine("📶 WiFi SSID: \(deviceStatus.wifiSSID ?? "无")", type: .output)
         appendLine("🔕 专注: \(deviceStatus.isFocusModeOn ? "开启" : "关闭")", type: .output)
         appendLine("🪫 低电量: \(deviceStatus.isLowPowerMode ? "开启" : "关闭")", type: .output)
         appendLine("", type: .output)
@@ -1060,9 +1064,9 @@ struct MyAgentDataSheet: View {
 
     // MARK: - Data Loading
 
-    private func loadData() {
+    private func loadData() async {
         locationStatus = LocationDataCollector.shared.currentStatus
-        deviceStatus = DeviceStatusCollector.shared.getCurrentStatus()
+        deviceStatus = await DeviceStatusCollector.shared.getCurrentStatusAsync()
     }
 
     private func buildRequest(calendarStatus: CalendarStatus, movementStatus: MovementStatus) -> StatusReportRequest {
@@ -1096,7 +1100,9 @@ struct MyAgentDataSheet: View {
 
         let connectionData = ConnectionRequestData(
             isHeadphonesConnected: deviceStatus.isHeadphonesConnected,
-            networkType: deviceStatus.networkType.rawValue
+            networkType: deviceStatus.networkType.rawValue,
+            wifiSSID: deviceStatus.wifiSSID,
+            bluetoothDeviceType: deviceStatus.bluetoothDeviceType
         )
 
         let displayData = DisplayRequestData(

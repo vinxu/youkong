@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import CoreLocation
+import UIKit
 
 // MARK: - Location Data Collector
 
@@ -9,6 +10,7 @@ class LocationDataCollector: NSObject, ObservableObject {
 
     @Published private(set) var currentStatus: LocationStatus = .unknown
     @Published private(set) var isMonitoring = false
+    private(set) var isSignificantLocationMonitoring = false
 
     private let locationManager = CLLocationManager()
     private let geocoder = CLGeocoder()
@@ -60,6 +62,45 @@ class LocationDataCollector: NSObject, ObservableObject {
     func stopMonitoring() {
         isMonitoring = false
         locationManager.stopUpdatingLocation()
+    }
+
+    // MARK: - Significant Location Change Monitoring
+
+    func startSignificantLocationMonitoring() {
+        guard CLLocationManager.significantLocationChangeMonitoringAvailable() else {
+            print("[Location] Significant location change monitoring not available")
+            return
+        }
+        guard locationManager.authorizationStatus == .authorizedAlways else {
+            print("[Location] Always authorization required for significant location change")
+            return
+        }
+        guard !isSignificantLocationMonitoring else { return }
+
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.startMonitoringSignificantLocationChanges()
+        isSignificantLocationMonitoring = true
+        print("[Location] Significant location change monitoring started")
+    }
+
+    func stopSignificantLocationMonitoring() {
+        guard isSignificantLocationMonitoring else { return }
+        locationManager.stopMonitoringSignificantLocationChanges()
+        isSignificantLocationMonitoring = false
+        print("[Location] Significant location change monitoring stopped")
+    }
+
+    /// Resume significant location monitoring after app is woken by location event
+    func resumeSignificantLocationMonitoringIfNeeded() {
+        guard CLLocationManager.significantLocationChangeMonitoringAvailable(),
+              locationManager.authorizationStatus == .authorizedAlways else { return }
+
+        if !isSignificantLocationMonitoring {
+            locationManager.allowsBackgroundLocationUpdates = true
+            locationManager.startMonitoringSignificantLocationChanges()
+            isSignificantLocationMonitoring = true
+            print("[Location] Significant location change monitoring resumed after wake")
+        }
     }
 
     var isLocationAuthorized: Bool {
@@ -370,12 +411,27 @@ class LocationDataCollector: NSObject, ObservableObject {
     }
 }
 
+// MARK: - Notification Names
+
+extension Notification.Name {
+    static let significantLocationDidChange = Notification.Name("significantLocationDidChange")
+}
+
 // MARK: - CLLocationManagerDelegate
 
 extension LocationDataCollector: CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let location = locations.last else { return }
         updateStatus(with: location)
+
+        // 后台 significant location change → 通知上报
+        if isSignificantLocationMonitoring {
+            let state = UIApplication.shared.applicationState
+            if state == .background {
+                print("[Location] Significant location change in background → triggering report")
+                NotificationCenter.default.post(name: .significantLocationDidChange, object: nil)
+            }
+        }
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {

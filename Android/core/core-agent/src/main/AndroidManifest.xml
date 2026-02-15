@@ -16,8 +16,28 @@
 
     <!-- 设备状态权限 -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+
+    <!-- 屏幕使用情况 -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- Activity Recognition (GMS 层面) -->
+    <uses-permission android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION" />
+
+    <application>
+        <receiver
+            android:name=".receiver.ActivityRecognitionReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".receiver.ActivityTransitionReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".receiver.GeofenceBroadcastReceiver"
+            android:exported="false" />
+    </application>
 
 </manifest>

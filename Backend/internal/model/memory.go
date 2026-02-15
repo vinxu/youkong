@@ -107,7 +107,15 @@ type ModeData struct {
 // ConnectionData 连接数据
 type ConnectionData struct {
 	IsHeadphonesConnected bool   `json:"is_headphones_connected"`
-	NetworkType           string `json:"network_type"` // wifi/cellular/none
+	NetworkType           string `json:"network_type"`                        // wifi/cellular/none
+	WifiSSID              string `json:"wifi_ssid,omitempty"`                 // WiFi 名称
+	BluetoothDeviceType   string `json:"bluetooth_device_type,omitempty"`     // headphones/car/speaker
+}
+
+// AmbientLightData 环境光照数据
+type AmbientLightData struct {
+	Lux         float32 `json:"lux"`         // 原始 lux 值
+	Environment string  `json:"environment"` // dark/dim/indoor/bright/outdoor/sunlight
 }
 
 // DisplayData 显示数据
@@ -135,7 +143,9 @@ type ExtendedStatusReportRequest struct {
 	Display          *DisplayData          `json:"display"`
 	Calendar         *CalendarData         `json:"calendar,omitempty"`  // 日历数据
 	Movement         *MovementData         `json:"movement,omitempty"`  // 移动状态
-	Altitude         *AltitudeData         `json:"altitude,omitempty"`  // 海拔数据
+	Altitude         *AltitudeData         `json:"altitude,omitempty"`        // 海拔数据
+	AmbientLight     *AmbientLightData     `json:"ambient_light,omitempty"`   // 环境光照
+	ReportedAt       int64                 `json:"reported_at,omitempty"`     // 上报时间戳（毫秒），用于计算数据时效
 }
 
 // ========== 分析结果数据结构 ==========

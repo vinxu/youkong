@@ -152,10 +152,14 @@ struct ModeRequestData: Encodable {
 struct ConnectionRequestData: Encodable {
     let isHeadphonesConnected: Bool
     let networkType: String
+    let wifiSSID: String?
+    let bluetoothDeviceType: String?
 
     enum CodingKeys: String, CodingKey {
         case isHeadphonesConnected = "is_headphones_connected"
         case networkType = "network_type"
+        case wifiSSID = "wifi_ssid"
+        case bluetoothDeviceType = "bluetooth_device_type"
     }
 }
 

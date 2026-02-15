@@ -74,7 +74,7 @@ class GridHomeViewModel @Inject constructor(
                 conversationsDeferred.await()
 
                 // 按更新时间排序（最新更新的在前面）
-                val sortedFriends = response.data!!.friends.sortedByDescending { friend ->
+                val sortedFriends = (response.data?.friends ?: emptyList()).sortedByDescending { friend ->
                     parseUpdatedAt(friend.updatedAt)
                 }
 
@@ -116,7 +116,7 @@ class GridHomeViewModel @Inject constructor(
                 conversationsDeferred.await()
 
                 // 按更新时间排序
-                val sortedFriends = response.data!!.friends.sortedByDescending { friend ->
+                val sortedFriends = (response.data?.friends ?: emptyList()).sortedByDescending { friend ->
                     parseUpdatedAt(friend.updatedAt)
                 }
 

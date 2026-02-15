@@ -13,6 +13,9 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.youkong.core.agent.collector.MovementCollector
+import com.youkong.core.agent.location.GeofenceManager
+import com.youkong.core.agent.location.PlaceLearner
 import com.youkong.core.agent.worker.StatusReportTrigger
 import com.youkong.core.agent.worker.StatusReportWorker
 import java.util.concurrent.TimeUnit
@@ -67,6 +70,15 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
 
     @Inject
     lateinit var statusReportTrigger: StatusReportTrigger
+
+    @Inject
+    lateinit var movementCollector: MovementCollector
+
+    @Inject
+    lateinit var geofenceManager: GeofenceManager
+
+    @Inject
+    lateinit var placeLearner: PlaceLearner
 
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -152,6 +164,12 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
     }
 
     private fun scheduleStatusReportWorker() {
+        // Register PlaceLearner callback: when a new place is learned, add a geofence
+        placeLearner.onPlaceLearned = { id, lat, lng ->
+            geofenceManager.addGeofence(id, lat, lng)
+            Log.d("YouKongApplication", "Geofence added for learned place: $id")
+        }
+
         applicationScope.launch {
             tokenManager.isLoggedIn
                 .distinctUntilChanged()
@@ -170,10 +188,15 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
                         )
                         // 登录时立即触发一次上报
                         statusReportTrigger.triggerNow()
-                        Log.d("YouKongApplication", "StatusReportWorker scheduled (15min) + immediate")
+                        // 登录时恢复围栏
+                        geofenceManager.setupGeofencesForLearnedPlaces(placeLearner)
+                        Log.d("YouKongApplication", "StatusReportWorker scheduled (15min) + immediate + geofences")
                     } else {
                         workManager.cancelUniqueWork(StatusReportWorker.WORK_NAME)
-                        Log.d("YouKongApplication", "StatusReportWorker cancelled")
+                        movementCollector.stopActivityRecognition()
+                        geofenceManager.removeAllGeofences()
+                        placeLearner.clearAll()
+                        Log.d("YouKongApplication", "StatusReportWorker cancelled, AR stopped, geofences removed")
                     }
                 }
         }

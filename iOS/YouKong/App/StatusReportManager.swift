@@ -22,7 +22,15 @@ class StatusReportManager: ObservableObject {
 
     private var periodicTimer: Timer?
 
-    private init() {}
+    private init() {
+        // 监听 significant location change，后台位置变化时自动上报
+        NotificationCenter.default.addObserver(forName: .significantLocationDidChange, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                print("[STATUS REPORT] Triggered by significant location change")
+                await self?.reportIfNeeded()
+            }
+        }
+    }
 
     // MARK: - 定时上报（App 活跃期间）
 
@@ -99,7 +107,7 @@ class StatusReportManager: ObservableObject {
 
         // 收集数据
         let locationStatus = LocationDataCollector.shared.getCurrentStatus()
-        let deviceStatus = DeviceStatusCollector.shared.getCurrentStatus()
+        let deviceStatus = await DeviceStatusCollector.shared.getCurrentStatusAsync()
         let calendarStatus = CalendarDataCollector.shared.getCurrentStatus()
         let movementStatus = MovementDataCollector.shared.getCurrentStatus()
 
@@ -143,7 +151,9 @@ class StatusReportManager: ObservableObject {
 
         let connectionData = ConnectionRequestData(
             isHeadphonesConnected: deviceStatus.isHeadphonesConnected,
-            networkType: deviceStatus.networkType.rawValue
+            networkType: deviceStatus.networkType.rawValue,
+            wifiSSID: deviceStatus.wifiSSID,
+            bluetoothDeviceType: deviceStatus.bluetoothDeviceType
         )
 
         let displayData = DisplayRequestData(

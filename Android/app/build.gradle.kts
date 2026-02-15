@@ -39,10 +39,20 @@ android {
         manifestPlaceholders["TPNS_ACCESS_KEY"] = tpnsAccessKey
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = rootProject.file("youkong-release.keystore")
+            storePassword = localProperties.getProperty("KEYSTORE_PASSWORD") ?: "youkong123"
+            keyAlias = localProperties.getProperty("KEY_ALIAS") ?: "youkong"
+            keyPassword = localProperties.getProperty("KEY_PASSWORD") ?: "youkong123"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

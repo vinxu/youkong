@@ -27,11 +27,12 @@ class PermissionSetupViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(PermissionSetupUiState())
     val uiState: StateFlow<PermissionSetupUiState> = _uiState.asStateFlow()
 
-    // 权限请求顺序：位置 → 运动数据 → 日历
+    // 权限请求顺序：位置 → 运动数据 → 日历 → 屏幕使用
     private val permissionOrder = listOf(
         RequiredPermission.LOCATION,
         RequiredPermission.ACTIVITY_RECOGNITION,
         RequiredPermission.CALENDAR,
+        RequiredPermission.USAGE_STATS,
     )
 
     init {

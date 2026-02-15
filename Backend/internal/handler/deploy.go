@@ -187,41 +187,42 @@ func (h *DeployHandler) deployBackend(url string) error {
 		return fmt.Errorf("设置权限失败: %w", err)
 	}
 
-	// 在停止服务之前，先安排一个延迟启动任务（因为停止后当前进程也会终止）
-	// 使用 nohup + setsid 确保启动任务在独立进程组中运行，不会被父进程终止影响
-	h.logger.Info("安排延迟启动任务")
-	startCmd := exec.Command("bash", "-c", "nohup setsid bash -c 'sleep 5 && systemctl start youkong' > /dev/null 2>&1 &")
+	// 移动新文件到目标位置（在停止服务之前！）
+	// 因为 systemctl stop 会杀掉当前进程，之后的代码不会执行
+	destServerPath := filepath.Join(h.cfg.WorkDir, "server")
+	oldServerPath := destServerPath + ".old"
+
+	// 重命名旧二进制（Linux 允许重命名运行中的文件，进程保持旧 inode）
+	if err := os.Rename(destServerPath, oldServerPath); err != nil {
+		h.logger.Warn("重命名旧二进制失败，首次部署可忽略", zap.Error(err))
+	}
+
+	// 复制新二进制到目标位置
+	if err := h.copyFile(newServerPath, destServerPath); err != nil {
+		// 回滚：恢复旧二进制
+		os.Rename(oldServerPath, destServerPath)
+		return fmt.Errorf("复制文件失败: %w", err)
+	}
+
+	// 设置执行权限
+	if err := os.Chmod(destServerPath, 0755); err != nil {
+		os.Rename(oldServerPath, destServerPath)
+		return fmt.Errorf("设置权限失败: %w", err)
+	}
+
+	h.logger.Info("backend 文件已更新，准备重启")
+
+	// 安排延迟启动（因为 stop 会杀掉当前进程）
+	startCmd := exec.Command("bash", "-c", "nohup setsid bash -c 'sleep 3 && systemctl start youkong && rm -f "+oldServerPath+"' > /dev/null 2>&1 &")
 	if err := startCmd.Start(); err != nil {
 		h.logger.Warn("安排启动任务失败", zap.Error(err))
 	}
 
-	// 停止服务（释放文件锁）
-	h.logger.Info("停止服务以更新二进制文件")
+	// 停止服务（当前进程会被终止，后续代码不一定执行）
+	h.logger.Info("停止服务")
 	stopCmd := exec.Command("systemctl", "stop", "youkong")
-	if output, err := stopCmd.CombinedOutput(); err != nil {
-		h.logger.Warn("停止服务失败，继续尝试", zap.Error(err), zap.String("output", string(output)))
-	}
+	stopCmd.CombinedOutput() // 可能不会返回
 
-	// 等待服务完全停止
-	time.Sleep(2 * time.Second)
-
-	// 移动新文件到目标位置
-	destServerPath := filepath.Join(h.cfg.WorkDir, "server")
-
-	// 先删除旧文件
-	os.Remove(destServerPath)
-
-	// 复制新文件（跨文件系统时 rename 可能失败）
-	if err := h.copyFile(newServerPath, destServerPath); err != nil {
-		return fmt.Errorf("复制文件失败: %w", err)
-	}
-
-	// 再次设置权限
-	if err := os.Chmod(destServerPath, 0755); err != nil {
-		return fmt.Errorf("设置权限失败: %w", err)
-	}
-
-	h.logger.Info("backend 文件更新完成")
 	return nil
 }
 

@@ -2,10 +2,12 @@ package com.youkong.core.permission
 
 import android.Manifest
 import android.app.Activity
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Process
 import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -39,6 +41,7 @@ class PermissionManager @Inject constructor(
             hasLocationPermission = hasLocationPermission(),
             hasActivityRecognitionPermission = hasActivityRecognitionPermission(),
             hasCalendarPermission = hasCalendarPermission(),
+            hasUsageStatsPermission = hasUsageStatsPermission(),
         )
     }
 
@@ -91,6 +94,23 @@ class PermissionManager @Inject constructor(
 
     fun getCalendarPermission(): String {
         return Manifest.permission.READ_CALENDAR
+    }
+
+    // ==================== 屏幕使用权限 ====================
+
+    fun hasUsageStatsPermission(): Boolean {
+        val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        val mode = appOps.unsafeCheckOpNoThrow(
+            AppOpsManager.OPSTR_GET_USAGE_STATS,
+            Process.myUid(),
+            context.packageName
+        )
+        return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    fun openUsageAccessSettings(activity: Activity) {
+        val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+        activity.startActivity(intent)
     }
 
     // ==================== 权限请求辅助 ====================

@@ -78,6 +78,10 @@ data class ConnectionDataRequest(
     val isHeadphonesConnected: Boolean,
     @SerialName("network_type")
     val networkType: String,
+    @SerialName("wifi_ssid")
+    val wifiSSID: String? = null,
+    @SerialName("bluetooth_device_type")
+    val bluetoothDeviceType: String? = null,
 )
 
 /**
@@ -138,6 +142,17 @@ data class AgentStatusRequest(
     val display: DisplayDataRequest? = null,
     val calendar: CalendarDataRequest? = null,
     val movement: MovementDataRequest? = null,
+    @SerialName("ambient_light")
+    val ambientLight: AmbientLightDataRequest? = null,
+)
+
+/**
+ * 环境光照数据
+ */
+@Serializable
+data class AmbientLightDataRequest(
+    val lux: Float,
+    val environment: String, // dark/dim/indoor/bright/outdoor/sunlight
 )
 
 // ========== 响应数据结构 ==========

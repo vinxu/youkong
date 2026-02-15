@@ -7,6 +7,7 @@ import com.youkong.core.agent.collector.CalendarCollector
 import com.youkong.core.agent.collector.DeviceStateCollector
 import com.youkong.core.agent.collector.LocationCollector
 import com.youkong.core.agent.collector.MovementCollector
+import com.youkong.core.agent.collector.ScreenUsageCollector
 import com.youkong.core.data.repository.AgentRepositoryImpl
 import com.youkong.core.domain.repository.StatusFeedback
 import com.youkong.core.domain.repository.StatusInferenceResult
@@ -40,6 +41,7 @@ class AIStatusInferenceViewModel @Inject constructor(
     private val movementCollector: MovementCollector,
     private val calendarCollector: CalendarCollector,
     private val deviceStateCollector: DeviceStateCollector,
+    private val screenUsageCollector: ScreenUsageCollector,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AIStatusInferenceUiState())
@@ -186,6 +188,17 @@ class AIStatusInferenceViewModel @Inject constructor(
             val movLabel = if (it.isMoving) "运动中" else "静止"
             clues.add(StreamingLog("  > 运动: $movLabel, 今日 ${it.stepsToday} 步", LogType.TOOL))
         }
+        data.screen?.let {
+            val typeLabel = when (it.activityType) {
+                "entertainment" -> "娱乐"; "productivity" -> "工作"
+                "communication" -> "通讯"; else -> "空闲"
+            }
+            if (it.isActive) {
+                clues.add(StreamingLog("  > 屏幕: 活跃中 ($typeLabel, ${it.sessionDurationMinutes}分钟)", LogType.TOOL))
+            } else {
+                clues.add(StreamingLog("  > 屏幕: ${it.lastActiveMinutesAgo}分钟前活跃", LogType.TOOL))
+            }
+        }
         data.calendar?.let {
             if (it.hasCurrentEvent && !it.currentEventTitle.isNullOrEmpty()) {
                 clues.add(StreamingLog("  > 日历: 正在进行「${it.currentEventTitle}」", LogType.TOOL))
@@ -230,7 +243,16 @@ class AIStatusInferenceViewModel @Inject constructor(
             null
         }
 
+        // 收集屏幕使用
+        val screenData = try {
+            screenUsageCollector.collect()
+        } catch (e: Exception) {
+            Log.w("AIInference", "Screen usage collect failed: ${e.message}")
+            null
+        }
+
         return AgentStatusRequest(
+            screen = screenData,
             location = locationData?.let {
                 LocationDataRequest(
                     placeType = "unknown",
@@ -264,6 +286,8 @@ class AIStatusInferenceViewModel @Inject constructor(
                 ConnectionDataRequest(
                     isHeadphonesConnected = it.isHeadphonesConnected,
                     networkType = it.networkType.name,
+                    wifiSSID = it.wifiSSID,
+                    bluetoothDeviceType = it.bluetoothDeviceType,
                 )
             },
             display = deviceState?.let {
@@ -287,6 +311,19 @@ class AIStatusInferenceViewModel @Inject constructor(
                     stepsToday = it.stepsToday,
                     stepsLastHour = it.stepsLastHour,
                     stationaryMinutes = it.stationaryMinutes,
+                )
+            },
+            ambientLight = deviceState?.ambientLightLux?.let { lux ->
+                com.youkong.core.network.model.AmbientLightDataRequest(
+                    lux = lux,
+                    environment = when {
+                        lux < 10 -> "dark"
+                        lux < 50 -> "dim"
+                        lux < 300 -> "indoor"
+                        lux < 1000 -> "bright"
+                        lux < 10000 -> "outdoor"
+                        else -> "sunlight"
+                    },
                 )
             },
         )

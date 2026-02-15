@@ -100,6 +100,13 @@ fun PermissionSetupScreen(
         viewModel.refreshPermissions()
     }
 
+    // 屏幕使用权限（跳转系统设置后返回）
+    val usageStatsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        viewModel.refreshPermissions()
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -157,6 +164,10 @@ fun PermissionSetupScreen(
                             RequiredPermission.CALENDAR -> {
                                 calendarPermissionLauncher.launch(viewModel.getCalendarPermission())
                             }
+                            RequiredPermission.USAGE_STATS -> {
+                                val intent = android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                                usageStatsLauncher.launch(intent)
+                            }
                         }
                     },
                     onSkip = { viewModel.skipCurrentPermission() },
@@ -178,6 +189,7 @@ private fun PermissionRequestContent(
         RequiredPermission.LOCATION -> "📍"
         RequiredPermission.ACTIVITY_RECOGNITION -> "🏃"
         RequiredPermission.CALENDAR -> "📅"
+        RequiredPermission.USAGE_STATS -> "📱"
     }
 
     Column(
