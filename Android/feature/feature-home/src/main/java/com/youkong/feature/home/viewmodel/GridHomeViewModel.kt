@@ -7,6 +7,8 @@ import com.youkong.core.domain.repository.MessageRepository
 import com.youkong.core.agent.worker.StatusReportTrigger
 import com.youkong.core.network.api.HomeApi
 import com.youkong.core.network.model.FriendGridItem
+import com.youkong.core.network.model.InteractionOptionItem
+import com.youkong.core.network.model.SendInteractionRequest
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -156,6 +158,26 @@ class GridHomeViewModel @Inject constructor(
             count <= 1 -> 1
             count <= 2 -> 2
             else -> 3
+        }
+    }
+
+    // MARK: - Send Interaction
+
+    fun sendInteraction(receiverId: String, interaction: InteractionOptionItem) {
+        viewModelScope.launch {
+            try {
+                homeApi.sendInteraction(
+                    SendInteractionRequest(
+                        receiverId = receiverId,
+                        actionEmoji = interaction.emoji,
+                        actionLabel = interaction.label,
+                        actionPushText = interaction.pushText,
+                    )
+                )
+                android.util.Log.d("GridHome", "✅ 互动已发送: ${interaction.label} → $receiverId")
+            } catch (e: Exception) {
+                android.util.Log.e("GridHome", "❌ 互动发送失败: ${e.message}")
+            }
         }
     }
 

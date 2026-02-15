@@ -41,6 +41,51 @@ data class FriendGridItem(
     val useGif: Boolean = false,
     @SerialName("needs_schedule")
     val needsSchedule: Boolean = false,
+    // 像素场景
+    @SerialName("scene_pose")
+    val scenePose: String? = null,
+    @SerialName("scene_arms")
+    val sceneArms: String? = null,
+    @SerialName("scene_expression")
+    val sceneExpression: String? = null,
+    @SerialName("scene_prop")
+    val sceneProp: String? = null,
+    @SerialName("scene_surface")
+    val sceneSurface: String? = null,
+    // Rive 动画状态
+    @SerialName("rive_state")
+    val riveState: String? = null,
+    // AI 互动选项
+    val interactions: List<InteractionOptionItem>? = null,
+    // 今日互动计数
+    @SerialName("interaction_count")
+    val interactionCount: Int = 0,
+)
+
+/**
+ * AI 互动选项
+ */
+@Serializable
+data class InteractionOptionItem(
+    val emoji: String,
+    val label: String,
+    @SerialName("push_text")
+    val pushText: String,
+)
+
+/**
+ * 发送互动请求
+ */
+@Serializable
+data class SendInteractionRequest(
+    @SerialName("receiver_id")
+    val receiverId: String,
+    @SerialName("action_emoji")
+    val actionEmoji: String,
+    @SerialName("action_label")
+    val actionLabel: String,
+    @SerialName("action_push_text")
+    val actionPushText: String,
 )
 
 /**

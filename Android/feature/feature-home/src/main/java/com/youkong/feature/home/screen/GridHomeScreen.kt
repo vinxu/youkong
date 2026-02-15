@@ -52,7 +52,11 @@ import com.google.accompanist.swiperefresh.SwipeRefresh
 import com.google.accompanist.swiperefresh.SwipeRefreshIndicator
 import com.google.accompanist.swiperefresh.rememberSwipeRefreshState
 import com.youkong.core.network.model.FriendGridItem
+import com.youkong.core.network.model.InteractionOptionItem
 import com.youkong.core.network.model.VoiceScheduleState
+import com.youkong.core.ui.pixel.AnimatedPixelCharacter
+import com.youkong.core.ui.pixel.DualCharacterAnimation
+import com.youkong.core.ui.pixel.PixelSceneConfig
 import com.youkong.core.ui.theme.CLIColors
 import com.youkong.feature.home.component.WechatStyleVoiceButton
 import com.youkong.feature.home.viewmodel.GridHomeViewModel
@@ -326,6 +330,9 @@ fun GridHomeScreen(
                                             },
                                             onNeedsScheduleClick = {
                                                 showAIInferenceSheet = true
+                                            },
+                                            onInteraction = { userId, interaction ->
+                                                viewModel.sendInteraction(userId, interaction)
                                             }
                                         )
                                     }
@@ -550,7 +557,8 @@ private fun CLIFriendGrid(
     gridSize: Int,
     getUnreadCount: (friendId: String) -> Int = { 0 },
     onFriendClick: (userId: String) -> Unit = {},
-    onNeedsScheduleClick: () -> Unit = {}
+    onNeedsScheduleClick: () -> Unit = {},
+    onInteraction: (userId: String, interaction: InteractionOptionItem) -> Unit = { _, _ -> }
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(gridSize),
@@ -570,6 +578,9 @@ private fun CLIFriendGrid(
                     } else {
                         onFriendClick(friend.userId)
                     }
+                },
+                onInteraction = { interaction ->
+                    onInteraction(friend.userId, interaction)
                 }
             )
         }
@@ -631,7 +642,8 @@ private fun GuideBubble(text: String, onDismiss: () -> Unit) {
 private fun CLIFriendCard(
     friend: FriendGridItem,
     unreadCount: Int = 0,
-    onClick: () -> Unit = {}
+    onClick: () -> Unit = {},
+    onInteraction: (InteractionOptionItem) -> Unit = {}
 ) {
     // 优先级：有空(绿) > 未读(绿) > 普通(灰)
     val borderColor = when {
@@ -640,6 +652,22 @@ private fun CLIFriendCard(
         else -> CLIColors.Border
     }
     val bgColor = if (friend.isAvailable) CLIColors.BackgroundHighlight else CLIColors.BackgroundSecondary
+
+    var showDualAnimation by remember { mutableStateOf(false) }
+    var activeInteraction by remember { mutableStateOf<InteractionOptionItem?>(null) }
+
+    // Build pixel scene config from API data
+    val sceneConfig = remember(friend.scenePose) {
+        friend.scenePose?.takeIf { it.isNotEmpty() }?.let {
+            PixelSceneConfig(
+                pose = it,
+                arms = friend.sceneArms ?: "down",
+                expression = friend.sceneExpression ?: "normal",
+                prop = friend.sceneProp ?: "none",
+                surface = friend.sceneSurface ?: "none",
+            )
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -654,53 +682,57 @@ private fun CLIFriendCard(
                 .padding(horizontal = 4.dp, vertical = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // 有空标签（始终占位，保持等高）
-            Text(
-                text = if (friend.isAvailable) "[有空]" else " ",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                color = if (friend.isAvailable) CLIColors.Green else androidx.compose.ui.graphics.Color.Transparent,
-                maxLines = 1
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-
-            // Emoji 或 GIF
-            if (friend.needsSchedule) {
-                // 无状态：显示 +状态 按钮
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(40.dp),
-                    contentAlignment = Alignment.Center
-                ) {
+            // 有空标签 or 互动计数
+            Row {
+                Text(
+                    text = if (friend.isAvailable) "[有空]" else " ",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    color = if (friend.isAvailable) CLIColors.Green else androidx.compose.ui.graphics.Color.Transparent,
+                    maxLines = 1
+                )
+                if (friend.interactionCount > 0) {
+                    Spacer(modifier = Modifier.weight(1f))
                     Text(
-                        text = "➕",
-                        fontSize = 24.sp,
-                        maxLines = 1,
+                        text = "×${friend.interactionCount}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        color = CLIColors.Yellow,
+                        maxLines = 1
                     )
                 }
-            } else if (friend.useGif && !friend.gifUrl.isNullOrEmpty()) {
-                coil.compose.AsyncImage(
-                    model = friend.gifUrl,
-                    contentDescription = friend.status,
-                    modifier = Modifier.size(40.dp),
-                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                )
-            } else {
-                val emoji = truncateEmoji(friend.emoji, 2)
-                val emojiCount = emoji.codePointCount(0, emoji.length)
-                val fontSize = if (emojiCount <= 1) 32.sp else 20.sp
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(40.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = emoji,
-                        fontSize = fontSize,
-                        maxLines = 1,
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Character display area
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                if (friend.needsSchedule) {
+                    Text(text = "➕", fontSize = 24.sp, maxLines = 1)
+                } else if (!friend.riveState.isNullOrEmpty()) {
+                    // Rive 动画角色（优先）
+                    com.youkong.core.ui.rive.RiveCharacterView(
+                        riveState = friend.riveState ?: "idle",
+                        modifier = Modifier.size(56.dp),
                     )
+                } else if (sceneConfig != null) {
+                    AnimatedPixelCharacter(config = sceneConfig, pixelSize = 2.dp)
+                } else if (friend.useGif && !friend.gifUrl.isNullOrEmpty()) {
+                    coil.compose.AsyncImage(
+                        model = friend.gifUrl,
+                        contentDescription = friend.status,
+                        modifier = Modifier.size(48.dp),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    )
+                } else {
+                    val emoji = truncateEmoji(friend.emoji, 2)
+                    val emojiCount = emoji.codePointCount(0, emoji.length)
+                    val fontSize = if (emojiCount <= 1) 32.sp else 20.sp
+                    Text(text = emoji, fontSize = fontSize, maxLines = 1)
                 }
             }
 
@@ -737,23 +769,48 @@ private fun CLIFriendCard(
                 )
             }
 
-            // 城市（如果有），无城市时用空占位保持等高
-            val cityText = friend.city?.takeIf { it.isNotEmpty() }
-            Text(
-                text = when {
-                    cityText != null && friend.isVisiting -> "\uD83D\uDCCD来访·$cityText"
-                    cityText != null -> cityText
-                    else -> " "
-                },
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                color = when {
+            // 互动按钮 or 城市
+            if (!friend.interactions.isNullOrEmpty() && !friend.needsSchedule) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(top = 2.dp)
+                ) {
+                    friend.interactions.orEmpty().forEach { interaction ->
+                        Text(
+                            text = "${interaction.emoji}${interaction.label}",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                            color = CLIColors.Green,
+                            maxLines = 1,
+                            modifier = Modifier
+                                .background(CLIColors.Green.copy(alpha = 0.1f))
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                .clickable {
+                                    activeInteraction = interaction
+                                    showDualAnimation = true
+                                    onInteraction(interaction)
+                                }
+                        )
+                    }
+                }
+            } else {
+                val cityText = friend.city?.takeIf { it.isNotEmpty() }
+                Text(
+                    text = when {
+                        cityText != null && friend.isVisiting -> "\uD83D\uDCCD来访·$cityText"
+                        cityText != null -> cityText
+                        else -> " "
+                    },
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    color = when {
                     cityText != null && friend.isVisiting -> CLIColors.Yellow
                     cityText != null -> CLIColors.TextWeak
                     else -> androidx.compose.ui.graphics.Color.Transparent
                 },
                 maxLines = 1,
             )
+        }
         }
 
         // 未读消息角标
