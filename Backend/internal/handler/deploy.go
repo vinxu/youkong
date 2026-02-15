@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -122,11 +121,14 @@ func (h *DeployHandler) doDeploy() {
 		}
 	}
 
-	h.logger.Info("部署完成，启动服务", zap.String("tag", release.TagName))
-
-	if err := h.startService(); err != nil {
-		h.logger.Error("启动服务失败", zap.Error(err))
-	}
+	// 利用 systemd Restart=always + RestartSec=5：直接退出进程
+	// systemd 会检测到进程退出，5 秒后自动用新二进制重启
+	// 不需要 systemctl stop（会阻止自动重启）也不需要 systemd-run
+	h.logger.Info("部署完成，进程即将退出，systemd 将自动重启新版本", zap.String("tag", release.TagName))
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		os.Exit(0)
+	}()
 }
 
 // getLatestRelease 获取最新 release
@@ -210,22 +212,7 @@ func (h *DeployHandler) deployBackend(url string) error {
 		return fmt.Errorf("设置权限失败: %w", err)
 	}
 
-	h.logger.Info("backend 文件已更新，准备重启")
-
-	// 用 systemd-run 在独立 scope 中安排延迟重启
-	// systemd stop 会杀掉当前 cgroup 里所有进程，nohup/setsid 无效
-	// systemd-run 创建 transient unit，不受当前服务 cgroup 管控
-	h.logger.Info("安排延迟启动任务（systemd-run）")
-	startCmd := exec.Command("systemd-run", "--on-active=3s", "--unit=youkong-restart",
-		"bash", "-c", "systemctl start youkong && rm -f "+oldServerPath)
-	if output, err := startCmd.CombinedOutput(); err != nil {
-		h.logger.Warn("安排启动任务失败", zap.Error(err), zap.String("output", string(output)))
-	}
-
-	// 停止服务（当前进程会被终止，后续代码不一定执行）
-	h.logger.Info("停止服务以更新二进制文件")
-	stopCmd := exec.Command("systemctl", "stop", "youkong")
-	stopCmd.CombinedOutput() // 可能不会返回
+	h.logger.Info("backend 文件已更新")
 
 	return nil
 }
@@ -420,32 +407,3 @@ func (h *DeployHandler) copyDir(src, dst string) error {
 	return nil
 }
 
-// startService 启动服务
-func (h *DeployHandler) startService() error {
-	h.logger.Info("启动服务")
-
-	// 使用 systemctl 启动
-	cmd := exec.Command("systemctl", "start", "youkong")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		h.logger.Error("systemctl start 失败", zap.Error(err), zap.String("output", string(output)))
-		return fmt.Errorf("systemctl start 失败: %s", string(output))
-	}
-
-	return nil
-}
-
-// restartService 重启服务
-func (h *DeployHandler) restartService() error {
-	h.logger.Info("重启服务")
-
-	// 使用 systemctl 重启
-	cmd := exec.Command("systemctl", "restart", "youkong")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		h.logger.Error("systemctl restart 失败", zap.Error(err), zap.String("output", string(output)))
-		return fmt.Errorf("systemctl restart 失败: %s", string(output))
-	}
-
-	return nil
-}
