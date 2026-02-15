@@ -58,6 +58,8 @@ type FriendGridItem struct {
 	GiphyQuery    string `json:"giphy_query,omitempty"` // Giphy 搜索词（客户端可自行搜索）
 	UseGif        bool   `json:"use_gif"`               // 是否使用 GIF 显示模式
 	NeedsSchedule bool   `json:"needs_schedule"`        // 自己当前无行程，需要设置
+	// Rive 动画状态
+	RiveState       string                   `json:"rive_state,omitempty"`
 	// 像素场景
 	ScenePose       string                   `json:"scene_pose,omitempty"`
 	SceneArms       string                   `json:"scene_arms,omitempty"`
@@ -391,6 +393,7 @@ func (s *HomeService) enrichFriendsWithScene(ctx context.Context, friends []Frie
 		uid := friends[i].UserID
 
 		if scene, ok := sceneMap[uid]; ok {
+			friends[i].RiveState = scene.RiveState
 			friends[i].ScenePose = scene.Scene.Pose
 			friends[i].SceneArms = scene.Scene.Arms
 			friends[i].SceneExpression = scene.Scene.Expression

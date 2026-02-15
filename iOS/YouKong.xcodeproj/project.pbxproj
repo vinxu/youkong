@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		7671D2482F2F905B004D5CA7 /* Factory in Frameworks */ = {isa = PBXBuildFile; productRef = 7671D2472F2F905B004D5CA7 /* Factory */; };
 		7671D24A2F2F905B004D5CA7 /* FactoryKit in Frameworks */ = {isa = PBXBuildFile; productRef = 7671D2492F2F905B004D5CA7 /* FactoryKit */; };
+		76C464592F41FC4700C16B53 /* RiveRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D4E5F60001AAAA0002 /* RiveRuntime */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +37,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				76C464592F41FC4700C16B53 /* RiveRuntime in Frameworks */,
 				7671D24A2F2F905B004D5CA7 /* FactoryKit in Frameworks */,
 				7671D2482F2F905B004D5CA7 /* Factory in Frameworks */,
 			);
@@ -84,6 +86,7 @@
 			packageProductDependencies = (
 				7671D2472F2F905B004D5CA7 /* Factory */,
 				7671D2492F2F905B004D5CA7 /* FactoryKit */,
+				A1B2C3D4E5F60001AAAA0002 /* RiveRuntime */,
 			);
 			productName = YouKong;
 			productReference = 76373F7D2F2658C90054FAD9 /* YouKong.app */;
@@ -116,6 +119,7 @@
 			mainGroup = 00000000000000000000000;
 			packageReferences = (
 				7671D2462F2F905B004D5CA7 /* XCRemoteSwiftPackageReference "Factory" */,
+				A1B2C3D4E5F60001AAAA0001 /* XCRemoteSwiftPackageReference "rive-ios" */,
 			);
 			productRefGroup = 22222222222222222222222 /* Products */;
 			projectDirPath = "";
@@ -370,6 +374,14 @@
 				minimumVersion = 2.5.3;
 			};
 		};
+		A1B2C3D4E5F60001AAAA0001 /* XCRemoteSwiftPackageReference "rive-ios" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/rive-app/rive-ios";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 6.0.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -382,6 +394,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 7671D2462F2F905B004D5CA7 /* XCRemoteSwiftPackageReference "Factory" */;
 			productName = FactoryKit;
+		};
+		A1B2C3D4E5F60001AAAA0002 /* RiveRuntime */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B2C3D4E5F60001AAAA0001 /* XCRemoteSwiftPackageReference "rive-ios" */;
+			productName = RiveRuntime;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

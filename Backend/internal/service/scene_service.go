@@ -64,7 +64,7 @@ func (s *SceneService) GenerateScene(ctx context.Context, userID string, inferen
 	}
 
 	// 2. 构建 prompt
-	prompt := fmt.Sprintf(`你是一个像素游戏场景设计师。为用户的当前状态设计一个像素场景和2个互动选项。
+	prompt := fmt.Sprintf(`你是一个场景设计师。为用户的当前状态设计动画状态、像素场景和2个互动选项。
 
 用户: %s
 画像: %s
@@ -72,21 +72,41 @@ func (s *SceneService) GenerateScene(ctx context.Context, userID string, inferen
 地点: %s
 时间: %s
 
-**像素场景**（从以下选项中选择最合适的组合）:
+**1. rive_state（动画状态，从以下选一个最匹配的）:**
+idle, walking, eating, sleeping, working, gaming, exercising, reading, drinking, cooking, driving, shopping, chatting, relaxing, running
+
+映射规则:
+- 吃饭/聚餐/火锅/烧烤等 → eating
+- 走路/散步/逛街 → walking
+- 跑步/慢跑 → running
+- 睡觉/午睡/休息(躺) → sleeping
+- 工作/开会/上班/办公 → working
+- 玩手机/玩游戏/打游戏 → gaming
+- 运动/健身/打球/瑜伽 → exercising
+- 看书/学习/阅读 → reading
+- 喝咖啡/喝茶/喝奶茶 → drinking
+- 做饭/烹饪 → cooking
+- 开车/坐车/坐地铁/通勤 → driving
+- 购物/逛超市 → shopping
+- 聊天/打电话/视频 → chatting
+- 在家/看电视/刷手机/放松 → relaxing
+- 其他/不确定 → idle
+
+**2. 像素场景**（从以下选项中选择最合适的组合）:
 - pose: standing/sitting/lying/running/walking/crouching
 - arms: down/up/forward/holding/waving/typing
 - expression: normal/happy/sleepy/focused/excited/tired
 - prop: food/laptop/book/phone/weights/coffee/controller/ball/bag/umbrella/none
 - surface: ground/chair/desk/bed/couch/none
 
-**互动选项**（基于这个人的性格和当前状态，设计2个有趣的互动）:
+**3. 互动选项**（基于这个人的性格和当前状态，设计2个有趣的互动）:
 - 要有创意，不要通用的"打招呼"
 - 要结合这个人的画像特点
 - 互动是好友对这个人做的动作
 - 每个互动: emoji + 按钮文字(2-5字) + 推送文案(一句话描述动作)
 
 输出纯JSON，不要任何其他文字:
-{"scene":{"pose":"","arms":"","expression":"","prop":"","surface":""},"interactions":[{"emoji":"","label":"","push_text":""},{"emoji":"","label":"","push_text":""}]}`,
+{"rive_state":"","scene":{"pose":"","arms":"","expression":"","prop":"","surface":""},"interactions":[{"emoji":"","label":"","push_text":""},{"emoji":"","label":"","push_text":""}]}`,
 		nickname, personaText,
 		inference.Emoji, inference.Activity,
 		inference.Place, time.Now().Format("15:04"))
@@ -106,6 +126,7 @@ func (s *SceneService) GenerateScene(ctx context.Context, userID string, inferen
 
 	// 5. 验证+修正场景字段
 	validateScene(&enrichment.Scene)
+	validateRiveState(&enrichment)
 
 	// 6. 确保有 2 个互动选项
 	if len(enrichment.Interactions) < 2 {
@@ -122,8 +143,8 @@ func (s *SceneService) GenerateScene(ctx context.Context, userID string, inferen
 	// 7. 缓存到 Redis（和推断结果生命周期一致）
 	s.cacheScene(ctx, userID, &enrichment)
 
-	fmt.Printf("[场景] 生成完成 user=%s pose=%s prop=%s interactions=%d\n",
-		userID, enrichment.Scene.Pose, enrichment.Scene.Prop, len(enrichment.Interactions))
+	fmt.Printf("[场景] 生成完成 user=%s rive_state=%s pose=%s prop=%s interactions=%d\n",
+		userID, enrichment.RiveState, enrichment.Scene.Pose, enrichment.Scene.Prop, len(enrichment.Interactions))
 
 	return &enrichment, nil
 }
@@ -222,5 +243,18 @@ func validateScene(scene *model.SceneConfig) {
 	}
 	if !validSurfaces[scene.Surface] {
 		scene.Surface = "none"
+	}
+}
+
+// validateRiveState 验证并修正 rive_state
+func validateRiveState(enrichment *model.SceneEnrichment) {
+	validStates := map[string]bool{
+		"idle": true, "walking": true, "eating": true, "sleeping": true,
+		"working": true, "gaming": true, "exercising": true, "reading": true,
+		"drinking": true, "cooking": true, "driving": true, "shopping": true,
+		"chatting": true, "relaxing": true, "running": true,
+	}
+	if !validStates[enrichment.RiveState] {
+		enrichment.RiveState = "idle"
 	}
 }

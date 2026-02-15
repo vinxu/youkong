@@ -21,6 +21,7 @@ type InteractionOption struct {
 // SceneEnrichment 场景+互动（LLM 生成，缓存在 Redis）
 type SceneEnrichment struct {
 	Scene        SceneConfig        `json:"scene"`
+	RiveState    string             `json:"rive_state"`    // Rive 动画状态: idle/walking/eating/sleeping/working/gaming/exercising/reading/drinking/cooking/driving/shopping/chatting/relaxing/running
 	Interactions []InteractionOption `json:"interactions"`
 }
 

@@ -156,7 +156,15 @@ struct GridHomeView: View {
                     gifUrl: friend.gifUrl,
                     giphyQuery: friend.giphyQuery,
                     useGif: friend.useGif,
-                    needsSchedule: friend.needsSchedule
+                    needsSchedule: friend.needsSchedule,
+                    riveState: friend.riveState,
+                    scenePose: friend.sceneConfig?.pose,
+                    sceneArms: friend.sceneConfig?.arms,
+                    sceneExpression: friend.sceneConfig?.expression,
+                    sceneProp: friend.sceneConfig?.prop,
+                    sceneSurface: friend.sceneConfig?.surface,
+                    interactions: friend.interactions.isEmpty ? nil : friend.interactions,
+                    interactionCount: friend.interactionCount
                 )
             })
         }
@@ -318,6 +326,9 @@ struct GridHomeView: View {
                         },
                         onNeedsScheduleTap: {
                             showAIInference = true
+                        },
+                        onInteraction: { friendId, interaction in
+                            Task { await viewModel.sendInteraction(to: friendId, interaction: interaction) }
                         }
                     )
                     .padding(.horizontal, 16)
@@ -578,6 +589,7 @@ struct FriendGrid: View {
     let friends: [FriendStatus]
     let getUnreadCount: (String) -> Int
     var onNeedsScheduleTap: (() -> Void)? = nil
+    var onInteraction: ((String, InteractionOptionItem) -> Void)? = nil
 
     private var gridSize: Int {
         let count = friends.count
@@ -605,7 +617,10 @@ struct FriendGrid: View {
                     NavigationLink(value: friend) {
                         FriendCard(
                             friend: friend,
-                            unreadCount: getUnreadCount(friend.id)
+                            unreadCount: getUnreadCount(friend.id),
+                            onInteraction: { interaction in
+                                onInteraction?(friend.id, interaction)
+                            }
                         )
                     }
                     .buttonStyle(PlainButtonStyle())
@@ -620,6 +635,10 @@ struct FriendGrid: View {
 struct FriendCard: View {
     let friend: FriendStatus
     var unreadCount: Int = 0
+    var onInteraction: ((InteractionOptionItem) -> Void)? = nil
+
+    @State private var showDualAnimation = false
+    @State private var activeInteraction: InteractionOptionItem? = nil
 
     // 优先级：有空 > 有未读消息 > 普通
     private var borderColor: Color {
@@ -640,30 +659,50 @@ struct FriendCard: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // 顶部边框（带未读标记）
+            // 顶部边框（带未读/互动计数标记）
             ZStack {
                 Text(topBorder)
                     .font(.cliCaptionSmall)
                     .foregroundColor(borderColor)
 
-                // 未读消息角标（有空状态下也显示）
-                if unreadCount > 0 {
-                    HStack {
-                        Spacer()
+                HStack {
+                    Spacer()
+                    if friend.interactionCount > 0 {
+                        Text("×\(friend.interactionCount)")
+                            .font(.cliCaptionSmall)
+                            .foregroundColor(CLIColors.yellow)
+                    } else if unreadCount > 0 {
                         Text("[\(unreadCount)]")
                             .font(.cliCaptionSmall)
                             .foregroundColor(CLIColors.green)
                     }
-                    .padding(.trailing, 4)
                 }
+                .padding(.trailing, 4)
             }
 
             // 内容区域
             VStack(spacing: 4) {
                 if friend.needsSchedule {
-                    // 无状态：显示 +状态 按钮
                     Text("➕")
                         .font(.system(size: 28))
+                        .frame(width: 48, height: 48)
+                } else if showDualAnimation, let interaction = activeInteraction,
+                          let config = friend.sceneConfig {
+                    // 双人互动动画
+                    DualCharacterAnimation(
+                        friendConfig: config,
+                        interactionText: interaction.label,
+                        pixelSize: 2,
+                        onDismiss: { showDualAnimation = false }
+                    )
+                    .frame(width: 48, height: 48)
+                } else if let riveState = friend.riveState, !riveState.isEmpty {
+                    // Rive 动画角色
+                    RiveCharacterView(riveState: riveState)
+                        .frame(width: 48, height: 48)
+                } else if let config = friend.sceneConfig {
+                    // 像素小人
+                    AnimatedPixelCharacter(config: config, pixelSize: 2)
                         .frame(width: 48, height: 48)
                 } else if friend.useGif, let gifUrlStr = friend.gifUrl, let gifUrl = URL(string: gifUrlStr) {
                     GifImageView(url: gifUrl)
@@ -697,8 +736,29 @@ struct FriendCard: View {
                         .lineLimit(1)
                 }
 
-                // 显示城市（如果有），无城市时用空占位保持等高
-                if let city = friend.city, !city.isEmpty {
+                // 城市 或 互动按钮
+                if !friend.interactions.isEmpty && !friend.needsSchedule {
+                    // AI 互动按钮（替代城市显示）
+                    HStack(spacing: 4) {
+                        ForEach(friend.interactions) { interaction in
+                            Button {
+                                activeInteraction = interaction
+                                showDualAnimation = true
+                                onInteraction?(interaction)
+                            } label: {
+                                Text("\(interaction.emoji)\(interaction.label)")
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(CLIColors.green)
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 2)
+                                    .background(CLIColors.green.opacity(0.1))
+                                    .cornerRadius(3)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                } else if let city = friend.city, !city.isEmpty {
                     Text(friend.isVisiting ? "📍来访·\(city)" : city)
                         .font(.cliCaptionSmall)
                         .foregroundColor(friend.isVisiting ? CLIColors.yellow : CLIColors.textWeak)
@@ -718,7 +778,7 @@ struct FriendCard: View {
         .frame(maxWidth: .infinity)
         .background(
             friend.isAvailable
-                ? CLIColors.backgroundHighlight  // 有空时背景微亮
+                ? CLIColors.backgroundHighlight
                 : CLIColors.backgroundSecondary
         )
         .cornerRadius(4)

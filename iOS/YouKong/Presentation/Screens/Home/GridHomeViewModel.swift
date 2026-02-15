@@ -84,7 +84,11 @@ class GridHomeViewModel: ObservableObject {
                     gifUrl: friend.gifUrl,
                     giphyQuery: friend.giphyQuery,
                     useGif: friend.useGif ?? false,
-                    needsSchedule: friend.needsSchedule ?? false
+                    needsSchedule: friend.needsSchedule ?? false,
+                    riveState: friend.riveState,
+                    sceneConfig: friend.pixelSceneConfig,
+                    interactions: friend.interactions ?? [],
+                    interactionCount: friend.interactionCount ?? 0
                 )
             }.sorted { $0.updatedAt > $1.updatedAt }
 
@@ -138,7 +142,11 @@ class GridHomeViewModel: ObservableObject {
                     gifUrl: friend.gifUrl,
                     giphyQuery: friend.giphyQuery,
                     useGif: friend.useGif ?? false,
-                    needsSchedule: friend.needsSchedule ?? false
+                    needsSchedule: friend.needsSchedule ?? false,
+                    riveState: friend.riveState,
+                    sceneConfig: friend.pixelSceneConfig,
+                    interactions: friend.interactions ?? [],
+                    interactionCount: friend.interactionCount ?? 0
                 )
             }.sorted { $0.updatedAt > $1.updatedAt }
 
@@ -155,6 +163,22 @@ class GridHomeViewModel: ObservableObject {
         } catch {
             // 刷新失败时不显示错误弹窗，只打印日志
             print("❌ [GridHome] Refresh failed: \(error)")
+        }
+    }
+
+    // MARK: - Send Interaction
+
+    func sendInteraction(to friendId: String, interaction: InteractionOptionItem) async {
+        do {
+            try await agentRepository.sendInteraction(
+                receiverId: friendId,
+                actionEmoji: interaction.emoji,
+                actionLabel: interaction.label,
+                actionPushText: interaction.pushText
+            )
+            print("🎮 [GridHome] 互动发送成功: \(interaction.label) → \(friendId)")
+        } catch {
+            print("❌ [GridHome] 互动发送失败: \(error)")
         }
     }
 
@@ -193,6 +217,14 @@ struct FriendStatus: Identifiable, Hashable {
     let giphyQuery: String?   // Giphy 搜索词
     let useGif: Bool          // 是否使用 GIF 显示模式
     let needsSchedule: Bool   // 自己当前无行程，需要设置
+    // Rive 动画状态
+    let riveState: String?
+    // 像素场景
+    let sceneConfig: PixelSceneConfig?
+    // AI 互动选项
+    let interactions: [InteractionOptionItem]
+    // 今日互动计数
+    let interactionCount: Int
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
@@ -204,6 +236,9 @@ struct FriendStatus: Identifiable, Hashable {
         hasher.combine(gifUrl)
         hasher.combine(useGif)
         hasher.combine(needsSchedule)
+        hasher.combine(riveState)
+        hasher.combine(sceneConfig)
+        hasher.combine(interactionCount)
     }
 
     static func == (lhs: FriendStatus, rhs: FriendStatus) -> Bool {
@@ -215,6 +250,9 @@ struct FriendStatus: Identifiable, Hashable {
         lhs.isVisiting == rhs.isVisiting &&
         lhs.gifUrl == rhs.gifUrl &&
         lhs.useGif == rhs.useGif &&
-        lhs.needsSchedule == rhs.needsSchedule
+        lhs.needsSchedule == rhs.needsSchedule &&
+        lhs.riveState == rhs.riveState &&
+        lhs.sceneConfig == rhs.sceneConfig &&
+        lhs.interactionCount == rhs.interactionCount
     }
 }
