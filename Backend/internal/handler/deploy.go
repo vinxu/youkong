@@ -215,7 +215,7 @@ func (h *DeployHandler) deployBackend(url string) error {
 	// 用 systemd-run 在独立 scope 中安排延迟重启
 	// systemd stop 会杀掉当前 cgroup 里所有进程，nohup/setsid 无效
 	// systemd-run 创建 transient unit，不受当前服务 cgroup 管控
-	h.logger.Info("安排延迟启动任务")
+	h.logger.Info("安排延迟启动任务（systemd-run）")
 	startCmd := exec.Command("systemd-run", "--on-active=3s", "--unit=youkong-restart",
 		"bash", "-c", "systemctl start youkong && rm -f "+oldServerPath)
 	if output, err := startCmd.CombinedOutput(); err != nil {
