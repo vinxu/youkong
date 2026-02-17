@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -100,6 +101,20 @@ func NewVoiceScheduleServiceV4(
 // getToolsForSession 根据 session 状态动态选择工具集
 // 基础 8 工具始终加载，其余工具按条件加载（LLM 看不到的工具不会误选）
 func (s *VoiceScheduleServiceV4) getToolsForSession(session *model.V4Session) []*agent.Tool {
+	// 4选1推断模式：使用 generate_status_options 工具
+	if session.InferenceOptionsMode {
+		deps := &agent.InferenceToolDeps{
+			RedisClient:        s.redisClient,
+			MemoryRepo:         s.memoryRepo,
+			ScheduleRepo:       s.scheduleRepo,
+			UserProfileService: s.userProfileService,
+			LocationService:    s.locationService,
+			MemoryDocRepo:      s.memoryDocRepo,
+			UserID:             session.UserID,
+		}
+		return agent.InferenceOptionsTools(deps)
+	}
+
 	// 推断模式：使用推断专用版 set_status（优化描述引导具体输出）
 	if session.InferenceMode {
 		return []*agent.Tool{agent.V4InferenceSetStatusTool()}
@@ -246,6 +261,342 @@ func (s *VoiceScheduleServiceV4) InferStatus(
 	}, nil
 }
 
+// InferStatusOptions 4选1 推断模式入口
+// 生成 4 个多样化的状态选项供用户选择
+func (s *VoiceScheduleServiceV4) InferStatusOptions(
+	ctx context.Context,
+	userID string,
+	sensorData *model.ExtendedStatusReportRequest,
+	inferenceContext string,
+	excludeActivities []string,
+	existingSessionID string,
+) (*model.InferenceOptionsResponse, error) {
+	inferStartTime := time.Now()
+
+	if s.llmAdapter == nil {
+		return nil, fmt.Errorf("LLM 未配置")
+	}
+
+	// 缓存传感器数据
+	if sensorData != nil {
+		s.cacheSensorDataForInference(ctx, userID, sensorData)
+	}
+
+	// 服务端位置覆写
+	if sensorData != nil && s.locationService != nil {
+		s.enrichSensorLocation(ctx, userID, sensorData)
+	}
+
+	// 创建临时 session
+	session := &model.V4Session{
+		UserID:               userID,
+		SessionID:            fmt.Sprintf("infer_opts_%s_%d", userID, time.Now().UnixMilli()),
+		CreatedAt:            time.Now(),
+		InferenceMode:        true,
+		InferenceOptionsMode: true,
+		InferenceContext:     inferenceContext,
+		SensorData:           sensorData,
+	}
+
+	// 加载今日安排
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	if schedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, userID, today); err == nil && schedule != nil {
+		session.CurrentSchedule = schedule.Items
+	}
+
+	// 构建用户消息
+	userMsg := "请分析设备信号，生成 4 个可能的状态选项"
+	if len(excludeActivities) > 0 {
+		userMsg += fmt.Sprintf("\n\n以下活动已展示过，请生成完全不同的选项：%s", strings.Join(excludeActivities, "、"))
+	}
+	session.AddMessage("user", userMsg)
+
+	// 运行 V4 主循环
+	noopCallback := func(event *model.V4Event) {}
+	if err := s.processLoopWithTools(ctx, session, noopCallback); err != nil {
+		return nil, fmt.Errorf("4选1推断循环失败: %w", err)
+	}
+
+	// 获取结果
+	options := session.InferenceOptionsResult
+	if len(options) == 0 {
+		return nil, fmt.Errorf("LLM 未生成选项")
+	}
+
+	// 并行获取 GIF URL
+	s.fetchGifURLsBatch(ctx, options, userID)
+
+	// 确定 session ID
+	sessionID := existingSessionID
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("opts_%s_%d", userID, time.Now().UnixMilli())
+	}
+
+	// 创建/更新 Redis 会话
+	s.saveInferenceOptionsSession(ctx, sessionID, userID, options, existingSessionID)
+
+	// 异步记录日志
+	go func() {
+		latency := time.Since(inferStartTime).Seconds()
+		activities := make([]string, len(options))
+		for i, opt := range options {
+			activities[i] = opt.Activity
+		}
+		fmt.Printf("[InferOptions] user=%s options=%v latency=%.1fs tokens=%d\n",
+			userID, activities, latency, session.TotalCompletionTokens)
+	}()
+
+	return &model.InferenceOptionsResponse{
+		SessionID: sessionID,
+		Options:   options,
+	}, nil
+}
+
+// executeGenerateStatusOptions 执行 generate_status_options 工具
+func (s *VoiceScheduleServiceV4) executeGenerateStatusOptions(
+	ctx context.Context,
+	session *model.V4Session,
+	args map[string]interface{},
+	callback func(event *model.V4Event),
+) (interface{}, bool) {
+	optionsRaw, _ := args["options"].([]interface{})
+	if len(optionsRaw) == 0 {
+		return map[string]string{"error": "options 为空"}, false
+	}
+
+	options := make([]model.StatusCardOption, 0, len(optionsRaw))
+	for i, opt := range optionsRaw {
+		optMap, ok := opt.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		emoji, _ := optMap["emoji"].(string)
+		activity, _ := optMap["activity"].(string)
+		place, _ := optMap["place"].(string)
+		isAvailable, _ := optMap["is_available"].(bool)
+		confidence, _ := optMap["confidence"].(string)
+		giphyQuery, _ := optMap["giphy_query"].(string)
+
+		if emoji == "" || activity == "" {
+			continue
+		}
+		if confidence == "" {
+			confidence = "medium"
+		}
+
+		options = append(options, model.StatusCardOption{
+			Index:       i,
+			Emoji:       emoji,
+			Activity:    activity,
+			Place:       place,
+			IsAvailable: isAvailable,
+			Confidence:  confidence,
+			GiphyQuery:  giphyQuery,
+		})
+	}
+
+	session.InferenceOptionsResult = options
+
+	return map[string]interface{}{
+		"status":  "options_generated",
+		"count":   len(options),
+		"message": fmt.Sprintf("已生成 %d 个选项", len(options)),
+	}, true // shouldBreak = true
+}
+
+// fetchGifURLsBatch 并行获取多个 GIF URL
+func (s *VoiceScheduleServiceV4) fetchGifURLsBatch(ctx context.Context, options []model.StatusCardOption, userID string) {
+	type gifWork struct {
+		idx   int
+		query string
+	}
+
+	var works []gifWork
+	for i := range options {
+		query := options[i].GiphyQuery
+		if query == "" {
+			// 没有 giphy_query，尝试用 activity 翻译
+			query = s.translateActivityToGiphyQuery(ctx, options[i].Activity)
+			if query != "" {
+				options[i].GiphyQuery = query
+			}
+		}
+		if query != "" {
+			works = append(works, gifWork{idx: i, query: query})
+		}
+	}
+
+	if len(works) == 0 {
+		return
+	}
+
+	// 并行搜索 GIF
+	type gifResult struct {
+		idx int
+		url string
+	}
+	results := make(chan gifResult, len(works))
+
+	for _, w := range works {
+		go func(work gifWork) {
+			url := s.searchGiphyURL(ctx, work.query)
+			results <- gifResult{idx: work.idx, url: url}
+		}(w)
+	}
+
+	// 收集结果（带超时）
+	timeout := time.After(5 * time.Second)
+	collected := 0
+	for collected < len(works) {
+		select {
+		case r := <-results:
+			if r.url != "" {
+				options[r.idx].GifURL = r.url
+			}
+			collected++
+		case <-timeout:
+			fmt.Printf("[fetchGifURLsBatch] 超时，已获取 %d/%d\n", collected, len(works))
+			return
+		}
+	}
+}
+
+// translateActivityToGiphyQuery 将中文活动翻译为英文 Giphy 搜索词
+func (s *VoiceScheduleServiceV4) translateActivityToGiphyQuery(ctx context.Context, activity string) string {
+	if activity == "" || s.llmAdapter == nil {
+		return ""
+	}
+
+	// 先查缓存
+	cacheKey := fmt.Sprintf("giphy:query:%s", activity)
+	if s.redisClient != nil {
+		if cached, err := s.redisClient.Get(ctx, cacheKey); err == nil && cached != "" {
+			return cached
+		}
+	}
+
+	prompt := fmt.Sprintf(`Output 2-4 English keywords for searching a GIF matching this activity. Only output the keywords, nothing else.
+Activity: %s`, activity)
+
+	query, err := s.llmAdapter.Chat(ctx, prompt)
+	if err != nil {
+		return ""
+	}
+	query = strings.TrimSpace(query)
+	query = strings.Trim(query, "\"'`")
+
+	if query != "" && s.redisClient != nil {
+		s.redisClient.Set(ctx, cacheKey, query, 24*time.Hour)
+	}
+	return query
+}
+
+// searchGiphyURL 调用 Giphy API 获取 GIF URL
+func (s *VoiceScheduleServiceV4) searchGiphyURL(ctx context.Context, query string) string {
+	if query == "" {
+		return ""
+	}
+
+	// 先查缓存
+	cacheKey := fmt.Sprintf("giphy:url:%s", query)
+	if s.redisClient != nil {
+		if cached, err := s.redisClient.Get(ctx, cacheKey); err == nil && cached != "" {
+			return cached
+		}
+	}
+
+	// 调用 Giphy API
+	apiKey := "Ned8bTKUTSlYen6oZXmacc1sLmlLn9U8"
+	searchURL := fmt.Sprintf("https://api.giphy.com/v1/gifs/search?api_key=%s&q=%s&limit=1&rating=g&lang=en",
+		apiKey, strings.ReplaceAll(query, " ", "+"))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	if err != nil {
+		return ""
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var apiResp struct {
+		Data []struct {
+			Images struct {
+				FixedHeight struct {
+					URL string `json:"url"`
+				} `json:"fixed_height"`
+				Original struct {
+					URL string `json:"url"`
+				} `json:"original"`
+			} `json:"images"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil || len(apiResp.Data) == 0 {
+		return ""
+	}
+
+	gifURL := apiResp.Data[0].Images.FixedHeight.URL
+	if gifURL == "" {
+		gifURL = apiResp.Data[0].Images.Original.URL
+	}
+
+	// 缓存结果
+	if gifURL != "" && s.redisClient != nil {
+		s.redisClient.Set(ctx, cacheKey, gifURL, 7*24*time.Hour)
+	}
+
+	return gifURL
+}
+
+// saveInferenceOptionsSession 保存/更新推断选项会话到 Redis
+func (s *VoiceScheduleServiceV4) saveInferenceOptionsSession(
+	ctx context.Context, sessionID, userID string, options []model.StatusCardOption, existingSessionID string,
+) {
+	if s.redisClient == nil {
+		return
+	}
+
+	var optSession model.InferenceOptionsSession
+
+	// 如果是换一批，读取现有会话
+	if existingSessionID != "" {
+		key := fmt.Sprintf("infer:opts:%s", existingSessionID)
+		if data, err := s.redisClient.GetBytes(ctx, key); err == nil && len(data) > 0 {
+			json.Unmarshal(data, &optSession)
+		}
+	}
+
+	if optSession.SessionID == "" {
+		optSession = model.InferenceOptionsSession{
+			SessionID: sessionID,
+			UserID:    userID,
+			CreatedAt: time.Now().Unix(),
+		}
+	}
+
+	// 追加新批次
+	optSession.Batches = append(optSession.Batches, model.InferenceOptionsBatch{
+		Options: options,
+		ShownAt: time.Now().Unix(),
+	})
+
+	data, err := json.Marshal(optSession)
+	if err != nil {
+		return
+	}
+
+	key := fmt.Sprintf("infer:opts:%s", sessionID)
+	s.redisClient.Set(ctx, key, data, 30*time.Minute)
+}
+
 // processTextInputInternal 处理文本输入（内部方法，调用方已持有锁）
 func (s *VoiceScheduleServiceV4) processTextInputInternal(
 	ctx context.Context,
@@ -380,7 +731,7 @@ func (s *VoiceScheduleServiceV4) processLoopWithTools(
 		// 3. 调用 LLM（启用 thinking mode，精确决策低温度）
 		// 推断模式是后台任务，给更多思考空间让模型自主推理
 		thinkingBudget := 2048
-		if session.InferenceMode {
+		if session.InferenceMode || session.InferenceOptionsMode {
 			thinkingBudget = 6144
 		}
 		response, err := s.llmAdapter.ChatWithTools(ctx, &agent.LLMRequest{
@@ -719,6 +1070,55 @@ func (s *VoiceScheduleServiceV4) buildSystemPrompt(session *model.V4Session) str
 		}
 	}
 
+	// ========== 4选1 推断模式 ==========
+	if session.InferenceOptionsMode {
+		holidayContext := getChineseHolidayContext(time.Now())
+
+		sb.WriteString(`【推断模式（4选1）】
+你是「有空」状态推断引擎。分析设备信号，生成 4 个用户此刻可能在做的状态。
+调用 generate_status_options 工具输出。不要输出文字给用户。
+
+# 选项多样性原则
+- 第 1 个选项：基于最强信号的最可能推断
+- 第 2 个选项：考虑时间和地点的另一种合理活动
+- 第 3 个选项：从生活常识角度的可能活动
+- 第 4 个选项：一个不太常规但合理的可能性
+- 4 个选项不能有重复或高度相似的活动
+
+# 推断原则
+1. **信号驱动**：实时设备信号（屏幕、位置、运动、日历）是此刻状态的直接证据，优先级最高。时刻表和历史记录是辅助参考。AI 推测与实时信号矛盾时忽略。
+2. **具体化**：用户状态应该是具体的日常活动（2-4字），不要使用笼统描述。想象你是用户的朋友，你会怎样用最简短的口语描述他现在在做什么。
+3. **时间语境**：工作日和周末的同一信号可能意味着不同活动。深夜、清晨、午间有各自的合理推断。
+4. **is_available 含义**：表示用户此刻是否方便被打扰/有空社交。
+5. **用户修正**：修正历史中纠正过的推断不能再犯。
+6. **深夜/凌晨**：22:00-06:00 + 在家 + 屏幕长时间不活跃(>60min) → 大概率在睡觉。轮班工作者在工作地点则可能在值班。
+7. **职业参考**：注意用户画像中的职业类型和工作时间。
+8. **多样性**：人的日常活动是丰富多样的。不要重复输出相同的状态。避免推断"刷手机"。
+9. **屏幕信号解读**：activity_type=idle 或无屏幕数据时，不要假设用户在用手机。
+
+# status 格式
+- 2-4字，口语化动词短语，不要加地点前缀和修饰词
+
+# emoji 选择
+用 1-3 个 emoji 组合反映地点+活动。
+
+`)
+		if holidayContext != "" {
+			sb.WriteString(fmt.Sprintf("# 文化上下文\n%s\n\n", holidayContext))
+		}
+		if session.InferenceContext != "" {
+			sb.WriteString("【多维上下文数据】\n")
+			sb.WriteString(session.InferenceContext)
+			sb.WriteString("\n\n")
+		}
+		if session.SensorData != nil {
+			sb.WriteString("【实时设备数据】\n")
+			sb.WriteString(formatSensorData(session.SensorData))
+			sb.WriteString("\n\n")
+		}
+		return sb.String()
+	}
+
 	// ========== 推断模式（V4 替代 V3 StatusInferenceAgent）==========
 	// 设计原则：prompt 引导思考方向，不硬编码规则；推理在 thinking tokens 中完成
 	if session.InferenceMode {
@@ -1033,6 +1433,7 @@ func (s *VoiceScheduleServiceV4) getToolDescription(toolName string) string {
 		"remove_friend":             "正在准备删除好友...",
 		"match_contacts":            "正在匹配通讯录...",
 		"add_friend":                "正在添加好友...",
+		"generate_status_options":   "正在生成状态选项...",
 	}
 
 	if desc, ok := descriptions[toolName]; ok {
@@ -1087,6 +1488,10 @@ func (s *VoiceScheduleServiceV4) executeTool(
 
 	case "add_friend":
 		return s.executeAddFriend(ctx, session, args, callback)
+
+	// ========== 4选1推断工具 ==========
+	case "generate_status_options":
+		return s.executeGenerateStatusOptions(ctx, session, args, callback)
 
 	default:
 		return map[string]string{"error": "未知工具: " + toolName}, false
@@ -3380,6 +3785,7 @@ func (s *VoiceScheduleServiceV4) cacheSensorDataForInference(ctx context.Context
 }
 
 // enrichSensorLocation 用服务端聚类结果覆写客户端 place_type
+// 设计原则：不知道就说不知道，让 LLM 从其他信号（电池、WiFi、运动、时间）自行推断
 func (s *VoiceScheduleServiceV4) enrichSensorLocation(ctx context.Context, userID string, data *model.ExtendedStatusReportRequest) {
 	var lat, lng float64
 	if data.ExtendedLocation != nil {
@@ -3396,12 +3802,22 @@ func (s *VoiceScheduleServiceV4) enrichSensorLocation(ctx context.Context, userI
 		return
 	}
 	classification, ok := result.(*LocationClassification)
-	if !ok || classification.PlaceType == "" || classification.PlaceType == "first_visit" {
+	if !ok || classification.PlaceType == "" {
 		return
 	}
 
+	var serverType model.PlaceType
+
+	if classification.PlaceType == "first_visit" {
+		// 服务端数据不足（< 3 次访问），无法可靠分类
+		// 统一设为 unknown，让 LLM 从其他传感器信号自行推断位置
+		// 避免客户端的 leisure 误导 LLM 猜出"景点散步"之类的结果
+		serverType = model.PlaceUnknown
+	} else {
+		serverType = model.PlaceType(classification.PlaceType)
+	}
+
 	// 覆写客户端 place_type 为服务端分类结果（两个字段都覆写，保持一致）
-	serverType := model.PlaceType(classification.PlaceType)
 	if data.ExtendedLocation != nil {
 		data.ExtendedLocation.PlaceType = serverType
 	}

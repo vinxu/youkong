@@ -700,10 +700,14 @@ type V4Session struct {
 	// ========== 推断模式（V4 替代 V3 StatusInferenceAgent）==========
 	// InferenceMode 为 true 时，V4 只暴露 set_status 工具，用于状态推断
 	InferenceMode    bool   `json:"-"`
+	// InferenceOptionsMode 为 true 时，使用 generate_status_options 工具生成 4 个选项
+	InferenceOptionsMode bool `json:"-"`
 	// InferenceContext 预聚合的推断上下文（PreGatherContext 格式化后的文本）
 	InferenceContext string `json:"-"`
 	// InferenceResult 推断模式下 set_status 执行后的结果（从 tool call args 提取）
 	InferenceResult  *CurrentStatusInference `json:"-"`
+	// InferenceOptionsResult 4选1 模式下 generate_status_options 执行后的结果
+	InferenceOptionsResult []StatusCardOption `json:"-"`
 	// LastReasoning LLM 最后一轮的 thinking 内容（用于日志记录）
 	LastReasoning      string `json:"-"`
 	// TotalCompletionTokens 所有 LLM 调用的 completion_tokens 累计（用于日志记录）

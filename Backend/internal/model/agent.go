@@ -183,6 +183,8 @@ type StatusFeedbackRequest struct {
 	GifURL              string `json:"gif_url,omitempty"`         // 客户端获取的 GIF URL
 	GiphyQuery          string `json:"giphy_query,omitempty"`     // Giphy 搜索词（用于后续重新搜索）
 	UseGif              bool   `json:"use_gif"`                   // 是否使用 GIF 显示模式（默认 false 显示 emoji）
+	InferenceSessionID  string `json:"inference_session_id,omitempty"` // 4选1会话ID
+	SelectedOptionIdx   int    `json:"selected_option_idx,omitempty"`  // 选了第几个
 }
 
 // StatusMemoryEntry 状态记忆条目（存储用户修正历史，用于改进推理）
@@ -243,6 +245,50 @@ type InferenceResponse struct {
 	Question  string                `json:"question,omitempty"`   // phase=awaiting_choice 时有值
 	Options   []InferenceOption     `json:"options,omitempty"`    // phase=awaiting_choice 时有值
 	DefaultIdx int                  `json:"default_index,omitempty"`
+}
+
+// ========== 4选1 推断选项模型 ==========
+
+// StatusCardOption 推断选项（4选1卡片）
+type StatusCardOption struct {
+	Index       int    `json:"index"`
+	Emoji       string `json:"emoji"`
+	Activity    string `json:"activity"`
+	Place       string `json:"place,omitempty"`
+	IsAvailable bool   `json:"is_available"`
+	Confidence  string `json:"confidence"`
+	GiphyQuery  string `json:"giphy_query"`      // 英文 GIF 搜索词（LLM 同步生成）
+	GifURL      string `json:"gif_url,omitempty"` // 后端预取的 GIF URL
+}
+
+// InferenceOptionsResponse 4选1推断响应
+type InferenceOptionsResponse struct {
+	SessionID string             `json:"session_id"`
+	Options   []StatusCardOption `json:"options"`
+}
+
+// InferenceOptionsSession 推断选项会话（存 Redis，30min TTL）
+type InferenceOptionsSession struct {
+	SessionID        string                  `json:"session_id"`
+	UserID           string                  `json:"user_id"`
+	Batches          []InferenceOptionsBatch `json:"batches"`
+	SelectedBatchIdx int                     `json:"selected_batch_idx"`
+	SelectedOptIdx   int                     `json:"selected_option_idx"`
+	Confirmed        bool                    `json:"confirmed"`
+	CreatedAt        int64                   `json:"created_at"`
+}
+
+// InferenceOptionsBatch 推断选项批次
+type InferenceOptionsBatch struct {
+	Options []StatusCardOption `json:"options"`
+	ShownAt int64          `json:"shown_at"`
+}
+
+// InferOptionsRequest 4选1推断请求
+type InferOptionsRequest struct {
+	ExtendedStatusReportRequest                    // 嵌入传感器数据
+	ExcludeActivities           []string `json:"exclude_activities,omitempty"` // 换一批时排除已展示的
+	SessionID                   string   `json:"session_id,omitempty"`         // 换一批时传入会话ID
 }
 
 // AgentInferenceContext 预聚合的推断上下文（Go 代码收集，注入 system prompt）

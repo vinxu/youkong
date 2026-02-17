@@ -223,6 +223,99 @@ func createAskUserChoiceHandler(deps *InferenceToolDeps) ToolHandler {
 	}
 }
 
+// ========== 4选1 推断工具 ==========
+
+// InferenceOptionsTools 返回 4选1 推断工具列表（仅 1 个工具）
+func InferenceOptionsTools(deps *InferenceToolDeps) []*Tool {
+	return []*Tool{
+		generateStatusOptionsTool(deps),
+	}
+}
+
+func generateStatusOptionsTool(deps *InferenceToolDeps) *Tool {
+	return &Tool{
+		Name: "generate_status_options",
+		Description: `生成 4 个可能的状态选项供用户选择。每个选项应代表用户此刻可能在做的不同活动。
+
+规则：
+- 必须生成恰好 4 个选项
+- 4 个选项应覆盖不同类型的活动（如：工作类、休闲类、生活类、社交类）
+- 按可能性从高到低排列（第 1 个是最可能的）
+- 每个选项的 giphy_query 用 2-4 个英文关键词，描述该活动的视觉场景（用于搜索 GIF 动图）
+- giphy_query 要具象化（如 "cooking kitchen" 而非 "at home"）
+- activity 用 2-4 字口语化动词短语`,
+		Parameters: ToolParameters{
+			Type: "object",
+			Properties: map[string]ToolParam{
+				"options": {
+					Type:        "array",
+					Description: "4 个状态选项",
+					Items: &ToolParam{
+						Type:        "object",
+						Description: "选项对象，包含 emoji(string), activity(string), place(string, optional), is_available(boolean), confidence(string: high/medium/low), giphy_query(string: 英文搜索词)",
+					},
+				},
+			},
+			Required: []string{"options"},
+		},
+		Handler: createGenerateOptionsHandler(deps),
+	}
+}
+
+func createGenerateOptionsHandler(deps *InferenceToolDeps) ToolHandler {
+	return func(ctx context.Context, args map[string]interface{}) (*ToolResult, error) {
+		optionsRaw, _ := args["options"].([]interface{})
+		if len(optionsRaw) == 0 {
+			return &ToolResult{Success: false, Error: "options 不能为空"}, nil
+		}
+
+		options := make([]model.StatusCardOption, 0, len(optionsRaw))
+		for i, opt := range optionsRaw {
+			optMap, ok := opt.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			emoji, _ := optMap["emoji"].(string)
+			activity, _ := optMap["activity"].(string)
+			place, _ := optMap["place"].(string)
+			isAvailable, _ := optMap["is_available"].(bool)
+			confidence, _ := optMap["confidence"].(string)
+			giphyQuery, _ := optMap["giphy_query"].(string)
+
+			if emoji == "" || activity == "" {
+				continue
+			}
+			if confidence == "" {
+				confidence = "medium"
+			}
+
+			options = append(options, model.StatusCardOption{
+				Index:       i,
+				Emoji:       emoji,
+				Activity:    activity,
+				Place:       place,
+				IsAvailable: isAvailable,
+				Confidence:  confidence,
+				GiphyQuery:  giphyQuery,
+			})
+		}
+
+		if len(options) == 0 {
+			return &ToolResult{Success: false, Error: "没有有效的选项"}, nil
+		}
+
+		return &ToolResult{
+			Success: true,
+			Data: map[string]interface{}{
+				"status":  "options_generated",
+				"options": options,
+				"message": fmt.Sprintf("已生成 %d 个选项", len(options)),
+			},
+			ShouldStop: true,
+		}, nil
+	}
+}
+
 // ========== 预聚合: Go 代码收集所有数据源 ==========
 
 // PreGatherContext 预聚合所有推断数据源（Go 代码执行，~50ms）

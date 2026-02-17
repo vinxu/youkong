@@ -1486,7 +1486,67 @@ func (s *AgentService) SaveStatusFeedback(ctx context.Context, userID string, re
 		}
 	}
 
+	// 4选1 会话数据收集：更新选择记录
+	if req.InferenceSessionID != "" && s.redisClient != nil {
+		optKey := fmt.Sprintf("infer:opts:%s", req.InferenceSessionID)
+		if data, err := s.redisClient.GetBytes(ctx, optKey); err == nil && len(data) > 0 {
+			var optSession model.InferenceOptionsSession
+			if json.Unmarshal(data, &optSession) == nil {
+				optSession.SelectedBatchIdx = len(optSession.Batches) - 1
+				optSession.SelectedOptIdx = req.SelectedOptionIdx
+				optSession.Confirmed = true
+				if updated, err := json.Marshal(optSession); err == nil {
+					s.redisClient.Set(ctx, optKey, updated, 24*time.Hour)
+				}
+
+				// 异步记录到 MySQL（数据收集）
+				go s.saveInferenceOptionSelection(ctx, userID, &optSession, req)
+			}
+		}
+	}
+
 	return nil
+}
+
+// saveInferenceOptionSelection 保存 4选1 选择记录到 MySQL（数据收集）
+func (s *AgentService) saveInferenceOptionSelection(ctx context.Context, userID string, session *model.InferenceOptionsSession, req *model.StatusFeedbackRequest) {
+	// 收集所有展示过的活动
+	var allActivities []string
+	for _, batch := range session.Batches {
+		for _, opt := range batch.Options {
+			allActivities = append(allActivities, opt.Activity)
+		}
+	}
+	allActivitiesJSON, _ := json.Marshal(allActivities)
+
+	// 获取选中的选项
+	selectedEmoji := req.CorrectedEmoji
+	selectedActivity := req.CorrectedActivity
+	if session.SelectedBatchIdx < len(session.Batches) {
+		batch := session.Batches[session.SelectedBatchIdx]
+		if session.SelectedOptIdx < len(batch.Options) {
+			opt := batch.Options[session.SelectedOptIdx]
+			selectedEmoji = opt.Emoji
+			selectedActivity = opt.Activity
+		}
+	}
+
+	// 判断是否编辑了
+	wasEdited := selectedEmoji != req.CorrectedEmoji || selectedActivity != req.CorrectedActivity
+
+	query := `INSERT INTO inference_option_selections
+		(user_id, session_id, total_batches, selected_batch_idx, selected_option_idx,
+		 selected_emoji, selected_activity, all_shown_activities, was_edited,
+		 final_emoji, final_activity)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	if s.memoryRepo != nil {
+		s.memoryRepo.ExecRaw(ctx, query,
+			userID, session.SessionID, len(session.Batches),
+			session.SelectedBatchIdx, session.SelectedOptIdx,
+			selectedEmoji, selectedActivity, string(allActivitiesJSON),
+			wasEdited, req.CorrectedEmoji, req.CorrectedActivity)
+	}
 }
 
 // updateCurrentScheduleItem 更新状态表的当前时间段（只更新今天的）
@@ -1839,7 +1899,8 @@ func (s *AgentService) PersistCityFromExtendedReport(ctx context.Context, userID
 		return
 	}
 
-	// 用服务端聚类覆写客户端 place_type（客户端可能错误分类为 leisure）
+	// 用服务端聚类覆写客户端 place_type
+	// 原则：不知道就说不知道（first_visit → unknown），避免客户端的 leisure 误导下游
 	enrichedLocation := *req.Location
 	if s.locationService != nil {
 		var lat, lng float64
@@ -1850,8 +1911,12 @@ func (s *AgentService) PersistCityFromExtendedReport(ctx context.Context, userID
 		}
 		if lat != 0 || lng != 0 {
 			if result := s.locationService.ClassifyLocation(ctx, userID, lat, lng); result != nil {
-				if classification, ok := result.(*LocationClassification); ok && classification.PlaceType != "" && classification.PlaceType != "first_visit" {
-					enrichedLocation.PlaceType = model.PlaceType(classification.PlaceType)
+				if classification, ok := result.(*LocationClassification); ok && classification.PlaceType != "" {
+					if classification.PlaceType == "first_visit" {
+						enrichedLocation.PlaceType = model.PlaceUnknown
+					} else {
+						enrichedLocation.PlaceType = model.PlaceType(classification.PlaceType)
+					}
 				}
 			}
 		}
