@@ -53,6 +53,18 @@ protocol AgentRepositoryProtocol {
 
     /// 获取好友的时刻表（只含当前和未来条目）
     func getUserSchedule(userId: String) async throws -> MyScheduleHistoryResponse
+
+    /// 发送互动
+    func sendInteraction(receiverId: String, actionEmoji: String, actionLabel: String, actionPushText: String) async throws
+
+    /// 加入卡片房间
+    func joinCard(ownerId: String, emoji: String, statusText: String) async throws -> JoinCardResponse
+
+    /// 获取卡片房间消息
+    func getCardRoomMessages(roomId: String, limit: Int, offset: Int) async throws -> [CardRoomMessage]
+
+    /// 发送卡片房间消息
+    func sendCardRoomMessage(roomId: String, content: String) async throws -> CardRoomMessage
 }
 
 // MARK: - Status Report Request (按 API 规范分组)

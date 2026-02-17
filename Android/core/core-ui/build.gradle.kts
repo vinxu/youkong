@@ -13,6 +13,7 @@ dependencies {
 
     // Coil
     api(libs.coil.compose)
+    api(libs.coil.gif)
 
     // Rive
     api(libs.rive.android)

@@ -217,3 +217,18 @@ func GetProfileTypeName(profileType string) string {
 	}
 	return "其他"
 }
+
+// ComputeRiveCharacter 根据画像类型+性别计算 Rive 角色文件名
+// 返回如 "student_male", "office_worker_female"
+// 前端拼接为 "character_student_male.riv"
+func ComputeRiveCharacter(occupationType OccupationType, gender *string) string {
+	g := "male"
+	if gender != nil && *gender == "female" {
+		g = "female"
+	}
+	occ := string(occupationType)
+	if occ == "" || occ == "other" {
+		occ = "office_worker"
+	}
+	return occ + "_" + g
+}

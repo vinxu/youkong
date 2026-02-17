@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import Factory
+import CryptoKit
 
 // MARK: - Grid Home View Model
 
@@ -18,9 +19,27 @@ class GridHomeViewModel: ObservableObject {
     /// friendId → conversationId 映射
     private var friendConversationMap: [String: String] = [:]
 
+    /// GIF 持久化缓存: "friendId:query" → gifUrl（跨 app 启动保留，每天自动清空）
+    private var gifCache: [String: String]
+
+    private static let gifCacheKey = "gifCache"
+    private static let gifCacheDateKey = "gifCacheDate"
+
     private var cancellables = Set<AnyCancellable>()
 
     init() {
+        // 加载持久化缓存，日期不同则清空
+        let today = Self.todayDateString()
+        let storedDate = UserDefaults.standard.string(forKey: Self.gifCacheDateKey)
+        if storedDate == today,
+           let stored = UserDefaults.standard.dictionary(forKey: Self.gifCacheKey) as? [String: String] {
+            gifCache = stored
+        } else {
+            gifCache = [:]
+            UserDefaults.standard.set(today, forKey: Self.gifCacheDateKey)
+            UserDefaults.standard.removeObject(forKey: Self.gifCacheKey)
+        }
+
         // 观察未读消息变化
         observeUnreadCounts()
     }
@@ -94,6 +113,9 @@ class GridHomeViewModel: ObservableObject {
 
             friends = friendsList
 
+            // 异步解析缺失的 GIF URL
+            resolveGifUrls()
+
             // 会话列表单独加载，失败不影响主流程
             if let conversations = try? await messageRepository.getConversations() {
                 buildFriendConversationMap(conversations)
@@ -111,6 +133,77 @@ class GridHomeViewModel: ObservableObject {
     }
 
     // MARK: - Build Friend Conversation Map
+
+    // MARK: - Resolve GIF URLs
+
+    private func resolveGifUrls() {
+        for i in friends.indices {
+            let friend = friends[i]
+            guard friend.gifUrl == nil || friend.gifUrl?.isEmpty == true,
+                  !friend.needsSchedule else { continue }
+
+            let query = (friend.giphyQuery?.isEmpty == false ? friend.giphyQuery : friend.status) ?? ""
+            guard !query.isEmpty else { continue }
+
+            let cacheKey = "\(friend.id):\(query)"
+
+            // 缓存命中 → 直接使用，不发起网络请求
+            if let cachedUrl = gifCache[cacheKey] {
+                friends[i].gifUrl = cachedUrl
+                friends[i].useGif = true
+                continue
+            }
+
+            let index = i
+            let friendId = friend.id
+            Task {
+                if let url = await fetchGifUrl(query: query, friendId: friendId) {
+                    gifCache[cacheKey] = url
+                    Self.persistGifCache(gifCache)
+                    friends[index].gifUrl = url
+                    friends[index].useGif = true
+                }
+            }
+        }
+    }
+
+    private func fetchGifUrl(query: String, friendId: String) async -> String? {
+        guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+
+        // seed = md5(friendId + query + todayDate)，保证同人同状态当天稳定，每天轮换
+        let today = Self.todayDateString()
+        let seed = Self.md5("\(friendId)\(query)\(today)")
+
+        guard let url = URL(string: "https://gif.playa.cn/api/giphy?q=\(encoded)&seed=\(seed)") else { return nil }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let result = json["result"] as? [String: Any],
+               let cosUrl = result["cos_url"] as? String, !cosUrl.isEmpty {
+                return cosUrl
+            }
+        } catch {
+            print("[GridHome] GIF 解析失败: \(error.localizedDescription)")
+        }
+        return nil
+    }
+
+    // MARK: - Helpers
+
+    private static func md5(_ string: String) -> String {
+        let digest = Insecure.MD5.hash(data: Data(string.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func todayDateString() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
+    private static func persistGifCache(_ cache: [String: String]) {
+        UserDefaults.standard.set(cache, forKey: gifCacheKey)
+    }
 
     private func buildFriendConversationMap(_ conversations: [Conversation]) {
         friendConversationMap.removeAll()
@@ -151,6 +244,8 @@ class GridHomeViewModel: ObservableObject {
             }.sorted { $0.updatedAt > $1.updatedAt }
 
             friends = friendsList
+
+            resolveGifUrls()
 
             // 会话列表单独加载，失败不影响刷新
             if let conversations = try? await messageRepository.getConversations() {
@@ -213,9 +308,9 @@ struct FriendStatus: Identifiable, Hashable {
     let city: String?  // 城市名称（如"上海"、"北京"）
     let isAvailable: Bool  // 是否有空（用于高亮显示）
     let isVisiting: Bool   // 是否来访（当前城市≠常驻城市）
-    let gifUrl: String?       // GIF 动图 URL（仅有空时）
+    var gifUrl: String?       // GIF 动图 URL（仅有空时）
     let giphyQuery: String?   // Giphy 搜索词
-    let useGif: Bool          // 是否使用 GIF 显示模式
+    var useGif: Bool          // 是否使用 GIF 显示模式
     let needsSchedule: Bool   // 自己当前无行程，需要设置
     // Rive 动画状态
     let riveState: String?

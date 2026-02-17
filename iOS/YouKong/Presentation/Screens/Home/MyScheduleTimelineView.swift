@@ -124,37 +124,82 @@ struct MyScheduleTimelineContent: View {
     // MARK: - Schedule List View
 
     private var scheduleListView: some View {
-        ScrollViewReader { proxy in
+        let pastGroups = viewModel.scheduleGroups.filter { !$0.isCurrentOrFuture }
+        let todayAndFutureGroups = viewModel.scheduleGroups.filter { $0.isCurrentOrFuture }
+
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    // Load more indicator at top
-                    if viewModel.hasMore {
+                    // 过往时间表（折叠/展开）
+                    if !pastGroups.isEmpty {
+                        if viewModel.showPastSchedules {
+                            // 加载更多（展开时才显示）
+                            if viewModel.hasMore {
+                                loadMoreIndicator
+                                    .id("load_more_top")
+                                    .onAppear {
+                                        Task { await viewModel.loadMore() }
+                                    }
+                            }
+
+                            // 过往分组（reversed: 最老的在最上面）
+                            ForEach(pastGroups.reversed()) { group in
+                                scheduleGroupRow(group: group)
+                                    .id(group.id)
+                            }
+
+                            // 折叠按钮
+                            Button {
+                                viewModel.showPastSchedules = false
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Text("──")
+                                        .foregroundColor(CLIColors.border)
+                                    Text("收起过往")
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .foregroundColor(CLIColors.textSecondary)
+                                    Text("▴")
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .foregroundColor(CLIColors.textWeak)
+                                    Text("──")
+                                        .foregroundColor(CLIColors.border)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                            }
+                        } else {
+                            // "查看过往" 折叠按钮
+                            Button {
+                                viewModel.showPastSchedules = true
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Text("──")
+                                        .foregroundColor(CLIColors.border)
+                                    Text("查看过往 \(pastGroups.count) 天")
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .foregroundColor(CLIColors.textSecondary)
+                                    Text("▾")
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .foregroundColor(CLIColors.textWeak)
+                                    Text("──")
+                                        .foregroundColor(CLIColors.border)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                            }
+                        }
+                    } else if viewModel.hasMore && viewModel.showPastSchedules {
                         loadMoreIndicator
                             .id("load_more_top")
                             .onAppear {
-                                Task {
-                                    await viewModel.loadMore()
-                                }
+                                Task { await viewModel.loadMore() }
                             }
                     }
 
-                    // Schedule groups (reversed to show newest at bottom)
-                    ForEach(viewModel.scheduleGroups.reversed()) { group in
-                        ScheduleGroupView(
-                            group: group,
-                            isItemExecuted: { viewModel.isItemExecuted($0, in: group) },
-                            isItemActive: { viewModel.isItemActive($0, in: group) },
-                            onEditItem: { item in
-                                viewModel.startEditing(item: item, group: group)
-                            },
-                            onToggleHighlight: { item in
-                                Task { await viewModel.toggleHighlight(item: item, group: group) }
-                            },
-                            onDeleteItem: { item in
-                                viewModel.confirmDelete(item: item, group: group)
-                            }
-                        )
-                        .id(group.id)
+                    // 今天 + 未来的分组（始终可见）
+                    ForEach(todayAndFutureGroups.reversed()) { group in
+                        scheduleGroupRow(group: group)
+                            .id(group.id)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -164,14 +209,10 @@ struct MyScheduleTimelineContent: View {
                 await viewModel.refresh()
             }
             .onAppear {
-                // Scroll to bottom (newest) on first load
-                if let lastGroup = viewModel.scheduleGroups.first {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        withAnimation {
-                            proxy.scrollTo(lastGroup.id, anchor: .bottom)
-                        }
-                    }
-                }
+                scrollToCurrentTime(proxy: proxy)
+            }
+            .onChange(of: viewModel.scrollToNowTrigger) { _ in
+                scrollToCurrentTime(proxy: proxy)
             }
             .sheet(isPresented: $viewModel.showEditSheet) {
                 ScheduleEditSheet(viewModel: viewModel)
@@ -185,6 +226,49 @@ struct MyScheduleTimelineContent: View {
             } message: {
                 if let item = viewModel.deletingItem {
                     Text("确定删除「\(item.emoji) \(item.status)」？")
+                }
+            }
+        }
+    }
+
+    // MARK: - Schedule Group Row (extracted for reuse)
+
+    private func scheduleGroupRow(group: ScheduleGroup) -> some View {
+        ScheduleGroupView(
+            group: group,
+            isItemExecuted: { viewModel.isItemExecuted($0, in: group) },
+            isItemActive: { viewModel.isItemActive($0, in: group) },
+            onEditItem: { item in
+                viewModel.startEditing(item: item, group: group)
+            },
+            onToggleHighlight: { item in
+                Task { await viewModel.toggleHighlight(item: item, group: group) }
+            },
+            onDeleteItem: { item in
+                viewModel.confirmDelete(item: item, group: group)
+            }
+        )
+    }
+
+    // MARK: - Scroll to Current Time
+
+    private func scrollToCurrentTime(proxy: ScrollViewProxy) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let todayStr = formatter.string(from: Date())
+
+        // 优先滚到今天的分组
+        if let todayGroup = viewModel.scheduleGroups.first(where: { $0.date == todayStr }) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                withAnimation {
+                    proxy.scrollTo(todayGroup.id, anchor: .top)
+                }
+            }
+        } else if let firstFuture = viewModel.scheduleGroups.filter({ $0.isCurrentOrFuture }).first {
+            // 没有今天的分组，滚到最近的未来分组
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                withAnimation {
+                    proxy.scrollTo(firstFuture.id, anchor: .top)
                 }
             }
         }

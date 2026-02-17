@@ -27,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -321,7 +322,7 @@ fun GridHomeScreen(
                                     else -> {
                                         CLIFriendGrid(
                                             friends = uiState.friends,
-                                            gridSize = uiState.gridSize,
+                                            gridSize = 2,
                                             getUnreadCount = { friendId ->
                                                 viewModel.getUnreadCount(friendId)
                                             },
@@ -579,9 +580,6 @@ private fun CLIFriendGrid(
                         onFriendClick(friend.userId)
                     }
                 },
-                onInteraction = { interaction ->
-                    onInteraction(friend.userId, interaction)
-                }
             )
         }
     }
@@ -643,9 +641,7 @@ private fun CLIFriendCard(
     friend: FriendGridItem,
     unreadCount: Int = 0,
     onClick: () -> Unit = {},
-    onInteraction: (InteractionOptionItem) -> Unit = {}
 ) {
-    // 优先级：有空(绿) > 未读(绿) > 普通(灰)
     val borderColor = when {
         friend.isAvailable -> CLIColors.Green
         unreadCount > 0 -> CLIColors.Green
@@ -653,86 +649,70 @@ private fun CLIFriendCard(
     }
     val bgColor = if (friend.isAvailable) CLIColors.BackgroundHighlight else CLIColors.BackgroundSecondary
 
-    var showDualAnimation by remember { mutableStateOf(false) }
-    var activeInteraction by remember { mutableStateOf<InteractionOptionItem?>(null) }
-
-    // Build pixel scene config from API data
-    val sceneConfig = remember(friend.scenePose) {
-        friend.scenePose?.takeIf { it.isNotEmpty() }?.let {
-            PixelSceneConfig(
-                pose = it,
-                arms = friend.sceneArms ?: "down",
-                expression = friend.sceneExpression ?: "normal",
-                prop = friend.sceneProp ?: "none",
-                surface = friend.sceneSurface ?: "none",
-            )
-        }
-    }
-
     Box(
         modifier = Modifier
             .fillMaxWidth()
+            .aspectRatio(1f)
             .background(bgColor)
             .border(1.dp, borderColor)
             .clickable { onClick() }
     ) {
+        // GIF 氛围背景（需要 ImageDecoderDecoder 播放动画）
+        if (!friend.gifUrl.isNullOrEmpty()) {
+            val context = LocalContext.current
+            val gifLoader = remember {
+                coil.ImageLoader.Builder(context)
+                    .components {
+                        if (android.os.Build.VERSION.SDK_INT >= 28) {
+                            add(coil.decode.ImageDecoderDecoder.Factory())
+                        }
+                    }
+                    .build()
+            }
+            coil.compose.AsyncImage(
+                model = coil.request.ImageRequest.Builder(context)
+                    .data(friend.gifUrl)
+                    .crossfade(false)
+                    .build(),
+                imageLoader = gifLoader,
+                contentDescription = null,
+                modifier = Modifier
+                    .matchParentSize()
+                    .graphicsLayer { alpha = 0.35f },
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            )
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 4.dp, vertical = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // 有空标签 or 互动计数
-            Row {
-                Text(
-                    text = if (friend.isAvailable) "[有空]" else " ",
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    color = if (friend.isAvailable) CLIColors.Green else androidx.compose.ui.graphics.Color.Transparent,
-                    maxLines = 1
-                )
-                if (friend.interactionCount > 0) {
-                    Spacer(modifier = Modifier.weight(1f))
-                    Text(
-                        text = "×${friend.interactionCount}",
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp,
-                        color = CLIColors.Yellow,
-                        maxLines = 1
-                    )
-                }
-            }
+            // 有空标签
+            Text(
+                text = if (friend.isAvailable) "[有空]" else " ",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                color = if (friend.isAvailable) CLIColors.Green else androidx.compose.ui.graphics.Color.Transparent,
+                maxLines = 1
+            )
             Spacer(modifier = Modifier.height(4.dp))
 
-            // Character display area
+            // 动画 emoji
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp),
+                    .weight(1f),
                 contentAlignment = Alignment.Center
             ) {
                 if (friend.needsSchedule) {
-                    Text(text = "➕", fontSize = 24.sp, maxLines = 1)
-                } else if (!friend.riveState.isNullOrEmpty()) {
-                    // Rive 动画角色（优先）
-                    com.youkong.core.ui.rive.RiveCharacterView(
-                        riveState = friend.riveState ?: "idle",
-                        modifier = Modifier.size(56.dp),
-                    )
-                } else if (sceneConfig != null) {
-                    AnimatedPixelCharacter(config = sceneConfig, pixelSize = 2.dp)
-                } else if (friend.useGif && !friend.gifUrl.isNullOrEmpty()) {
-                    coil.compose.AsyncImage(
-                        model = friend.gifUrl,
-                        contentDescription = friend.status,
-                        modifier = Modifier.size(48.dp),
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                    )
+                    Text(text = "➕", fontSize = 36.sp, maxLines = 1)
                 } else {
-                    val emoji = truncateEmoji(friend.emoji, 2)
-                    val emojiCount = emoji.codePointCount(0, emoji.length)
-                    val fontSize = if (emojiCount <= 1) 32.sp else 20.sp
-                    Text(text = emoji, fontSize = fontSize, maxLines = 1)
+                    com.youkong.core.ui.rive.EmojiStateView(
+                        emoji = friend.emoji,
+                        modifier = Modifier.size(72.dp),
+                    )
                 }
             }
 
@@ -769,48 +749,23 @@ private fun CLIFriendCard(
                 )
             }
 
-            // 互动按钮 or 城市
-            if (!friend.interactions.isNullOrEmpty() && !friend.needsSchedule) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier.padding(top = 2.dp)
-                ) {
-                    friend.interactions.orEmpty().forEach { interaction ->
-                        Text(
-                            text = "${interaction.emoji}${interaction.label}",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 9.sp,
-                            color = CLIColors.Green,
-                            maxLines = 1,
-                            modifier = Modifier
-                                .background(CLIColors.Green.copy(alpha = 0.1f))
-                                .padding(horizontal = 4.dp, vertical = 2.dp)
-                                .clickable {
-                                    activeInteraction = interaction
-                                    showDualAnimation = true
-                                    onInteraction(interaction)
-                                }
-                        )
-                    }
-                }
-            } else {
-                val cityText = friend.city?.takeIf { it.isNotEmpty() }
-                Text(
-                    text = when {
-                        cityText != null && friend.isVisiting -> "\uD83D\uDCCD来访·$cityText"
-                        cityText != null -> cityText
-                        else -> " "
-                    },
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    color = when {
+            // 城市
+            val cityText = friend.city?.takeIf { it.isNotEmpty() }
+            Text(
+                text = when {
+                    cityText != null && friend.isVisiting -> "\uD83D\uDCCD来访·$cityText"
+                    cityText != null -> cityText
+                    else -> " "
+                },
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                color = when {
                     cityText != null && friend.isVisiting -> CLIColors.Yellow
-                    cityText != null -> CLIColors.TextWeak
+                    cityText != null -> CLIColors.TextSecondary
                     else -> androidx.compose.ui.graphics.Color.Transparent
                 },
                 maxLines = 1,
             )
-        }
         }
 
         // 未读消息角标

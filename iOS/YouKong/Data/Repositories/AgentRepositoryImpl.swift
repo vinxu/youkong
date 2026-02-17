@@ -184,6 +184,121 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
         let endpoint = APIEndpoint.updateUserSettings(request: request)
         return try await apiClient.request(endpoint)
     }
+
+    // MARK: - Interactions
+
+    func sendInteraction(receiverId: String, actionEmoji: String, actionLabel: String, actionPushText: String) async throws {
+        let body = SendInteractionRequest(
+            receiverId: receiverId,
+            actionEmoji: actionEmoji,
+            actionLabel: actionLabel,
+            actionPushText: actionPushText
+        )
+        let endpoint = APIEndpoint(path: "/interact", method: .post, body: body)
+        let _: GenericSuccessResponse = try await apiClient.request(endpoint)
+    }
+
+    func joinCard(ownerId: String, emoji: String, statusText: String) async throws -> JoinCardResponse {
+        let body = JoinCardRequestBody(ownerId: ownerId, emoji: emoji, statusText: statusText)
+        let endpoint = APIEndpoint(path: "/card/join", method: .post, body: body)
+        return try await apiClient.request(endpoint)
+    }
+
+    // MARK: - Card Room Messages
+
+    func getCardRoomMessages(roomId: String, limit: Int, offset: Int) async throws -> [CardRoomMessage] {
+        let endpoint = APIEndpoint(path: "/card/rooms/\(roomId)/messages", method: .get, queryItems: [
+            URLQueryItem(name: "limit", value: "\(limit)"),
+            URLQueryItem(name: "offset", value: "\(offset)")
+        ])
+        return try await apiClient.request(endpoint)
+    }
+
+    func sendCardRoomMessage(roomId: String, content: String) async throws -> CardRoomMessage {
+        let body = SendCardRoomMessageRequest(content: content)
+        let endpoint = APIEndpoint(path: "/card/rooms/\(roomId)/messages", method: .post, body: body)
+        return try await apiClient.request(endpoint)
+    }
+}
+
+struct JoinCardRequestBody: Encodable {
+    let ownerId: String
+    let emoji: String
+    let statusText: String
+
+    enum CodingKeys: String, CodingKey {
+        case ownerId = "owner_id"
+        case emoji
+        case statusText = "status_text"
+    }
+}
+
+struct JoinCardResponse: Codable {
+    let roomId: String
+    let members: [JoinCardMember]
+
+    enum CodingKeys: String, CodingKey {
+        case roomId = "room_id"
+        case members
+    }
+}
+
+struct JoinCardMember: Codable {
+    let userId: String
+    let nickname: String
+    let avatar: String?
+
+    enum CodingKeys: String, CodingKey {
+        case userId = "user_id"
+        case nickname
+        case avatar
+    }
+}
+
+// MARK: - Card Room Models
+
+struct CardRoomMemberBrief: Codable, Identifiable {
+    let userId: String
+    let nickname: String
+    let avatar: String?
+    let gender: String?
+    let riveCharacter: String?
+
+    var id: String { userId }
+
+    enum CodingKeys: String, CodingKey {
+        case userId = "user_id"
+        case nickname
+        case avatar
+        case gender
+        case riveCharacter = "rive_character"
+    }
+}
+
+struct CardRoomMessage: Codable, Identifiable {
+    let id: String
+    let sender: CardRoomMessageSender
+    let content: String
+    let createdAt: String
+    let isRead: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case sender
+        case content
+        case createdAt = "created_at"
+        case isRead = "is_read"
+    }
+}
+
+struct CardRoomMessageSender: Codable {
+    let id: String
+    let nickname: String
+    let avatar: String?
+}
+
+struct SendCardRoomMessageRequest: Encodable {
+    let content: String
 }
 
 // MARK: - Response Models

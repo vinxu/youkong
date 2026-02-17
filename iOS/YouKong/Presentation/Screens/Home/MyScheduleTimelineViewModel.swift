@@ -34,6 +34,11 @@ class MyScheduleTimelineViewModel: ObservableObject {
     /// 变更计数器（toggleHighlight/saveEdit/deleteItem 成功后递增，供首页监听刷新）
     @Published var changeCount = 0
 
+    // 过往时间表折叠/展开
+    @Published var showPastSchedules = false
+    // 滚动到当前时间触发器
+    @Published var scrollToNowTrigger = 0
+
     // Auto-predict state
     @Published var autoPredictEnabled = false
     @Published var aiReady = false
@@ -189,7 +194,12 @@ class MyScheduleTimelineViewModel: ObservableObject {
         scheduleGroups = []
         hasMore = true
         oldestDate = nil
+        showPastSchedules = false
         await loadInitialData()
+    }
+
+    func triggerScrollToNow() {
+        scrollToNowTrigger += 1
     }
 
     // MARK: - Helper Methods

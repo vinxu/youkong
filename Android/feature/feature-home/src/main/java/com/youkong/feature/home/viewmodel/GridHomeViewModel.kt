@@ -9,18 +9,26 @@ import com.youkong.core.network.api.HomeApi
 import com.youkong.core.network.model.FriendGridItem
 import com.youkong.core.network.model.InteractionOptionItem
 import com.youkong.core.network.model.SendInteractionRequest
+import android.content.Context
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.net.URL
+import java.security.MessageDigest
 import java.time.Instant
+import java.time.LocalDate
 import javax.inject.Inject
 
 @HiltViewModel
 class GridHomeViewModel @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val homeApi: HomeApi,
     private val messageRepository: MessageRepository,
     private val statusReportTrigger: StatusReportTrigger,
@@ -32,7 +40,29 @@ class GridHomeViewModel @Inject constructor(
     /// friendId → conversationId 映射
     private val friendConversationMap = mutableMapOf<String, String>()
 
+    /// GIF 持久化缓存: "friendId:query" → gifUrl（跨 app 启动保留，每天自动清空）
+    private val prefs = context.getSharedPreferences("gif_cache", Context.MODE_PRIVATE)
+    private val gifCache: MutableMap<String, String>
+
     init {
+        // 加载持久化缓存，日期不同则清空
+        val today = LocalDate.now().toString()
+        val storedDate = prefs.getString("cache_date", null)
+        gifCache = if (storedDate == today) {
+            val stored = prefs.getString("cache_data", null)
+            if (stored != null) {
+                try {
+                    val json = org.json.JSONObject(stored)
+                    val map = mutableMapOf<String, String>()
+                    json.keys().forEach { key -> map[key] = json.getString(key) }
+                    map
+                } catch (_: Exception) { mutableMapOf() }
+            } else mutableMapOf()
+        } else {
+            prefs.edit().putString("cache_date", today).remove("cache_data").apply()
+            mutableMapOf()
+        }
+
         // 观察未读消息变化
         observeUnreadCounts()
     }
@@ -90,6 +120,9 @@ class GridHomeViewModel @Inject constructor(
                     )
                 }
 
+                // 异步解析缺失的 GIF URL
+                resolveGifUrls(sortedFriends)
+
                 val availableList = sortedFriends.filter { it.isAvailable }.map { it.nickname }
                 android.util.Log.d("GridHome", "📬 加载完成，好友: ${sortedFriends.size}, 有空: $availableList, 会话映射: ${friendConversationMap.size}")
             } catch (e: Exception) {
@@ -130,6 +163,8 @@ class GridHomeViewModel @Inject constructor(
                         errorMessage = null
                     )
                 }
+
+                resolveGifUrls(sortedFriends)
 
                 android.util.Log.d("GridHome", "🔄 刷新完成，好友: ${sortedFriends.size}")
             } catch (e: Exception) {
@@ -179,6 +214,76 @@ class GridHomeViewModel @Inject constructor(
                 android.util.Log.e("GridHome", "❌ 互动发送失败: ${e.message}")
             }
         }
+    }
+
+    // MARK: - Resolve GIF URLs
+
+    private fun resolveGifUrls(friends: List<FriendGridItem>) {
+        friends.forEach { friend ->
+            if (friend.gifUrl.isNullOrEmpty() && !friend.needsSchedule) {
+                val query = friend.giphyQuery?.takeIf { it.isNotEmpty() } ?: friend.status
+                if (query.isNotEmpty()) {
+                    val cacheKey = "${friend.userId}:$query"
+
+                    // 缓存命中 → 直接使用，不发起网络请求
+                    val cachedUrl = gifCache[cacheKey]
+                    if (cachedUrl != null) {
+                        _uiState.update { state ->
+                            state.copy(
+                                friends = state.friends.map {
+                                    if (it.userId == friend.userId) it.copy(gifUrl = cachedUrl, useGif = true) else it
+                                }
+                            )
+                        }
+                        return@forEach
+                    }
+
+                    viewModelScope.launch {
+                        val url = fetchGifUrl(query, friend.userId)
+                        if (url != null) {
+                            gifCache[cacheKey] = url
+                            persistGifCache()
+                            _uiState.update { state ->
+                                state.copy(
+                                    friends = state.friends.map {
+                                        if (it.userId == friend.userId) it.copy(gifUrl = url, useGif = true) else it
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun fetchGifUrl(query: String, friendId: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val encoded = java.net.URLEncoder.encode(query, "UTF-8")
+            // seed = md5(friendId + query + todayDate)，保证同人同状态当天稳定，每天轮换
+            val today = LocalDate.now().toString()
+            val seed = md5("$friendId$query$today")
+            val conn = URL("https://gif.playa.cn/api/giphy?q=$encoded&seed=$seed").openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+            val body = conn.inputStream.bufferedReader().readText()
+            conn.disconnect()
+            val json = org.json.JSONObject(body)
+            json.optJSONObject("result")?.optString("cos_url")?.takeIf { it.isNotEmpty() }
+        } catch (e: Exception) {
+            android.util.Log.d("GridHome", "GIF 解析失败: ${e.message}")
+            null
+        }
+    }
+
+    private fun md5(input: String): String {
+        val bytes = MessageDigest.getInstance("MD5").digest(input.toByteArray())
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun persistGifCache() {
+        val json = org.json.JSONObject(gifCache as Map<*, *>)
+        prefs.edit().putString("cache_data", json.toString()).apply()
     }
 
     // MARK: - Load Conversations
