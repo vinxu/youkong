@@ -89,6 +89,7 @@ fun GridHomeScreen(
     onNavigateToSettings: () -> Unit,
     onNavigateToAddFriend: () -> Unit = {},
     onNavigateToChat: (userId: String) -> Unit = {},
+    onNavigateToOnboarding: () -> Unit = {},
     viewModel: GridHomeViewModel = hiltViewModel(),
     voiceScheduleViewModel: VoiceScheduleViewModel = hiltViewModel(),
     scheduleTimelineViewModel: ScheduleTimelineViewModel = hiltViewModel()
@@ -105,6 +106,17 @@ fun GridHomeScreen(
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+
+    // 共享 GIF ImageLoader（避免每个卡片各创建一个实例）
+    val gifImageLoader = remember {
+        coil.ImageLoader.Builder(context)
+            .components {
+                if (android.os.Build.VERSION.SDK_INT >= 28) {
+                    add(coil.decode.ImageDecoderDecoder.Factory())
+                }
+            }
+            .build()
+    }
 
     // AI 推断 sheet 状态
     var showAIInferenceSheet by remember { mutableStateOf(false) }
@@ -250,8 +262,18 @@ fun GridHomeScreen(
                     Text(text = "➕", fontSize = 18.sp)
                 }
 
-                // 设置 icon
-                IconButton(onClick = onNavigateToSettings) {
+                // 设置 icon（长按进入引导页测试）
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onTap = { onNavigateToSettings() },
+                                onLongPress = { onNavigateToOnboarding() }
+                            )
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
                     Text(text = "⚙️", fontSize = 18.sp)
                 }
             }
@@ -285,7 +307,14 @@ fun GridHomeScreen(
                     modifier = Modifier
                         .weight(1f)
                         .pointerInput(Unit) {
-                            detectTapGestures { focusManager.clearFocus() }
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    if (event.type == PointerEventType.Press) {
+                                        focusManager.clearFocus()
+                                    }
+                                }
+                            }
                         }
                 ) { page ->
                     when (page) {
@@ -323,6 +352,7 @@ fun GridHomeScreen(
                                         CLIFriendGrid(
                                             friends = uiState.friends,
                                             gridSize = 2,
+                                            gifImageLoader = gifImageLoader,
                                             getUnreadCount = { friendId ->
                                                 viewModel.getUnreadCount(friendId)
                                             },
@@ -556,6 +586,7 @@ fun GridHomeScreen(
 private fun CLIFriendGrid(
     friends: List<FriendGridItem>,
     gridSize: Int,
+    gifImageLoader: coil.ImageLoader,
     getUnreadCount: (friendId: String) -> Int = { 0 },
     onFriendClick: (userId: String) -> Unit = {},
     onNeedsScheduleClick: () -> Unit = {},
@@ -573,6 +604,7 @@ private fun CLIFriendGrid(
             CLIFriendCard(
                 friend = friend,
                 unreadCount = unreadCount,
+                gifImageLoader = gifImageLoader,
                 onClick = {
                     if (friend.needsSchedule) {
                         onNeedsScheduleClick()
@@ -640,6 +672,7 @@ private fun GuideBubble(text: String, onDismiss: () -> Unit) {
 private fun CLIFriendCard(
     friend: FriendGridItem,
     unreadCount: Int = 0,
+    gifImageLoader: coil.ImageLoader? = null,
     onClick: () -> Unit = {},
 ) {
     val borderColor = when {
@@ -658,23 +691,14 @@ private fun CLIFriendCard(
             .clickable { onClick() }
     ) {
         // GIF 氛围背景（需要 ImageDecoderDecoder 播放动画）
-        if (!friend.gifUrl.isNullOrEmpty()) {
+        if (!friend.gifUrl.isNullOrEmpty() && gifImageLoader != null) {
             val context = LocalContext.current
-            val gifLoader = remember {
-                coil.ImageLoader.Builder(context)
-                    .components {
-                        if (android.os.Build.VERSION.SDK_INT >= 28) {
-                            add(coil.decode.ImageDecoderDecoder.Factory())
-                        }
-                    }
-                    .build()
-            }
             coil.compose.AsyncImage(
                 model = coil.request.ImageRequest.Builder(context)
                     .data(friend.gifUrl)
                     .crossfade(false)
                     .build(),
-                imageLoader = gifLoader,
+                imageLoader = gifImageLoader,
                 contentDescription = null,
                 modifier = Modifier
                     .matchParentSize()
