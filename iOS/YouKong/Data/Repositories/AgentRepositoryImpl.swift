@@ -111,8 +111,8 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
 
     // MARK: - Select Status (训练 AI 功能)
 
-    func selectStatus(emoji: String, status: String, deviceData: StatusReportRequest?) async throws {
-        let request = SelectStatusRequest(emoji: emoji, status: status, deviceData: deviceData)
+    func selectStatus(emoji: String, status: String, deviceData: StatusReportRequest?, gifUrl: String? = nil, giphyQuery: String? = nil) async throws {
+        let request = SelectStatusRequest(emoji: emoji, status: status, deviceData: deviceData, gifUrl: gifUrl, giphyQuery: giphyQuery)
         let endpoint = APIEndpoint.selectStatus(request: request)
         let _: SelectStatusResponse = try await apiClient.request(endpoint)
     }
@@ -146,6 +146,13 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
         try await apiClient.requestWithEmptyResponse(endpoint)
     }
 
+    // MARK: - AI Inference Options (4选1)
+
+    func inferOptions(request: InferOptionsRequest) async throws -> InferenceOptionsResponse {
+        let endpoint = APIEndpoint.inferOptions(request: request)
+        return try await apiClient.request(endpoint)
+    }
+
     // MARK: - AI Status Inference V2
 
     func inferStatus(sensorData: StatusReportRequest) async throws -> CurrentStatusInference {
@@ -165,6 +172,11 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
 
     func submitStatusFeedback(request: StatusFeedbackRequest) async throws {
         let endpoint = APIEndpoint.submitStatusFeedback(request: request)
+        let _: GenericSuccessResponse = try await apiClient.request(endpoint)
+    }
+
+    func cacheGifUrls(items: [[String: String]]) async throws {
+        let endpoint = APIEndpoint.cacheGifUrls(items: items)
         let _: GenericSuccessResponse = try await apiClient.request(endpoint)
     }
 
@@ -262,7 +274,6 @@ struct CardRoomMemberBrief: Codable, Identifiable {
     let nickname: String
     let avatar: String?
     let gender: String?
-    let riveCharacter: String?
 
     var id: String { userId }
 
@@ -271,7 +282,6 @@ struct CardRoomMemberBrief: Codable, Identifiable {
         case nickname
         case avatar
         case gender
-        case riveCharacter = "rive_character"
     }
 }
 

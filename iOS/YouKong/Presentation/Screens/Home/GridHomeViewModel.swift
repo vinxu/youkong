@@ -3,6 +3,12 @@ import Combine
 import Factory
 import CryptoKit
 
+// MARK: - Notification
+
+extension Notification.Name {
+    static let gridNeedsRefresh = Notification.Name("gridNeedsRefresh")
+}
+
 // MARK: - Grid Home View Model
 
 @MainActor
@@ -42,6 +48,16 @@ class GridHomeViewModel: ObservableObject {
 
         // 观察未读消息变化
         observeUnreadCounts()
+
+        // 观察状态更新通知 → 自动刷新 Grid
+        NotificationCenter.default.publisher(for: .gridNeedsRefresh)
+            .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in
+                Task { [weak self] in
+                    await self?.refresh()
+                }
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Observe Unread Counts
@@ -104,7 +120,6 @@ class GridHomeViewModel: ObservableObject {
                     giphyQuery: friend.giphyQuery,
                     useGif: friend.useGif ?? false,
                     needsSchedule: friend.needsSchedule ?? false,
-                    riveState: friend.riveState,
                     sceneConfig: friend.pixelSceneConfig,
                     interactions: friend.interactions ?? [],
                     interactionCount: friend.interactionCount ?? 0
@@ -137,6 +152,9 @@ class GridHomeViewModel: ObservableObject {
     // MARK: - Resolve GIF URLs
 
     private func resolveGifUrls() {
+        // 收集需要解析的好友（服务器未返回 gif_url 且本地无缓存）
+        var toResolve: [(index: Int, friendId: String, query: String)] = []
+
         for i in friends.indices {
             let friend = friends[i]
             guard friend.gifUrl == nil || friend.gifUrl?.isEmpty == true,
@@ -147,23 +165,60 @@ class GridHomeViewModel: ObservableObject {
 
             let cacheKey = "\(friend.id):\(query)"
 
-            // 缓存命中 → 直接使用，不发起网络请求
+            // 本地缓存命中 → 直接使用，不发起网络请求
             if let cachedUrl = gifCache[cacheKey] {
                 friends[i].gifUrl = cachedUrl
                 friends[i].useGif = true
                 continue
             }
 
-            let index = i
-            let friendId = friend.id
-            Task {
-                if let url = await fetchGifUrl(query: query, friendId: friendId) {
-                    gifCache[cacheKey] = url
-                    Self.persistGifCache(gifCache)
-                    friends[index].gifUrl = url
-                    friends[index].useGif = true
+            toResolve.append((index: i, friendId: friend.id, query: query))
+        }
+
+        guard !toResolve.isEmpty else { return }
+
+        // 并发解析，完成后批量写回服务器缓存
+        Task {
+            var writeBackItems: [[String: String]] = []
+
+            await withTaskGroup(of: (Int, String, String, String?).self) { group in
+                for item in toResolve {
+                    group.addTask { [self] in
+                        let url = await fetchGifUrl(query: item.query, friendId: item.friendId)
+                        return (item.index, item.friendId, item.query, url)
+                    }
+                }
+                for await (index, friendId, query, url) in group {
+                    if let url = url {
+                        let cacheKey = "\(friendId):\(query)"
+                        gifCache[cacheKey] = url
+                        friends[index].gifUrl = url
+                        friends[index].useGif = true
+                        writeBackItems.append([
+                            "friend_id": friendId,
+                            "query": query,
+                            "cos_url": url
+                        ])
+                    }
                 }
             }
+
+            if !writeBackItems.isEmpty {
+                Self.persistGifCache(gifCache)
+                // 写回服务器：其他客户端下次直接从 Grid API 拿到 cos_url
+                await writeBackGifCache(writeBackItems)
+            }
+        }
+    }
+
+    /// 批量写回 GIF cos_url 到服务器缓存
+    private func writeBackGifCache(_ items: [[String: String]]) async {
+        do {
+            try await agentRepository.cacheGifUrls(items: items)
+            print("[GridHome] GIF 缓存写回成功: \(items.count) 条")
+        } catch {
+            // 写回失败不影响主流程，静默忽略
+            print("[GridHome] GIF 缓存写回失败: \(error.localizedDescription)")
         }
     }
 
@@ -236,7 +291,6 @@ class GridHomeViewModel: ObservableObject {
                     giphyQuery: friend.giphyQuery,
                     useGif: friend.useGif ?? false,
                     needsSchedule: friend.needsSchedule ?? false,
-                    riveState: friend.riveState,
                     sceneConfig: friend.pixelSceneConfig,
                     interactions: friend.interactions ?? [],
                     interactionCount: friend.interactionCount ?? 0
@@ -312,8 +366,6 @@ struct FriendStatus: Identifiable, Hashable {
     let giphyQuery: String?   // Giphy 搜索词
     var useGif: Bool          // 是否使用 GIF 显示模式
     let needsSchedule: Bool   // 自己当前无行程，需要设置
-    // Rive 动画状态
-    let riveState: String?
     // 像素场景
     let sceneConfig: PixelSceneConfig?
     // AI 互动选项
@@ -331,7 +383,6 @@ struct FriendStatus: Identifiable, Hashable {
         hasher.combine(gifUrl)
         hasher.combine(useGif)
         hasher.combine(needsSchedule)
-        hasher.combine(riveState)
         hasher.combine(sceneConfig)
         hasher.combine(interactionCount)
     }
@@ -346,7 +397,6 @@ struct FriendStatus: Identifiable, Hashable {
         lhs.gifUrl == rhs.gifUrl &&
         lhs.useGif == rhs.useGif &&
         lhs.needsSchedule == rhs.needsSchedule &&
-        lhs.riveState == rhs.riveState &&
         lhs.sceneConfig == rhs.sceneConfig &&
         lhs.interactionCount == rhs.interactionCount
     }

@@ -4,30 +4,39 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import com.youkong.core.domain.repository.StatusCardOption
+import com.youkong.core.ui.emoji.EmojiStateView
 import com.youkong.core.ui.theme.CLIColors
 import com.youkong.feature.home.viewmodel.AIStatusInferenceViewModel
+import com.youkong.feature.home.viewmodel.InferPhase
 import com.youkong.feature.home.viewmodel.LogType
 import com.youkong.feature.home.viewmodel.StreamingLog
 
 /**
- * AI 状态推断界面
+ * AI 状态推断界面 — 4选1 模式
  */
 @Composable
 fun AIStatusInferenceScreen(
@@ -49,7 +58,11 @@ fun AIStatusInferenceScreen(
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Header
-            AIInferenceHeader(onDismiss = onDismiss)
+            AIInferenceHeader(
+                phase = uiState.currentPhase,
+                onDismiss = onDismiss,
+                onBack = { viewModel.backToOptions() }
+            )
 
             // 分隔线
             Box(
@@ -59,58 +72,59 @@ fun AIStatusInferenceScreen(
                     .background(CLIColors.Border)
             )
 
-            // 内容
+            // 内容 — 根据阶段切换
             when {
-                uiState.isInferring -> {
-                    InferringView(
-                        streamingPhase = uiState.streamingPhase,
-                        streamingLogs = uiState.streamingLogs,
-                    )
-                }
-
-                uiState.error != null -> {
+                uiState.error != null && uiState.currentPhase != InferPhase.EDITING -> {
                     ErrorView(
                         error = uiState.error ?: "推断失败",
                         onRetry = { viewModel.startInference() }
                     )
                 }
 
-                uiState.inference != null -> {
-                    ResultView(
-                        uiState = uiState,
-                        viewModel = viewModel,
-                        onConfirmed = {
-                            viewModel.confirmStatus {
-                                onConfirmed()
-                                onDismiss()
-                            }
-                        }
-                    )
-                }
+                else -> when (uiState.currentPhase) {
+                    InferPhase.LOADING -> {
+                        InferringView(
+                            streamingPhase = uiState.streamingPhase,
+                            streamingLogs = uiState.streamingLogs,
+                        )
+                    }
 
-                else -> {
-                    InferringView(
-                        streamingPhase = "正在连接...",
-                        streamingLogs = emptyList(),
-                    )
+                    InferPhase.OPTIONS -> {
+                        OptionsGridView(
+                            options = uiState.statusOptions,
+                            selectedIndex = uiState.selectedIndex,
+                            isRefreshing = uiState.isRefreshing,
+                            gifLoadingIndices = uiState.gifLoadingIndices,
+                            onSelectOption = { viewModel.selectOption(it) },
+                            onConfirmSelection = { viewModel.confirmSelection() },
+                            onRefresh = { viewModel.refreshOptions() },
+                        )
+                    }
+
+                    InferPhase.EDITING -> {
+                        ResultView(
+                            uiState = uiState,
+                            viewModel = viewModel,
+                            onConfirmed = {
+                                viewModel.confirmStatus {
+                                    onConfirmed()
+                                    onDismiss()
+                                }
+                            }
+                        )
+                    }
                 }
             }
-        }
-
-        // 底部浮框：用户确认选择题
-        if (uiState.isAskingUser) {
-            AskUserBottomPanel(
-                question = uiState.askUserQuestion,
-                options = uiState.askUserOptions,
-                onOptionSelected = { answer -> viewModel.respondToAskUser(answer) },
-                modifier = Modifier.align(Alignment.BottomCenter)
-            )
         }
     }
 }
 
 @Composable
-private fun AIInferenceHeader(onDismiss: () -> Unit) {
+private fun AIInferenceHeader(
+    phase: InferPhase,
+    onDismiss: () -> Unit,
+    onBack: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -118,17 +132,33 @@ private fun AIInferenceHeader(onDismiss: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        TextButton(onClick = onDismiss) {
-            Text(
-                text = "[X]",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-                color = CLIColors.TextSecondary
-            )
+        // 左侧：编辑阶段显示返回，其他阶段显示关闭
+        if (phase == InferPhase.EDITING) {
+            TextButton(onClick = onBack) {
+                Text(
+                    text = "[返回]",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = CLIColors.TextSecondary
+                )
+            }
+        } else {
+            TextButton(onClick = onDismiss) {
+                Text(
+                    text = "[X]",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = CLIColors.TextSecondary
+                )
+            }
         }
 
         Text(
-            text = "━━ AI 推断当下状态 ━━",
+            text = when (phase) {
+                InferPhase.LOADING -> "━━ AI 推断中 ━━"
+                InferPhase.OPTIONS -> "━━ 选择你的状态 ━━"
+                InferPhase.EDITING -> "━━ 编辑发布 ━━"
+            },
             fontFamily = FontFamily.Monospace,
             fontSize = 18.sp,
             fontWeight = FontWeight.Bold,
@@ -139,6 +169,240 @@ private fun AIInferenceHeader(onDismiss: () -> Unit) {
         Box(modifier = Modifier.width(48.dp))
     }
 }
+
+// MARK: - 4选1 选项网格
+
+@Composable
+private fun OptionsGridView(
+    options: List<StatusCardOption>,
+    selectedIndex: Int?,
+    isRefreshing: Boolean,
+    gifLoadingIndices: Set<Int>,
+    onSelectOption: (Int) -> Unit,
+    onConfirmSelection: () -> Unit,
+    onRefresh: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // 提示文字
+        Text(
+            text = "AI 为你推断了以下可能的状态",
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp,
+            color = CLIColors.TextSecondary,
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = TextAlign.Center,
+        )
+
+        // 2×2 网格
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(2),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.weight(1f),
+        ) {
+            items(options, key = { it.index }) { option ->
+                StatusOptionCard(
+                    option = option,
+                    isSelected = selectedIndex == option.index,
+                    isGifLoading = option.index in gifLoadingIndices,
+                    onClick = { onSelectOption(option.index) }
+                )
+            }
+        }
+
+        // 底部按钮区
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // 确认选择
+            Button(
+                onClick = onConfirmSelection,
+                enabled = selectedIndex != null,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = CLIColors.Green,
+                    contentColor = CLIColors.Background,
+                    disabledContainerColor = CLIColors.Border,
+                    disabledContentColor = CLIColors.TextWeak,
+                )
+            ) {
+                Text(
+                    text = "确认选择",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp
+                )
+            }
+
+            // 换一批
+            TextButton(
+                onClick = onRefresh,
+                enabled = !isRefreshing,
+            ) {
+                if (isRefreshing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        color = CLIColors.Yellow,
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "生成中...",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 14.sp,
+                        color = CLIColors.TextWeak
+                    )
+                } else {
+                    Text(
+                        text = "换一批",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 14.sp,
+                        color = CLIColors.Cyan
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusOptionCard(
+    option: StatusCardOption,
+    isSelected: Boolean,
+    isGifLoading: Boolean,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(16.dp)
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .clickable(onClick = onClick)
+            .then(
+                if (isSelected) Modifier.border(3.dp, CLIColors.Green, shape)
+                else Modifier
+            ),
+        shape = shape,
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+        elevation = CardDefaults.cardElevation(
+            defaultElevation = if (isSelected) 8.dp else 0.dp,
+        ),
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            // 背景层
+            if (!option.gifUrl.isNullOrEmpty()) {
+                // GIF 背景（使用 ImageDecoderDecoder 播放动画，和首页一致）
+                val context = androidx.compose.ui.platform.LocalContext.current
+                val gifLoader = remember {
+                    coil.ImageLoader.Builder(context)
+                        .components {
+                            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                                add(coil.decode.ImageDecoderDecoder.Factory())
+                            }
+                        }
+                        .build()
+                }
+                coil.compose.AsyncImage(
+                    model = coil.request.ImageRequest.Builder(context)
+                        .data(option.gifUrl)
+                        .crossfade(false)
+                        .build(),
+                    imageLoader = gifLoader,
+                    contentDescription = option.activity,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(shape),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                // 无 GIF 时用渐变背景（对齐 iOS）
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            brush = androidx.compose.ui.graphics.Brush.linearGradient(
+                                colors = listOf(CLIColors.BackgroundSecondary, CLIColors.Background)
+                            ),
+                            shape = shape,
+                        )
+                )
+            }
+
+            // 暗化遮罩（始终有，对齐 iOS）
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.35f))
+            )
+
+            // 内容
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                // 动画 Emoji（从 COS 加载 animated WebP）
+                EmojiStateView(
+                    emoji = option.emoji,
+                    modifier = Modifier.size(56.dp),
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = option.activity,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    textAlign = TextAlign.Center,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            // GIF 加载中指示器（右下角）
+            if (isGifLoading && option.gifUrl.isNullOrEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(8.dp)
+                        .background(
+                            Color.Black.copy(alpha = 0.5f),
+                            RoundedCornerShape(12.dp)
+                        )
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(10.dp),
+                            color = Color.White,
+                            strokeWidth = 1.5.dp,
+                        )
+                        Text(
+                            text = "GIF",
+                            fontSize = 9.sp,
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Loading 阶段
 
 @Composable
 private fun InferringView(
@@ -205,7 +469,6 @@ private fun InferringView(
                     LogType.ERROR -> CLIColors.Red
                 }
                 if (log.type == LogType.THINKING) {
-                    // thinking 允许视觉换行
                     Text(
                         text = log.text,
                         fontFamily = FontFamily.Monospace,
@@ -227,50 +490,7 @@ private fun InferringView(
     }
 }
 
-@Composable
-private fun AskUserBottomPanel(
-    question: String,
-    options: List<String>,
-    onOptionSelected: (String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(16.dp),
-        color = CLIColors.BackgroundSecondary,
-        shadowElevation = 0.dp,
-        border = androidx.compose.foundation.BorderStroke(1.dp, CLIColors.Border),
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = question,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 14.sp,
-                color = CLIColors.TextPrimary
-            )
-
-            options.forEach { option ->
-                TextButton(
-                    onClick = { onOptionSelected(option) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, CLIColors.Green)
-                ) {
-                    Text(
-                        text = option,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 14.sp,
-                        color = CLIColors.Green
-                    )
-                }
-            }
-        }
-    }
-}
+// MARK: - 错误页
 
 @Composable
 private fun ErrorView(error: String, onRetry: () -> Unit) {
@@ -317,6 +537,8 @@ private fun ErrorView(error: String, onRetry: () -> Unit) {
         }
     }
 }
+
+// MARK: - 编辑发布页
 
 @Composable
 private fun ResultView(
@@ -595,6 +817,8 @@ private fun ResultView(
     }
 }
 
+// MARK: - 子组件
+
 @Composable
 private fun AvailabilityToggle(
     isAvailable: Boolean,
@@ -766,4 +990,3 @@ private fun EmojiGifToggle(
         }
     }
 }
-

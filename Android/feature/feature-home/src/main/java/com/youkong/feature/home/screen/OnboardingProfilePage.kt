@@ -16,16 +16,22 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -37,15 +43,22 @@ import com.youkong.core.agent.collector.LocationCollector
 import com.youkong.core.agent.collector.MovementCollector
 import com.youkong.core.network.model.SelectStatusRequest
 import com.youkong.core.network.model.StatusOption
+import com.youkong.core.ui.emoji.EmojiStateView
 import com.youkong.core.ui.theme.CLIColors
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Calendar
 import javax.inject.Inject
 
@@ -88,6 +101,7 @@ data class OnboardingProfileUiState(
     val isSaving: Boolean = false,
     val cachedLatitude: Double? = null,
     val cachedLongitude: Double? = null,
+    val gifLoadingIndices: Set<String> = emptySet(),
 )
 
 // ========== ViewModel ==========
@@ -160,7 +174,8 @@ class OnboardingProfileViewModel @Inject constructor(
                     SelectStatusRequest(
                         emoji = status.emoji,
                         status = status.status,
-                        deviceData = null
+                        deviceData = null,
+                        gifUrl = status.gifUrl,
                     )
                 )
             } catch (_: Exception) { }
@@ -200,8 +215,6 @@ class OnboardingProfileViewModel @Inject constructor(
         val profileType = state.profileType?.key ?: return
 
         try {
-            // Use cached location from buildClues() instead of re-calling GMS
-            // Pass lat/lng to API if available (city is resolved server-side)
             val options = onboardingRepository.getOnboardingStatusOptions(profileType, null)
             _uiState.value = _uiState.value.copy(
                 showInferring = false,
@@ -215,6 +228,67 @@ class OnboardingProfileViewModel @Inject constructor(
                 step = ProfileStep.CHOOSING
             )
         }
+
+        // 异步获取 GIF 背景
+        fetchGifsForOptions()
+    }
+
+    private fun fetchGifsForOptions() {
+        val options = _uiState.value.statusOptions
+        val needGif = options.filter { it.gifUrl.isNullOrEmpty() }
+        _uiState.update { it.copy(gifLoadingIndices = needGif.map { o -> "${o.emoji}_${o.status}" }.toSet()) }
+
+        viewModelScope.launch {
+            for (option in needGif) {
+                val query = option.status
+                val optionId = "${option.emoji}_${option.status}"
+                val gifUrl = fetchGifViaProxy(query, "onboard_${option.emoji}_$query")
+
+                _uiState.update { state ->
+                    state.copy(
+                        statusOptions = if (gifUrl != null) {
+                            state.statusOptions.map {
+                                if (it.emoji == option.emoji && it.status == option.status) it.copy(gifUrl = gifUrl) else it
+                            }
+                        } else state.statusOptions,
+                        gifLoadingIndices = state.gifLoadingIndices - optionId,
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun fetchGifViaProxy(query: String, seed: String): String? = withContext(Dispatchers.IO) {
+        repeat(3) { attempt ->
+            try {
+                val encoded = java.net.URLEncoder.encode(query, "UTF-8")
+                val seedHash = md5("$seed$query${java.time.LocalDate.now()}")
+                val conn = URL("https://gif.playa.cn/api/giphy?q=$encoded&seed=$seedHash").openConnection() as HttpURLConnection
+                conn.connectTimeout = 15000
+                conn.readTimeout = 15000
+                val body = conn.inputStream.bufferedReader().readText()
+                conn.disconnect()
+
+                if (body.contains("FUNCTION_INVOCATION_TIMEOUT") || body.contains("error")) {
+                    if (attempt < 2) {
+                        delay((attempt + 1) * 1500L)
+                        return@repeat
+                    }
+                    return@withContext null
+                }
+                val json = JSONObject(body)
+                val url = json.optJSONObject("result")?.optString("cos_url")?.takeIf { it.isNotEmpty() }
+                if (url != null) return@withContext url
+            } catch (_: Exception) {
+                if (attempt < 2) delay((attempt + 1) * 1500L)
+            }
+        }
+        null
+    }
+
+    private fun md5(input: String): String {
+        val bytes = java.security.MessageDigest.getInstance("MD5").digest(input.toByteArray())
+        return bytes.joinToString("") { "%02x".format(it) }
     }
 
     private suspend fun buildClues(): List<SensorClue> {
@@ -445,6 +519,7 @@ fun OnboardingProfilePage(
                     statusOptions = uiState.statusOptions,
                     selectedStatus = uiState.selectedStatus,
                     isSaving = uiState.isSaving,
+                    gifLoadingIndices = uiState.gifLoadingIndices,
                     onSelectStatus = { viewModel.selectStatus(it) },
                     onConfirm = { viewModel.saveAndComplete(onConfirm) },
                     onSkip = { onSkip() }
@@ -706,6 +781,7 @@ private fun ChoosingSection(
     statusOptions: List<StatusOption>,
     selectedStatus: StatusOption?,
     isSaving: Boolean,
+    gifLoadingIndices: Set<String>,
     onSelectStatus: (StatusOption) -> Unit,
     onConfirm: () -> Unit,
     onSkip: () -> Unit
@@ -721,7 +797,7 @@ private fun ChoosingSection(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Manual 2-column grid
+        // Manual 2-column grid — 富卡片（动画 emoji + GIF 背景）
         val rows = statusOptions.chunked(2)
         rows.forEach { rowItems ->
             Row(
@@ -730,30 +806,16 @@ private fun ChoosingSection(
             ) {
                 rowItems.forEach { option ->
                     val isSelected = selectedStatus == option
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(100.dp)
-                            .background(if (isSelected) CLIColors.BackgroundSecondary else CLIColors.Background)
-                            .border(
-                                width = if (isSelected) 2.dp else 1.dp,
-                                color = if (isSelected) CLIColors.Green else CLIColors.Border,
-                                shape = RoundedCornerShape(8.dp)
-                            )
-                            .clickable { onSelectStatus(option) }
-                            .padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text(text = option.emoji, fontSize = 36.sp)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = option.status,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 14.sp,
-                            color = if (isSelected) CLIColors.Green else CLIColors.TextPrimary
-                        )
-                    }
+                    val optionId = "${option.emoji}_${option.status}"
+                    val isGifLoading = gifLoadingIndices.contains(optionId)
+
+                    OnboardingStatusCard(
+                        option = option,
+                        isSelected = isSelected,
+                        isGifLoading = isGifLoading,
+                        modifier = Modifier.weight(1f),
+                        onClick = { onSelectStatus(option) }
+                    )
                 }
                 if (rowItems.size < 2) {
                     Spacer(modifier = Modifier.weight(1f))
@@ -805,6 +867,137 @@ private fun ChoosingSection(
                 fontSize = 12.sp,
                 color = CLIColors.TextSecondary
             )
+        }
+    }
+}
+
+@Composable
+private fun OnboardingStatusCard(
+    option: StatusOption,
+    isSelected: Boolean,
+    isGifLoading: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(16.dp)
+
+    Card(
+        modifier = modifier
+            .aspectRatio(1f)
+            .clickable(onClick = onClick)
+            .then(
+                if (isSelected) Modifier.border(3.dp, CLIColors.Green, shape)
+                else Modifier
+            ),
+        shape = shape,
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+        elevation = CardDefaults.cardElevation(
+            defaultElevation = if (isSelected) 8.dp else 0.dp,
+        ),
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            // 背景层
+            if (!option.gifUrl.isNullOrEmpty()) {
+                // GIF 背景
+                val context = LocalContext.current
+                val gifLoader = remember {
+                    coil.ImageLoader.Builder(context)
+                        .components {
+                            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                                add(coil.decode.ImageDecoderDecoder.Factory())
+                            }
+                        }
+                        .build()
+                }
+                coil.compose.AsyncImage(
+                    model = coil.request.ImageRequest.Builder(context)
+                        .data(option.gifUrl)
+                        .crossfade(false)
+                        .build(),
+                    imageLoader = gifLoader,
+                    contentDescription = option.status,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(shape),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                // 无 GIF 时用渐变背景
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            brush = androidx.compose.ui.graphics.Brush.linearGradient(
+                                colors = listOf(CLIColors.BackgroundSecondary, CLIColors.Background)
+                            ),
+                            shape = shape,
+                        )
+                )
+            }
+
+            // 暗化遮罩
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.35f))
+            )
+
+            // 内容
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                // 动画 Emoji（从 COS 加载 animated WebP）
+                EmojiStateView(
+                    emoji = option.emoji,
+                    modifier = Modifier.size(56.dp),
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = option.status,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    textAlign = TextAlign.Center,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            // GIF 加载中指示器（右下角）
+            if (isGifLoading && option.gifUrl.isNullOrEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(8.dp)
+                        .background(
+                            Color.Black.copy(alpha = 0.5f),
+                            RoundedCornerShape(12.dp)
+                        )
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(10.dp),
+                            color = Color.White,
+                            strokeWidth = 1.5.dp,
+                        )
+                        Text(
+                            text = "GIF",
+                            fontSize = 9.sp,
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            }
         }
     }
 }

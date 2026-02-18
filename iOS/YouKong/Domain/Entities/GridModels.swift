@@ -29,8 +29,6 @@ struct FriendGridItem: Codable, Identifiable {
     let giphyQuery: String?
     let useGif: Bool?
     let needsSchedule: Bool?
-    // Rive 动画状态
-    let riveState: String?
     // 像素场景
     let scenePose: String?
     let sceneArms: String?
@@ -59,7 +57,6 @@ struct FriendGridItem: Codable, Identifiable {
         case giphyQuery = "giphy_query"
         case useGif = "use_gif"
         case needsSchedule = "needs_schedule"
-        case riveState = "rive_state"
         case scenePose = "scene_pose"
         case sceneArms = "scene_arms"
         case sceneExpression = "scene_expression"

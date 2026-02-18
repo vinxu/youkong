@@ -733,7 +733,7 @@ private fun CLIFriendCard(
                 if (friend.needsSchedule) {
                     Text(text = "➕", fontSize = 36.sp, maxLines = 1)
                 } else {
-                    com.youkong.core.ui.rive.EmojiStateView(
+                    com.youkong.core.ui.emoji.EmojiStateView(
                         emoji = friend.emoji,
                         modifier = Modifier.size(72.dp),
                     )

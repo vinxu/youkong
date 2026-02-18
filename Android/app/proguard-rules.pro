@@ -58,6 +58,11 @@
 -keep class com.tencent.android.tpush.** { *; }
 -keep class com.huawei.** { *; }
 
+# Coil (图片加载 + GIF 解码)
+-dontwarn coil.**
+-keep class coil.** { *; }
+-keep class coil.decode.** { *; }
+
 # Coroutines
 -keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
 -keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}

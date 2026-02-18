@@ -1,4 +1,4 @@
-package com.youkong.core.ui.rive
+package com.youkong.core.ui.emoji
 
 import android.os.Build
 import androidx.compose.foundation.layout.Arrangement

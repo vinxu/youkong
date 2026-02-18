@@ -153,7 +153,6 @@ struct GridHomeView: View {
                     giphyQuery: friend.giphyQuery,
                     useGif: friend.useGif,
                     needsSchedule: friend.needsSchedule,
-                    riveState: friend.riveState,
                     scenePose: friend.sceneConfig?.pose,
                     sceneArms: friend.sceneConfig?.arms,
                     sceneExpression: friend.sceneConfig?.expression,
@@ -262,6 +261,7 @@ struct GridHomeView: View {
                 .tag(1)
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
+            .dismissKeyboardOnTouchDown()
         }
         .background(CLIColors.background)
     }

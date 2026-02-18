@@ -237,7 +237,6 @@ struct PosterShareView: View {
             giphyQuery: nil,
             useGif: false,
             needsSchedule: false,
-            riveState: nil,
             scenePose: nil,
             sceneArms: nil,
             sceneExpression: nil,

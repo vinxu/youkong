@@ -15,10 +15,6 @@ dependencies {
     api(libs.coil.compose)
     api(libs.coil.gif)
 
-    // Rive
-    api(libs.rive.android)
-    api(libs.startup.runtime)
-
     // Android
     implementation(libs.androidx.core.ktx)
 }
