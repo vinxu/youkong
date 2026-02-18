@@ -2,10 +2,18 @@ import CommonCrypto
 import CryptoKit
 import SwiftUI
 
+// MARK: - Inference Phase
+
+enum InferencePhase {
+    case loading    // 正在推断
+    case options    // 展示 4 选 1 网格
+    case editing    // 编辑发布（选中选项后）
+}
+
 // MARK: - AI Status Inference View
 
 /// AI 推断当下状态的视图
-/// 用户点击后调用 AI 推断，然后可以确认或修改结果
+/// 用户点击后调用 AI 推断 4 个选项，选择后进入编辑发布页
 struct AIStatusInferenceView: View {
     @StateObject private var viewModel = AIStatusInferenceViewModel()
     @Environment(\.dismiss) private var dismiss
@@ -18,37 +26,37 @@ struct AIStatusInferenceView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            VStack(spacing: 0) {
-                // CLI Header
-                headerView
+        VStack(spacing: 0) {
+            // CLI Header
+            headerView
 
-                Rectangle()
-                    .fill(CLIColors.border)
-                    .frame(height: 1)
+            Rectangle()
+                .fill(CLIColors.border)
+                .frame(height: 1)
 
-                // Content
-                if viewModel.isInferring || viewModel.isAskingUser {
-                    inferringView
-                } else if let inference = viewModel.inference {
+            // Content
+            switch viewModel.currentPhase {
+            case .loading:
+                inferringView
+            case .options:
+                optionsGridView
+            case .editing:
+                if let inference = viewModel.inference {
                     resultView(inference: inference)
-                } else if let error = viewModel.error {
-                    errorView(error: error)
                 } else {
-                    // 首次进入直接显示 loading（onAppear 会立即触发推断）
                     inferringView
                 }
             }
 
-            // 底部浮框：用户确认选择题
-            if viewModel.isAskingUser {
-                askUserBottomPanel
+            // Error overlay
+            if let error = viewModel.error, viewModel.currentPhase == .loading {
+                errorView(error: error)
             }
         }
         .background(CLIColors.background)
         .onAppear {
             Task {
-                await viewModel.startInference()
+                await viewModel.startOptionsInference()
             }
         }
     }
@@ -58,23 +66,28 @@ struct AIStatusInferenceView: View {
     private var headerView: some View {
         HStack {
             Button {
-                dismiss()
+                if viewModel.currentPhase == .editing {
+                    // 从编辑页返回选项页
+                    viewModel.backToOptions()
+                } else {
+                    dismiss()
+                }
             } label: {
-                Text("[X]")
+                Text(viewModel.currentPhase == .editing ? "[返回]" : "[X]")
                     .font(.cliBodySmall)
                     .foregroundColor(CLIColors.textSecondary)
             }
 
             Spacer()
 
-            Text("━━ AI 推断当下状态 ━━")
+            Text(viewModel.currentPhase == .editing ? "━━ 编辑发布 ━━" : "━━ AI 推断当下状态 ━━")
                 .font(.cliHeadline)
                 .foregroundColor(CLIColors.cyan)
 
             Spacer()
 
             // Placeholder for balance
-            Text("[X]")
+            Text("[返回]")
                 .font(.cliBodySmall)
                 .foregroundColor(.clear)
         }
@@ -83,7 +96,7 @@ struct AIStatusInferenceView: View {
         .background(CLIColors.background)
     }
 
-    // MARK: - Inferring View
+    // MARK: - Inferring View (Loading)
 
     private var inferringView: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -141,48 +154,88 @@ struct AIStatusInferenceView: View {
         return CLIColors.textSecondary
     }
 
-    // MARK: - Ask User Bottom Panel
+    // MARK: - Options Grid View (4选1)
 
-    private var askUserBottomPanel: some View {
-        VStack(spacing: 12) {
-            Text(viewModel.askUserQuestion)
-                .font(.cliBody)
-                .foregroundColor(CLIColors.textPrimary)
-                .multilineTextAlignment(.center)
+    private var optionsGridView: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                Text("AI 为你推断了以下可能的状态")
+                    .font(.cliBody)
+                    .foregroundColor(CLIColors.textSecondary)
+                    .padding(.top, 16)
 
-            ForEach(viewModel.askUserOptions, id: \.self) { option in
-                Button {
-                    Task {
-                        await viewModel.respondToAskUser(answer: option)
+                // 2×2 网格
+                let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+                LazyVGrid(columns: columns, spacing: 12) {
+                    ForEach(viewModel.statusOptions) { option in
+                        StatusOptionCard(
+                            option: option,
+                            isSelected: viewModel.selectedIndex == option.index,
+                            isGifLoading: viewModel.gifLoadingIndices.contains(option.index)
+                        )
+                        .onTapGesture {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                viewModel.selectOption(option.index)
+                            }
+                        }
                     }
-                } label: {
-                    Text(option)
+                }
+                .padding(.horizontal, 16)
+
+                // 底部按钮
+                VStack(spacing: 12) {
+                    // 确认选择
+                    Button {
+                        viewModel.confirmSelection()
+                    } label: {
+                        HStack {
+                            Text("✓")
+                            Text("确认选择")
+                        }
                         .font(.cliBody)
-                        .foregroundColor(CLIColors.green)
+                        .foregroundColor(viewModel.selectedIndex != nil ? CLIColors.background : CLIColors.textWeak)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(viewModel.selectedIndex != nil ? CLIColors.green : CLIColors.backgroundSecondary)
+                        .cornerRadius(4)
+                    }
+                    .disabled(viewModel.selectedIndex == nil)
+
+                    // 换一批
+                    Button {
+                        Task {
+                            await viewModel.refreshOptions()
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if viewModel.isRefreshing {
+                                ProgressView()
+                                    .tint(CLIColors.cyan)
+                                    .scaleEffect(0.7)
+                            }
+                            Text("换一批")
+                        }
+                        .font(.cliBody)
+                        .foregroundColor(CLIColors.cyan)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
                         .overlay(
                             RoundedRectangle(cornerRadius: 4)
-                                .stroke(CLIColors.green, lineWidth: 1)
+                                .stroke(CLIColors.cyan, lineWidth: 1)
                         )
+                    }
+                    .disabled(viewModel.isRefreshing)
                 }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+
+                Spacer()
+                    .frame(height: 32)
             }
         }
-        .padding(16)
-        .background(CLIColors.backgroundSecondary)
-        .overlay(
-            Rectangle()
-                .frame(height: 1)
-                .foregroundColor(CLIColors.border),
-            alignment: .top
-        )
-        .padding(.horizontal, 16)
-        .padding(.bottom, 16)
     }
 
-    // startView removed - inferringView is shown by default
-
-    // MARK: - Result View
+    // MARK: - Result View (编辑发布)
 
     private func resultView(inference: CurrentStatusInference) -> some View {
         ScrollView {
@@ -338,6 +391,8 @@ struct AIStatusInferenceView: View {
             }
             .padding(.horizontal, 16)
         }
+        .scrollDismissesKeyboard(.immediately)
+        .dismissKeyboardOnTouchDown()
     }
 
     // MARK: - Availability Toggle
@@ -555,7 +610,7 @@ struct AIStatusInferenceView: View {
 
             Button {
                 Task {
-                    await viewModel.startInference()
+                    await viewModel.startOptionsInference()
                 }
             } label: {
                 Text("[重试]")
@@ -574,15 +629,98 @@ struct AIStatusInferenceView: View {
     }
 }
 
+// MARK: - Status Option Card
+
+struct StatusOptionCard: View {
+    let option: StatusCardOption
+    let isSelected: Bool
+    var isGifLoading: Bool = false
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                // GIF 背景（填满卡片，和安卓一致）
+                if let gifUrl = option.gifUrl, !gifUrl.isEmpty, let url = URL(string: gifUrl) {
+                    GifImageView(url: url, contentMode: .scaleAspectFill) {}
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                } else {
+                    // 无 GIF 时用渐变背景
+                    LinearGradient(
+                        colors: [CLIColors.backgroundSecondary, CLIColors.background],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                }
+
+                // 暗化遮罩（始终有）
+                Color.black.opacity(0.35)
+
+                // 内容
+                VStack(spacing: 6) {
+                    // 动画 Emoji（从 COS 加载 APNG）
+                    EmojiStateView(emoji: option.emoji)
+                        .frame(width: 56, height: 56)
+                        .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
+                    Text(option.activity)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.white)
+                        .shadow(color: .black.opacity(0.7), radius: 2, x: 0, y: 1)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                }
+                .padding(8)
+
+                // GIF 加载中指示器（右下角）
+                if isGifLoading && (option.gifUrl == nil || option.gifUrl?.isEmpty == true) {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            HStack(spacing: 3) {
+                                ProgressView()
+                                    .tint(.white)
+                                    .scaleEffect(0.5)
+                                Text("GIF")
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.8))
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.black.opacity(0.5))
+                            .cornerRadius(8)
+                            .padding(6)
+                        }
+                    }
+                }
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(isSelected ? CLIColors.green : Color.clear, lineWidth: 3)
+        )
+        .shadow(color: isSelected ? CLIColors.green.opacity(0.3) : .clear, radius: 8)
+    }
+}
+
 // MARK: - AI Status Inference View Model
 
 @MainActor
 class AIStatusInferenceViewModel: ObservableObject {
-    @Published var isInferring = false
-    @Published var inference: CurrentStatusInference?
-    @Published var error: String?
+    // 阶段
+    @Published var currentPhase: InferencePhase = .loading
+
+    // 4选1 选项
+    @Published var statusOptions: [StatusCardOption] = []
+    @Published var selectedIndex: Int? = nil
+    @Published var inferenceSessionId = ""
+    @Published var isRefreshing = false
 
     // 编辑状态
+    @Published var inference: CurrentStatusInference?
+    @Published var error: String?
     @Published var editingEmoji = ""
     @Published var editingActivity = ""
     @Published var editingPlace = ""
@@ -599,20 +737,21 @@ class AIStatusInferenceViewModel: ObservableObject {
     @Published var useGif = false
     @Published var isSearchingGif = false
 
-    // V2 流式状态
+    // GIF 加载状态
+    @Published var gifLoadingIndices: Set<Int> = []
+
+    // 流式状态
     @Published var streamingPhase = ""
     @Published var streamingLogs: [String] = []
 
-    // V2 用户确认状态
-    @Published var isAskingUser = false
-    @Published var askUserQuestion = ""
-    @Published var askUserOptions: [String] = []
-    @Published var askUserContext: String?
     private let agentRepository = AgentRepositoryImpl()
     private let deviceCollector = DeviceStatusCollector.shared
     private let locationCollector = LocationDataCollector.shared
     private let calendarCollector = CalendarDataCollector.shared
     private let movementCollector = MovementDataCollector.shared
+
+    // 已展示过的活动（用于换一批排除）
+    private var shownActivities: [String] = []
 
     /// 是否有修改
     var hasChanges: Bool {
@@ -624,21 +763,16 @@ class AIStatusInferenceViewModel: ObservableObject {
                useGif // GIF 模式切换也算修改
     }
 
-    // MARK: - V3 推断相关
-    private var v3SessionId: String?
+    // MARK: - Start Options Inference (4选1)
 
-    // MARK: - Start Inference (V3)
-
-    func startInference() async {
-        guard !isInferring else { return }
-
-        isInferring = true
+    func startOptionsInference() async {
+        currentPhase = .loading
         error = nil
-        inference = nil
+        statusOptions = []
+        selectedIndex = nil
+        shownActivities = []
         streamingPhase = ""
         streamingLogs = []
-        isAskingUser = false
-        v3SessionId = nil
 
         // 1. 确保位置数据已启动
         print("📍 [AIInference] 获取位置数据...")
@@ -646,121 +780,281 @@ class AIStatusInferenceViewModel: ObservableObject {
         try? await Task.sleep(nanoseconds: 500_000_000)
 
         // 2. 构建传感器数据
-        let sensorData = await buildSensorData()
+        let sensorData = await buildInferOptionsRequest(excludeActivities: nil, sessionId: nil)
 
         // 3. 展示收集到的传感器线索
         streamingPhase = "正在收集数据..."
         streamingLogs.append("> 正在收集设备数据...")
         appendSensorClues(sensorData)
-        await Task.yield() // 让 UI 渲染传感器线索
+        await Task.yield()
 
-        // 4. 调用 V3 同步推断接口
+        // 4. 调用 4选1 推断接口
         do {
             streamingPhase = "正在推断状态..."
             streamingLogs.append("▸ 正在发送数据到 AI...")
             await Task.yield()
 
-            let endpoint = APIEndpoint.inferStatusV2(request: sensorData)
-            let urlRequest = try buildAPIRequest(for: endpoint)
+            streamingLogs.append("▸ AI 正在生成 4 个选项...")
 
-            streamingLogs.append("▸ AI 正在分析...")
+            let response = try await agentRepository.inferOptions(request: sensorData)
 
-            let (data, response) = try await URLSession.shared.data(for: urlRequest)
+            inferenceSessionId = response.sessionId
+            statusOptions = response.options
 
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
-                throw SSEError.httpError(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0)
+            // 记录已展示的活动
+            for opt in response.options {
+                shownActivities.append(opt.activity)
             }
 
-            // 解析 V3 响应
-            let decoder = JSONDecoder()
-            let apiResponse = try decoder.decode(APIResponse<InferenceResponse>.self, from: data)
+            streamingLogs.append("  ✓ 已生成 \(response.options.count) 个选项")
+            print("✅ [AIInference] 4选1 推断完成: \(response.options.count) 个选项, sessionId=\(response.sessionId)")
 
-            guard let inferResp = apiResponse.data else {
-                throw SSEError.httpError(statusCode: -1)
-            }
+            // 切到选项页
+            print("🔀 [AIInference] 切换到 options 阶段, statusOptions.count=\(statusOptions.count)")
+            currentPhase = .options
 
-            if inferResp.phase == "completed", let result = inferResp.result {
-                // 逐条展示推理过程
-                streamingLogs.append("▸ 推理完成")
-                await Task.yield()
-
-                if let reasoning = result.reasoning, !reasoning.isEmpty {
-                    streamingLogs.append("  │ \(reasoning)")
-                    await Task.yield()
-                }
-                let confLabel = result.confidence == "high" ? "高" : result.confidence == "medium" ? "中" : "低"
-                streamingLogs.append("  │ 置信度: \(confLabel)")
-                await Task.yield()
-
-                streamingLogs.append("  ✓ \(result.emoji) \(result.activity)")
-                print("✅ [AIInference] V3 推断完成: \(result.emoji) \(result.activity)")
-
-                // 延迟 1.5s 让用户看到推理过程，再切到结果页
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
-                applyInferenceResult(result)
-                isConfirmed = true
-            } else if inferResp.phase == "awaiting_choice",
-                      let options = inferResp.options, !options.isEmpty {
-                // 信号矛盾，需要用户选择
-                v3SessionId = inferResp.sessionId
-                askUserQuestion = inferResp.question ?? "AI 不太确定，请选择："
-                askUserOptions = options.map { "\($0.emoji) \($0.activity)" }
-                isAskingUser = true
-                streamingLogs.append("  ? 信号矛盾，需要你来选择")
-                for opt in options {
-                    let reason = opt.reason.map { " - \($0)" } ?? ""
-                    streamingLogs.append("    \(opt.emoji) \(opt.activity)\(reason)")
-                }
-                print("🤔 [AIInference] V3 等待用户选择: \(options.count) 个选项")
-            } else {
-                self.error = "推断返回了未知格式"
-            }
+            // 异步获取 GIF（不阻塞 UI 切换）
+            Task { await fetchGifsForOptions() }
         } catch {
             self.error = error.localizedDescription
-            print("❌ [AIInference] V3 推断失败: \(error)")
+            print("❌ [AIInference] 4选1 推断失败: \(error)")
         }
-
-        isInferring = false
     }
 
-    // MARK: - Respond to Ask User (V3 选项选择)
+    // MARK: - Refresh Options (换一批)
 
-    func respondToAskUser(answer: String) async {
-        guard let sessionId = v3SessionId else { return }
-
-        // 从 answer 文本找到选项 index
-        let selectedIndex = askUserOptions.firstIndex(of: answer) ?? 0
-
-        isAskingUser = false
-        isInferring = true
-        streamingPhase = "正在确认选择..."
-        streamingLogs.append("▸ 已选择: \(answer)")
+    func refreshOptions() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        selectedIndex = nil
 
         do {
-            let endpoint = APIEndpoint.inferStatusV3Respond(sessionId: sessionId, selectedIndex: selectedIndex)
-            let urlRequest = try buildAPIRequest(for: endpoint)
-            let (data, _) = try await URLSession.shared.data(for: urlRequest)
+            let request = await buildInferOptionsRequest(
+                excludeActivities: shownActivities,
+                sessionId: inferenceSessionId
+            )
 
-            let decoder = JSONDecoder()
-            let apiResponse = try decoder.decode(APIResponse<InferenceResponse>.self, from: data)
+            let response = try await agentRepository.inferOptions(request: request)
 
-            if let result = apiResponse.data?.result {
-                applyInferenceResult(result)
-                isConfirmed = true
-                streamingLogs.append("  ✓ \(result.emoji) \(result.activity)")
+            inferenceSessionId = response.sessionId
+            statusOptions = response.options
+
+            // 追加已展示的活动
+            for opt in response.options {
+                shownActivities.append(opt.activity)
             }
+
+            print("✅ [AIInference] 换一批完成: \(response.options.count) 个选项")
+
+            // 异步获取 GIF
+            Task { await fetchGifsForOptions() }
         } catch {
-            self.error = error.localizedDescription
-            print("❌ [AIInference] V3 respond 失败: \(error)")
+            print("❌ [AIInference] 换一批失败: \(error)")
         }
 
-        isInferring = false
+        isRefreshing = false
+    }
+
+    // MARK: - Select Option
+
+    func selectOption(_ index: Int) {
+        if selectedIndex == index {
+            selectedIndex = nil
+        } else {
+            selectedIndex = index
+        }
+    }
+
+    // MARK: - Confirm Selection → 进入编辑页
+
+    func confirmSelection() {
+        guard let idx = selectedIndex,
+              let option = statusOptions.first(where: { $0.index == idx }) else { return }
+
+        // 用选中的选项构建 CurrentStatusInference
+        inference = CurrentStatusInference(
+            emoji: option.emoji,
+            activity: option.activity,
+            place: option.place,
+            isAvailable: option.isAvailable,
+            confidence: option.confidence,
+            gifUrl: option.gifUrl,
+            giphyQuery: option.giphyQuery
+        )
+
+        // 设置编辑初始值
+        editingEmoji = String(option.emoji.prefix(2))
+        editingActivity = option.activity
+        editingPlace = option.place ?? ""
+        editingIsAvailable = option.isAvailable
+
+        // 如果有 GIF URL，默认使用 GIF 模式
+        if option.gifUrl != nil && !(option.gifUrl?.isEmpty ?? true) {
+            useGif = true
+        }
+
+        currentPhase = .editing
+    }
+
+    // MARK: - Back to Options
+
+    func backToOptions() {
+        currentPhase = .options
+    }
+
+    // MARK: - Confirm Status (发布)
+
+    func confirmStatus() async {
+        guard !isConfirming else { return }
+        guard inference != nil else {
+            self.error = "没有可发布的状态"
+            return
+        }
+
+        isConfirming = true
+        confirmingMessage = "发布中..."
+
+        do {
+            // 如果使用 GIF 模式且 URL 是 Giphy 的，先上传到 COS
+            var finalGifUrl = inference?.gifUrl
+            if useGif, let gifUrl = finalGifUrl, gifUrl.contains("giphy.com") {
+                confirmingMessage = "正在上传 GIF..."
+                if let cosUrl = await uploadGifToCOS(gifUrl: gifUrl) {
+                    finalGifUrl = cosUrl
+                    inference?.gifUrl = cosUrl
+                }
+            }
+
+            let request = StatusFeedbackRequest(
+                originalEmoji: inference?.emoji,
+                originalActivity: inference?.activity,
+                correctedEmoji: editingEmoji,
+                correctedActivity: editingActivity,
+                correctedPlace: editingPlace.isEmpty ? nil : editingPlace,
+                correctedIsAvailable: editingIsAvailable,
+                gifUrl: finalGifUrl,
+                giphyQuery: inference?.giphyQuery,
+                useGif: useGif,
+                inferenceSessionId: inferenceSessionId.isEmpty ? nil : inferenceSessionId,
+                selectedOptionIdx: selectedIndex
+            )
+            try await agentRepository.submitStatusFeedback(request: request)
+            isConfirmed = true
+        } catch {
+            self.error = error.localizedDescription
+        }
+
+        isConfirming = false
+        confirmingMessage = ""
+    }
+
+    // MARK: - Toggle GIF Mode
+
+    func toggleGifMode() {
+        useGif = true
+        // 切换到 GIF 模式时，如果还没搜过 GIF，触发搜索
+        if inference?.gifUrl == nil {
+            if let query = inference?.giphyQuery, !query.isEmpty {
+                Task { await searchGiphy(query: query) }
+            } else {
+                let query = inference?.activity ?? editingActivity
+                if !query.isEmpty {
+                    Task { await searchGiphy(query: query) }
+                }
+            }
+        }
+    }
+
+    // MARK: - GIF Fetch via gif.playa.cn Proxy (和首页一致)
+
+    /// 为 4 个选项串行获取 GIF（和安卓/首页一致的 gif.playa.cn 代理方式）
+    private func fetchGifsForOptions() async {
+        let optionsSnapshot = statusOptions
+        let needGif = optionsSnapshot.filter { ($0.gifUrl ?? "").isEmpty && !$0.giphyQuery.isEmpty }
+        gifLoadingIndices = Set(needGif.map { $0.index })
+
+        for option in needGif {
+            let query = option.giphyQuery.isEmpty ? option.activity : option.giphyQuery
+            let seed = "opt_\(option.index)_\(query)_\(Int(Date().timeIntervalSince1970))"
+            print("🎬 [GIF] 搜索: index=\(option.index) query=\(query)")
+            let gifUrl = await fetchGifViaProxy(query: query, seed: seed)
+            print("🎬 [GIF] 结果: index=\(option.index) url=\(gifUrl?.prefix(60) ?? "nil")")
+
+            if let gifUrl = gifUrl {
+                if let idx = statusOptions.firstIndex(where: { $0.index == option.index }) {
+                    statusOptions[idx].gifUrl = gifUrl
+                }
+            }
+            gifLoadingIndices.remove(option.index)
+        }
+    }
+
+    /// 通过 gif.playa.cn 代理获取 GIF cos_url（和首页 GridHomeViewModel 一致）
+    /// 失败自动重试 2 次，间隔递增
+    private func fetchGifViaProxy(query: String, seed: String) async -> String? {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let seedHash = md5String("\(seed)\(query)")
+
+        for attempt in 0..<3 {
+            do {
+                guard let url = URL(string: "https://gif.playa.cn/api/giphy?q=\(encoded)&seed=\(seedHash)") else { return nil }
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 15
+                let (data, _) = try await URLSession.shared.data(for: request)
+                let body = String(data: data, encoding: .utf8) ?? ""
+
+                // 检查超时错误
+                if body.contains("FUNCTION_INVOCATION_TIMEOUT") || body.contains("\"error\"") {
+                    print("⚠️ [GIF] 代理超时 attempt=\(attempt) query=\(query)")
+                    if attempt < 2 {
+                        let delay = UInt64((attempt + 1) * 1_500_000_000) // 1.5s, 3s
+                        try? await Task.sleep(nanoseconds: delay)
+                        continue
+                    }
+                    return nil
+                }
+
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let result = json["result"] as? [String: Any],
+                   let cosUrl = result["cos_url"] as? String, !cosUrl.isEmpty {
+                    return cosUrl
+                }
+                // JSON 解析成功但没有 cos_url，重试无意义
+                print("⚠️ [GIF] 代理返回无 cos_url attempt=\(attempt)")
+                return nil
+            } catch {
+                print("⚠️ [GIF] 代理请求失败 attempt=\(attempt): \(error.localizedDescription)")
+                if attempt < 2 {
+                    let delay = UInt64((attempt + 1) * 1_500_000_000)
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+            }
+        }
+        return nil
+    }
+
+    /// 编辑页搜索 GIF（也走 gif.playa.cn 代理）
+    private func searchGiphy(query: String) async {
+        isSearchingGif = true
+        let seed = "edit_\(Int(Date().timeIntervalSince1970))"
+        if let gifUrl = await fetchGifViaProxy(query: query, seed: seed) {
+            inference?.gifUrl = gifUrl
+        }
+        isSearchingGif = false
+    }
+
+    private func md5String(_ input: String) -> String {
+        let data = input.data(using: .utf8)!
+        var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
+        data.withUnsafeBytes { bytes in
+            _ = CC_MD5(bytes.baseAddress, CC_LONG(data.count), &digest)
+        }
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Sensor Clues
 
-    private func appendSensorClues(_ data: StatusReportRequest) {
+    private func appendSensorClues(_ data: InferOptionsRequest) {
         if let loc = data.extendedLocation {
             let placeLabel: String
             switch loc.placeType {
@@ -795,126 +1089,19 @@ class AIStatusInferenceViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Toggle GIF Mode
-
-    func toggleGifMode() {
-        useGif = true
-        // 切换到 GIF 模式时，如果还没搜过 GIF，触发搜索
-        if inference?.gifUrl == nil {
-            if let query = inference?.giphyQuery, !query.isEmpty {
-                Task { await searchGiphy(query: query) }
-            } else {
-                // 用活动描述作为搜索词
-                let query = inference?.activity ?? editingActivity
-                if !query.isEmpty {
-                    Task { await searchGiphy(query: query) }
-                }
-            }
-        }
-    }
-
-    // MARK: - Giphy Client Search
-
-    private func searchGiphy(query: String) async {
-        isSearchingGif = true
-        let apiKey = "Ned8bTKUTSlYen6oZXmacc1sLmlLn9U8"
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        let urlStr = "https://api.giphy.com/v1/gifs/search?api_key=\(apiKey)&q=\(encoded)&limit=1&rating=g"
-
-        guard let url = URL(string: urlStr) else {
-            isSearchingGif = false
-            return
-        }
-
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let dataArray = json["data"] as? [[String: Any]],
-               let first = dataArray.first,
-               let images = first["images"] as? [String: Any],
-               let fixedHeight = images["fixed_height"] as? [String: Any],
-               let gifUrl = fixedHeight["url"] as? String {
-                print("✅ [Giphy] GIF URL: \(gifUrl)")
-                inference?.gifUrl = gifUrl
-            }
-        } catch {
-            print("⚠️ [Giphy] 搜索失败: \(error.localizedDescription)")
-        }
-        isSearchingGif = false
-    }
-
-    private func applyInferenceResult(_ result: CurrentStatusInference) {
-        inference = result
-        editingEmoji = String(result.emoji.prefix(2))
-        editingActivity = result.activity
-        editingPlace = result.place ?? ""
-        editingIsAvailable = result.isAvailable
-    }
-
-    // MARK: - Confirm Status
-
-    func confirmStatus() async {
-        guard !isConfirming else { return }
-        guard inference != nil else {
-            self.error = "没有可发布的状态"
-            return
-        }
-
-        // 推断结果不再自动保存，必须通过 feedback 接口发布
-        isConfirming = true
-        confirmingMessage = "发布中..."
-
-        do {
-            // 如果使用 GIF 模式且 URL 是 Giphy 的，先上传到 COS
-            var finalGifUrl = inference?.gifUrl
-            if useGif, let gifUrl = finalGifUrl, gifUrl.contains("giphy.com") {
-                confirmingMessage = "正在上传 GIF..."
-                if let cosUrl = await uploadGifToCOS(gifUrl: gifUrl) {
-                    finalGifUrl = cosUrl
-                    inference?.gifUrl = cosUrl
-                }
-            }
-
-            let request = StatusFeedbackRequest(
-                originalEmoji: inference?.emoji,
-                originalActivity: inference?.activity,
-                correctedEmoji: editingEmoji,
-                correctedActivity: editingActivity,
-                correctedPlace: editingPlace.isEmpty ? nil : editingPlace,
-                correctedIsAvailable: editingIsAvailable,
-                gifUrl: finalGifUrl,
-                giphyQuery: inference?.giphyQuery,
-                useGif: useGif
-            )
-            try await agentRepository.submitStatusFeedback(request: request)
-            isConfirmed = true
-        } catch {
-            self.error = error.localizedDescription
-        }
-
-        isConfirming = false
-        confirmingMessage = ""
-    }
-
     // MARK: - Upload GIF to COS (STS 直传)
 
-    /// 下载 Giphy GIF → 获取 STS 临时凭证 → 直传 COS，返回 COS URL
     private func uploadGifToCOS(gifUrl: String) async -> String? {
         guard let url = URL(string: gifUrl) else { return nil }
 
         do {
-            // 1. 下载 GIF 数据
             let (gifData, _) = try await URLSession.shared.data(from: url)
-
-            // 2. 获取 STS 临时凭证
             let stsResult = try await agentRepository.getSTSCredentials()
             let cred = stsResult.sts
 
-            // 3. 生成 COS key (UUID 去重)
             let md5Hex = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
             let objectKey = "\(cred.prefix)\(md5Hex).gif"
 
-            // 4. 构建 COS PUT 请求
             let host = "\(cred.bucket).cos.\(cred.region).myqcloud.com"
             let cosURL = "https://\(host)/\(objectKey)"
             guard let uploadURL = URL(string: cosURL) else { return nil }
@@ -938,7 +1125,6 @@ class AIStatusInferenceViewModel: ObservableObject {
             request.setValue(signature, forHTTPHeaderField: "Authorization")
             request.httpBody = gifData
 
-            // 5. 上传
             let (_, response) = try await URLSession.shared.data(for: request)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
             if (200...299).contains(statusCode) {
@@ -952,7 +1138,6 @@ class AIStatusInferenceViewModel: ObservableObject {
         return nil
     }
 
-    /// COS 签名算法（参考 CastReader）
     private func generateCOSSignature(secretId: String, secretKey: String, method: String, path: String, host: String, timestamp: Int) -> String {
         let keyTime = "\(timestamp);\(timestamp + 3600)"
         let signKey = hmacSHA1(key: secretKey, data: keyTime)
@@ -987,44 +1172,13 @@ class AIStatusInferenceViewModel: ObservableObject {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    // MARK: - API Helpers
+    // MARK: - Build Infer Options Request
 
-    private func buildAPIRequest(for endpoint: APIEndpoint) throws -> URLRequest {
-        #if DEBUG
-        let custom = UserDefaults.standard.string(forKey: "debug_baseURL") ?? ""
-        let baseURL = custom.isEmpty ? "http://49.232.13.41:8080" : custom
-        #else
-        let baseURL = "http://49.232.13.41:8080"
-        #endif
-
-        guard let url = URL(string: baseURL + endpoint.path) else {
-            throw SSEError.invalidURL
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = endpoint.method.rawValue
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        if endpoint.requiresAuth {
-            if let token = KeychainManager.shared.getAccessToken() {
-                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            }
-        }
-
-        if let body = endpoint.body {
-            request.httpBody = try JSONEncoder().encode(AnyEncodable(body))
-        }
-
-        return request
-    }
-
-    // MARK: - Build Sensor Data
-
-    private func buildSensorData() async -> StatusReportRequest {
+    private func buildInferOptionsRequest(excludeActivities: [String]?, sessionId: String?) async -> InferOptionsRequest {
         let deviceStatus = await deviceCollector.getCurrentStatusAsync()
         let locationStatus = locationCollector.currentStatus
 
-        return StatusReportRequest(
+        return InferOptionsRequest(
             screen: nil,
             location: LocationRequestData(
                 placeType: locationStatus.placeType.rawValue,
@@ -1069,7 +1223,9 @@ class AIStatusInferenceViewModel: ObservableObject {
                 stepsToday: movementCollector.currentStatus.stepsToday,
                 stepsLastHour: movementCollector.currentStatus.stepsLastHour,
                 stationaryMinutes: movementCollector.currentStatus.stationaryMinutes
-            ) : nil
+            ) : nil,
+            excludeActivities: excludeActivities,
+            sessionId: sessionId
         )
     }
 }

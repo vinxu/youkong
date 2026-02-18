@@ -311,8 +311,8 @@ struct GridHomeView: View {
                     Spacer()
                 }
             } else {
-                // 宫格内容 - 使用 ScrollView
-                ScrollView {
+                // 宫格内容 - 使用 List 以支持 TabView(.page) 内的下拉刷新
+                List {
                     FriendGrid(
                         friends: viewModel.friends,
                         getUnreadCount: { friendId in
@@ -328,7 +328,13 @@ struct GridHomeView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 16)
                     .padding(.bottom, 16)
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
                 }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .background(CLIColors.background)
                 .refreshable {
                     await viewModel.refresh()
                 }
