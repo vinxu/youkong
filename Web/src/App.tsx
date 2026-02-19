@@ -8,6 +8,8 @@ import {
   ExpiredPage,
   NotFoundPage,
   ChatPage,
+  PrivacyPage,
+  SupportPage,
 } from './pages'
 import { useAuthStore } from './stores/authStore'
 
@@ -36,6 +38,12 @@ function App() {
 
         {/* 邀请失效页 */}
         <Route path="/expired" element={<ExpiredPage />} />
+
+        {/* 隐私政策 */}
+        <Route path="/privacy" element={<PrivacyPage />} />
+
+        {/* 技术支持 */}
+        <Route path="/support" element={<SupportPage />} />
 
         {/* 首页 - Landing Page */}
         <Route path="/" element={<LandingPage />} />
