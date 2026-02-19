@@ -123,6 +123,11 @@ func (r *RedisClient) LRange(ctx context.Context, key string, start, stop int64)
 	return r.client.LRange(ctx, key, start, stop).Result()
 }
 
+// MGet 批量获取多个 key 的值
+func (r *RedisClient) MGet(ctx context.Context, keys ...string) ([]interface{}, error) {
+	return r.client.MGet(ctx, keys...).Result()
+}
+
 // IsNil 检查错误是否为 key 不存在
 func IsNil(err error) bool {
 	return err != nil && err.Error() == "redis: nil"

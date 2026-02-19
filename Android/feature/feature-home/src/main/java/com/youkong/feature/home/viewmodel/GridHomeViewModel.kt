@@ -28,7 +28,6 @@ import kotlinx.coroutines.withContext
 import java.net.URL
 import java.security.MessageDigest
 import java.time.Instant
-import java.time.LocalDate
 import javax.inject.Inject
 
 /**
@@ -57,15 +56,13 @@ class GridHomeViewModel @Inject constructor(
     /// friendId → conversationId 映射
     private val friendConversationMap = mutableMapOf<String, String>()
 
-    /// GIF 持久化缓存: "friendId:query" → gifUrl（跨 app 启动保留，每天自动清空）
+    /// GIF 持久化缓存: "friendId:query" → gifUrl（跨 app 启动保留，不按日期清空）
     private val prefs = context.getSharedPreferences("gif_cache", Context.MODE_PRIVATE)
     private val gifCache: MutableMap<String, String>
 
     init {
-        // 加载持久化缓存，日期不同则清空
-        val today = LocalDate.now().toString()
-        val storedDate = prefs.getString("cache_date", null)
-        gifCache = if (storedDate == today) {
+        // 加载持久化缓存（不判断日期，直接加载）
+        gifCache = run {
             val stored = prefs.getString("cache_data", null)
             if (stored != null) {
                 try {
@@ -75,9 +72,6 @@ class GridHomeViewModel @Inject constructor(
                     map
                 } catch (_: Exception) { mutableMapOf() }
             } else mutableMapOf()
-        } else {
-            prefs.edit().putString("cache_date", today).remove("cache_data").apply()
-            mutableMapOf()
         }
 
         // 观察未读消息变化
@@ -360,9 +354,8 @@ class GridHomeViewModel @Inject constructor(
     private suspend fun fetchGifUrl(query: String, friendId: String): String? = withContext(Dispatchers.IO) {
         try {
             val encoded = java.net.URLEncoder.encode(query, "UTF-8")
-            // seed = md5(friendId + query + todayDate)，保证同人同状态当天稳定，每天轮换
-            val today = LocalDate.now().toString()
-            val seed = md5("$friendId$query$today")
+            // seed = md5(friendId + query)，不含日期，缓存跨天持久有效
+            val seed = md5("$friendId$query")
             val conn = URL("https://gif.playa.cn/api/giphy?q=$encoded&seed=$seed").openConnection() as java.net.HttpURLConnection
             conn.connectTimeout = 8000
             conn.readTimeout = 8000

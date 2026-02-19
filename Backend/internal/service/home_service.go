@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"youkong/internal/model"
+	"youkong/internal/pkg/giphy"
 	"youkong/internal/pkg/tencent"
 	"youkong/internal/repository"
 )
@@ -26,6 +27,7 @@ type HomeService struct {
 	redisClient     *tencent.RedisClient
 	sceneService    *SceneService
 	interactionService *InteractionService
+	giphyClient        *giphy.Client
 }
 
 // NewHomeService 创建首页服务
@@ -47,6 +49,11 @@ func (s *HomeService) SetSceneService(ss *SceneService) {
 // SetInteractionService 设置互动服务
 func (s *HomeService) SetInteractionService(is *InteractionService) {
 	s.interactionService = is
+}
+
+// SetGiphyClient 设置 Giphy 客户端（用于直接调 Giphy API + COS，不走 Vercel）
+func (s *HomeService) SetGiphyClient(gc *giphy.Client) {
+	s.giphyClient = gc
 }
 
 // FriendGridItem 宫格中的好友项
@@ -584,29 +591,54 @@ func containsChinese(status, keyword string) bool {
 // 后续任何客户端加载 Grid 时直接从缓存返回 cos_url，无需再调 gif.playa.cn。
 
 // gifCacheKey 计算 GIF 缓存键（与 iOS/Android 客户端 seed 算法一致）
-// seed = md5(friendId + giphyQuery + today)
+// seed = md5(friendId + giphyQuery)，不含日期，缓存跨天持久有效
 func gifCacheKey(friendID, giphyQuery string) string {
-	today := time.Now().Format("2006-01-02")
-	hash := md5.Sum([]byte(friendID + giphyQuery + today))
+	hash := md5.Sum([]byte(friendID + giphyQuery))
 	seed := hex.EncodeToString(hash[:])
 	return "gif:url:" + seed
 }
 
-// resolveGifURLsFromCache 从 Redis 缓存填充缺失的 gif_url
+// resolveGifURLsFromCache 从 Redis 缓存批量填充缺失的 gif_url（MGet 一次查询）
 func (s *HomeService) resolveGifURLsFromCache(ctx context.Context, friends []FriendGridItem) {
 	if s.redisClient == nil {
 		return
 	}
 
+	// 收集需要查询的索引和 cacheKey
+	type pending struct {
+		index    int
+		cacheKey string
+	}
+	var pendingItems []pending
 	for i := range friends {
-		// 已有 gif_url 或无 giphy_query → 跳过
 		if friends[i].GifURL != "" || friends[i].GiphyQuery == "" || friends[i].NeedsSchedule {
 			continue
 		}
-		cacheKey := gifCacheKey(friends[i].UserID, friends[i].GiphyQuery)
-		if cosURL, err := s.redisClient.Get(ctx, cacheKey); err == nil && cosURL != "" {
-			friends[i].GifURL = cosURL
-			friends[i].UseGif = true
+		pendingItems = append(pendingItems, pending{index: i, cacheKey: gifCacheKey(friends[i].UserID, friends[i].GiphyQuery)})
+	}
+	if len(pendingItems) == 0 {
+		return
+	}
+
+	// 批量查询
+	keys := make([]string, len(pendingItems))
+	for i, p := range pendingItems {
+		keys[i] = p.cacheKey
+	}
+	values, err := s.redisClient.MGet(ctx, keys...)
+	if err != nil {
+		return
+	}
+
+	// 回填结果
+	for i, val := range values {
+		if val == nil {
+			continue
+		}
+		if cosURL, ok := val.(string); ok && cosURL != "" {
+			idx := pendingItems[i].index
+			friends[idx].GifURL = cosURL
+			friends[idx].UseGif = true
 		}
 	}
 }
@@ -656,23 +688,22 @@ func (s *HomeService) ResolveAndCacheGifURL(userID, giphyQuery string) {
 		return
 	}
 
-	// 计算 seed（与客户端一致）
-	today := time.Now().Format("2006-01-02")
-	hash := md5.Sum([]byte(userID + giphyQuery + today))
+	// 计算 seed（与客户端一致，不含日期）
+	hash := md5.Sum([]byte(userID + giphyQuery))
 	seed := hex.EncodeToString(hash[:])
 
 	cosURL := FetchGifFromProxy(giphyQuery, seed)
 	if cosURL == "" {
 		return
 	}
-	fmt.Printf("[GifResolve] 成功 user=%s query=%s → %s\n", userID, giphyQuery, cosURL[:60])
+	fmt.Printf("[GifResolve] 成功 user=%s query=%s → %s\n", userID, giphyQuery, cosURL[:min(len(cosURL), 60)])
 
 	ctx := context.Background()
 
 	// 1. 更新 gif redis 缓存
 	cacheKey := "gif:url:" + seed
 	if s.redisClient != nil {
-		s.redisClient.Set(ctx, cacheKey, cosURL, 25*time.Hour)
+		s.redisClient.Set(ctx, cacheKey, cosURL, 168*time.Hour)
 	}
 
 	// 2. 更新 schedule item 的 gif_url
@@ -729,8 +760,8 @@ func (s *HomeService) CacheGifURLs(ctx context.Context, items []GifCacheItem) in
 			continue
 		}
 		cacheKey := gifCacheKey(item.FriendID, item.GiphyQuery)
-		// TTL 25h：seed 含当日日期，跨天自动失效
-		if err := s.redisClient.Set(ctx, cacheKey, item.CosURL, 25*time.Hour); err == nil {
+		// TTL 7天：seed 不含日期，缓存跨天持久有效
+		if err := s.redisClient.Set(ctx, cacheKey, item.CosURL, 168*time.Hour); err == nil {
 			cached++
 		}
 	}

@@ -25,26 +25,16 @@ class GridHomeViewModel: ObservableObject {
     /// friendId → conversationId 映射
     private var friendConversationMap: [String: String] = [:]
 
-    /// GIF 持久化缓存: "friendId:query" → gifUrl（跨 app 启动保留，每天自动清空）
+    /// GIF 持久化缓存: "friendId:query" → gifUrl（跨 app 启动保留，不按日期清空）
     private var gifCache: [String: String]
 
     private static let gifCacheKey = "gifCache"
-    private static let gifCacheDateKey = "gifCacheDate"
 
     private var cancellables = Set<AnyCancellable>()
 
     init() {
-        // 加载持久化缓存，日期不同则清空
-        let today = Self.todayDateString()
-        let storedDate = UserDefaults.standard.string(forKey: Self.gifCacheDateKey)
-        if storedDate == today,
-           let stored = UserDefaults.standard.dictionary(forKey: Self.gifCacheKey) as? [String: String] {
-            gifCache = stored
-        } else {
-            gifCache = [:]
-            UserDefaults.standard.set(today, forKey: Self.gifCacheDateKey)
-            UserDefaults.standard.removeObject(forKey: Self.gifCacheKey)
-        }
+        // 加载持久化缓存（不判断日期，直接加载）
+        gifCache = UserDefaults.standard.dictionary(forKey: Self.gifCacheKey) as? [String: String] ?? [:]
 
         // 观察未读消息变化
         observeUnreadCounts()
@@ -227,9 +217,8 @@ class GridHomeViewModel: ObservableObject {
     private func fetchGifUrl(query: String, friendId: String) async -> String? {
         guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
 
-        // seed = md5(friendId + query + todayDate)，保证同人同状态当天稳定，每天轮换
-        let today = Self.todayDateString()
-        let seed = Self.md5("\(friendId)\(query)\(today)")
+        // seed = md5(friendId + query)，不含日期，缓存跨天持久有效
+        let seed = Self.md5("\(friendId)\(query)")
 
         guard let url = URL(string: "https://gif.playa.cn/api/giphy?q=\(encoded)&seed=\(seed)") else { return nil }
         do {
@@ -250,12 +239,6 @@ class GridHomeViewModel: ObservableObject {
     private static func md5(_ string: String) -> String {
         let digest = Insecure.MD5.hash(data: Data(string.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static func todayDateString() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: Date())
     }
 
     private static func persistGifCache(_ cache: [String: String]) {
