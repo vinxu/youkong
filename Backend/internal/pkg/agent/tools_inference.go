@@ -83,8 +83,12 @@ IMPORTANT: Call exactly once per inference. Base your inference primarily on rea
 					Type:        "string",
 					Description: "推理依据，一句话",
 				},
+				"giphy_query": {
+					Type:        "string",
+					Description: "2-4个英文关键词描述该活动的视觉场景（如 cooking kitchen / office working / sleeping bed）",
+				},
 			},
-			Required: []string{"emoji", "activity", "is_available", "confidence"},
+			Required: []string{"emoji", "activity", "is_available", "confidence", "giphy_query"},
 		},
 		Handler: createFinalizeStatusHandler(deps),
 	}
@@ -98,6 +102,7 @@ func createFinalizeStatusHandler(deps *InferenceToolDeps) ToolHandler {
 		isAvailable, _ := args["is_available"].(bool)
 		confidence, _ := args["confidence"].(string)
 		reasoning, _ := args["reasoning"].(string)
+		giphyQuery, _ := args["giphy_query"].(string)
 
 		if emoji == "" || activity == "" {
 			return &ToolResult{Success: false, Error: "emoji 和 activity 不能为空"}, nil
@@ -113,6 +118,7 @@ func createFinalizeStatusHandler(deps *InferenceToolDeps) ToolHandler {
 			IsAvailable: isAvailable,
 			Confidence:  confidence,
 			Reasoning:   reasoning,
+			GiphyQuery:  giphyQuery,
 			InferredAt:  time.Now().UnixMilli(),
 		}
 
@@ -243,7 +249,9 @@ func generateStatusOptionsTool(deps *InferenceToolDeps) *Tool {
 - 按可能性从高到低排列（第 1 个是最可能的）
 - 每个选项的 giphy_query 用 2-4 个英文关键词，描述该活动的视觉场景（用于搜索 GIF 动图）
 - giphy_query 要具象化（如 "cooking kitchen" 而非 "at home"）
-- activity 用 2-4 字口语化动词短语`,
+- activity 用 2-4 字口语化动词短语
+- 如果用户消息中提到了"已展示过"的活动，绝对不能生成相同或相似的活动
+- 发挥想象力，结合时间、地点、设备信号，推断出丰富多样的活动可能性`,
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolParam{

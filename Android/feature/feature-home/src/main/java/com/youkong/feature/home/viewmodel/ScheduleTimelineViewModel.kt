@@ -236,7 +236,8 @@ class ScheduleTimelineViewModel @Inject constructor(
                             oldestDate = data.oldestDate,
                             isEmpty = groups.isEmpty(),
                             isRefreshing = false,
-                            error = null
+                            error = null,
+                            showPastSchedules = false
                         )
                     }
                 } else {
@@ -247,6 +248,12 @@ class ScheduleTimelineViewModel @Inject constructor(
                 _uiState.update { it.copy(isRefreshing = false) }
             }
         }
+    }
+
+    // MARK: - Toggle Past Schedules
+
+    fun toggleShowPastSchedules() {
+        _uiState.update { it.copy(showPastSchedules = !it.showPastSchedules) }
     }
 
     // MARK: - Helper Methods
@@ -607,4 +614,6 @@ data class ScheduleTimelineUiState(
     val aiReady: Boolean = false,
     val aiReadyDetails: AIReadyDetails? = null,
     val isTogglingAutoPredict: Boolean = false,
+    // 过往折叠
+    val showPastSchedules: Boolean = false,
 )

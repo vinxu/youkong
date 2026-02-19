@@ -51,12 +51,12 @@ struct PermissionRequestView: View {
             Text("✨")
                 .font(.system(size: 40))
 
-            Text("让我帮你找到有空的朋友")
+            Text("让 AI 智能感知你的状态")
                 .font(.cliHeadline)
                 .foregroundColor(CLIColors.textPrimary)
                 .multilineTextAlignment(.center)
 
-            Text("授权以下权限，我才能判断你和朋友是否有空")
+            Text("授权以下权限，AI 才能准确判断你的日程状态")
                 .font(.cliBodySmall)
                 .foregroundColor(CLIColors.textSecondary)
                 .multilineTextAlignment(.center)

@@ -35,6 +35,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
@@ -102,7 +104,14 @@ fun GroupChatScreen(
                 modifier = Modifier
                     .weight(1f)
                     .pointerInput(Unit) {
-                        detectTapGestures { focusManager.clearFocus() }
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.type == PointerEventType.Press) {
+                                    focusManager.clearFocus()
+                                }
+                            }
+                        }
                     },
                 state = listState,
                 verticalArrangement = Arrangement.spacedBy(12.dp),

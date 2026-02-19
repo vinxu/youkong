@@ -54,6 +54,7 @@ type AgentHandler struct {
 	memoryRepo              *repository.MemoryRepository      // Memory repo（persona 查询）
 	scenarioEngine          *service.ScenarioEngine           // 场景测试引擎
 	sceneService            *service.SceneService             // 像素场景生成服务
+	interactionService      *service.InteractionService       // 互动服务（+1 富化）
 	// STS 配置
 	stsSecretID  string
 	stsSecretKey string
@@ -1182,11 +1183,13 @@ func (h *AgentHandler) SelectStatus(c *gin.Context) {
 
 			// 3. 追加 V3 item
 			v3Item := model.ScheduleItem{
-				StartTime: currentTime,
-				EndTime:   v3EndTime,
-				Emoji:     req.Emoji,
-				Status:    req.Status,
-				Executed:  true,
+				StartTime:  currentTime,
+				EndTime:    v3EndTime,
+				Emoji:      req.Emoji,
+				Status:     req.Status,
+				Executed:   true,
+				GifURL:     req.GifURL,
+				GiphyQuery: req.GiphyQuery,
 			}
 			existing.Items = append(existing.Items, v3Item)
 
@@ -1201,11 +1204,13 @@ func (h *AgentHandler) SelectStatus(c *gin.Context) {
 				UserID:       userID,
 				ScheduleDate: now,
 				Items: model.ScheduleItems{{
-					StartTime: currentTime,
-					EndTime:   addTimeStr(currentTime, 120),
-					Emoji:     req.Emoji,
-					Status:    req.Status,
-					Executed:  true,
+					StartTime:  currentTime,
+					EndTime:    addTimeStr(currentTime, 120),
+					Emoji:      req.Emoji,
+					Status:     req.Status,
+					Executed:   true,
+					GifURL:     req.GifURL,
+					GiphyQuery: req.GiphyQuery,
 				}},
 				CurrentIndex: 0,
 				Status:       model.ScheduleStatusActive,
@@ -1667,15 +1672,15 @@ func (h *AgentHandler) GetMySchedule(c *gin.Context) {
 		return
 	}
 
-	// 获取时刻表
-	schedule, err := h.scheduleRepo.GetActiveByUserAndDate(c.Request.Context(), userID, date)
+	// 获取今天所有非取消的 schedule，合并 items 展示完整时间线
+	allSchedules, err := h.scheduleRepo.GetAllByUserAndDate(c.Request.Context(), userID, date)
 	if err != nil {
 		fmt.Printf("[GetMySchedule] 获取失败 user=%s date=%s error=%v\n", userID, dateStr, err)
 		response.InternalError(c, "获取失败")
 		return
 	}
 
-	if schedule == nil {
+	if len(allSchedules) == 0 {
 		response.Success(c, gin.H{
 			"date":  dateStr,
 			"items": []interface{}{},
@@ -1683,9 +1688,25 @@ func (h *AgentHandler) GetMySchedule(c *gin.Context) {
 		return
 	}
 
+	// 合并所有 schedule 的 items，按 start_time 排序去重
+	seen := make(map[string]bool)
+	var mergedItems model.ScheduleItems
+	for _, s := range allSchedules {
+		for _, item := range s.Items {
+			key := item.StartTime + "|" + item.Status
+			if !seen[key] {
+				seen[key] = true
+				mergedItems = append(mergedItems, item)
+			}
+		}
+	}
+	sort.Slice(mergedItems, func(i, j int) bool {
+		return mergedItems[i].StartTime < mergedItems[j].StartTime
+	})
+
 	response.Success(c, gin.H{
 		"date":  dateStr,
-		"items": schedule.Items,
+		"items": mergedItems,
 	})
 }
 
@@ -1804,6 +1825,16 @@ func (h *AgentHandler) GetMyScheduleHistory(c *gin.Context) {
 
 	// 按日期分组并格式化响应
 	daySchedules := formatSchedulesByDate(schedules)
+
+	// 富化今日时段的 +1 用户列表
+	if h.interactionService != nil {
+		today := time.Now().Format("2006-01-02")
+		for i := range daySchedules {
+			if daySchedules[i].ScheduleDate == today {
+				h.interactionService.EnrichScheduleWithPlusOnes(c.Request.Context(), userID, daySchedules[i].Items, today)
+			}
+		}
+	}
 
 	response.Success(c, gin.H{
 		"schedules":   daySchedules,
@@ -2182,31 +2213,41 @@ type DayScheduleResponse struct {
 
 // formatSchedulesByDate 将时刻表按日期分组
 func formatSchedulesByDate(schedules []*model.StatusSchedule) []DayScheduleResponse {
-	// 使用 map 按日期分组，保留每天最新的时刻表
-	dateMap := make(map[string]*model.StatusSchedule)
+	// 按日期分组，合并同一天所有 schedule 的 items（active + completed，不含 cancelled）
+	dateItemsMap := make(map[string][]model.ScheduleItem)
+	dateStatusMap := make(map[string]string) // 保留最新 schedule 的 status
 	dateOrder := make([]string, 0)
 
 	for _, s := range schedules {
 		dateStr := s.ScheduleDate.Format("2006-01-02")
-		if _, exists := dateMap[dateStr]; !exists {
-			dateMap[dateStr] = s
+		if _, exists := dateItemsMap[dateStr]; !exists {
 			dateOrder = append(dateOrder, dateStr)
+			dateStatusMap[dateStr] = string(s.Status) // 第一个（最新的）schedule 的 status
 		}
+		dateItemsMap[dateStr] = append(dateItemsMap[dateStr], s.Items...)
 	}
 
-	// 按日期顺序构建响应，items 按 start_time 排序
+	// 按日期顺序构建响应，items 去重 + 按 start_time 排序
 	result := make([]DayScheduleResponse, 0, len(dateOrder))
 	for _, dateStr := range dateOrder {
-		s := dateMap[dateStr]
-		items := make([]model.ScheduleItem, len(s.Items))
-		copy(items, s.Items)
-		sort.Slice(items, func(i, j int) bool {
-			return items[i].StartTime < items[j].StartTime
+		allItems := dateItemsMap[dateStr]
+		// 去重：同一 start_time + status 只保留一条
+		seen := make(map[string]bool)
+		var dedupItems []model.ScheduleItem
+		for _, item := range allItems {
+			key := item.StartTime + "|" + item.Status
+			if !seen[key] {
+				seen[key] = true
+				dedupItems = append(dedupItems, item)
+			}
+		}
+		sort.Slice(dedupItems, func(i, j int) bool {
+			return dedupItems[i].StartTime < dedupItems[j].StartTime
 		})
 		result = append(result, DayScheduleResponse{
 			ScheduleDate: dateStr,
-			Items:        items,
-			Status:       string(s.Status),
+			Items:        dedupItems,
+			Status:       dateStatusMap[dateStr],
 		})
 	}
 
@@ -2598,6 +2639,43 @@ func (h *AgentHandler) InferStatus(c *gin.Context) {
 	}
 
 	response.Success(c, result)
+}
+
+// InferStatusOptions 4选1 推断（生成 4 个状态选项供用户选择）
+// POST /api/v1/agent/infer-options
+func (h *AgentHandler) InferStatusOptions(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
+		response.Unauthorized(c)
+		return
+	}
+
+	if h.voiceScheduleServiceV4 == nil {
+		response.InternalError(c, "服务未就绪")
+		return
+	}
+
+	var req model.InferOptionsRequest
+	c.ShouldBindJSON(&req)
+
+	// 聚合推断上下文
+	inferenceContext := h.voiceScheduleServiceV4.GatherInferenceContext(c.Request.Context(), userID)
+
+	// 调用 4选1 推断
+	resp, err := h.voiceScheduleServiceV4.InferStatusOptions(
+		c.Request.Context(), userID, &req.ExtendedStatusReportRequest,
+		inferenceContext, req.ExcludeActivities, req.SessionID,
+	)
+	if err != nil {
+		fmt.Printf("[InferOptions] 推理失败 user=%s error=%v\n", userID, err)
+		response.InternalError(c, "推理失败")
+		return
+	}
+
+	fmt.Printf("[InferOptions] 推理成功 user=%s options=%d session=%s\n",
+		userID, len(resp.Options), resp.SessionID)
+
+	response.Success(c, resp)
 }
 
 // StatusFeedback 状态反馈（用户修正状态，存入记忆）
@@ -3210,6 +3288,11 @@ func (h *AgentHandler) SetScenarioEngine(engine *service.ScenarioEngine) {
 // SetSceneService 设置像素场景生成服务
 func (h *AgentHandler) SetSceneService(ss *service.SceneService) {
 	h.sceneService = ss
+}
+
+// SetInteractionService 设置互动服务（+1 富化时间表）
+func (h *AgentHandler) SetInteractionService(is *service.InteractionService) {
+	h.interactionService = is
 }
 
 // enrichInferenceScene 推断完成后异步生成像素场景+互动选项

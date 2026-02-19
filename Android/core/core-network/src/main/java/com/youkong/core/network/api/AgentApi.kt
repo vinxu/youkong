@@ -24,6 +24,9 @@ interface AgentApi {
     @GET("agent/my-analysis")
     suspend fun getMyAnalysis(): ApiResponse<MyAnalysisResponse>
 
+    @POST("agent/infer-options")
+    suspend fun inferOptions(@Body request: InferOptionsApiRequest): ApiResponse<InferenceOptionsApiResponse>
+
     @POST("agent/infer-status-v2")
     suspend fun inferStatusV3(@Body request: AgentStatusRequest): ApiResponse<InferenceV3Response>
 
@@ -118,4 +121,52 @@ data class StatusFeedbackApiRequest(
     val giphyQuery: String? = null,
     @SerialName("use_gif")
     val useGif: Boolean = false,
+    @SerialName("inference_session_id")
+    val inferenceSessionId: String? = null,
+    @SerialName("selected_option_idx")
+    val selectedOptionIdx: Int? = null,
+)
+
+// MARK: - 4选1 推断选项
+
+@Serializable
+data class InferOptionsApiRequest(
+    val screen: com.youkong.core.network.model.ScreenDataRequest? = null,
+    val location: com.youkong.core.network.model.LocationDataRequest? = null,
+    @SerialName("extended_location")
+    val extendedLocation: com.youkong.core.network.model.ExtendedLocationDataRequest? = null,
+    val battery: com.youkong.core.network.model.BatteryDataRequest? = null,
+    val mode: com.youkong.core.network.model.ModeDataRequest? = null,
+    val connection: com.youkong.core.network.model.ConnectionDataRequest? = null,
+    val display: com.youkong.core.network.model.DisplayDataRequest? = null,
+    val calendar: com.youkong.core.network.model.CalendarDataRequest? = null,
+    val movement: com.youkong.core.network.model.MovementDataRequest? = null,
+    @SerialName("ambient_light")
+    val ambientLight: com.youkong.core.network.model.AmbientLightDataRequest? = null,
+    @SerialName("exclude_activities")
+    val excludeActivities: List<String>? = null,
+    @SerialName("session_id")
+    val sessionId: String? = null,
+)
+
+@Serializable
+data class InferenceOptionsApiResponse(
+    @SerialName("session_id")
+    val sessionId: String,
+    val options: List<StatusCardOptionApi>,
+)
+
+@Serializable
+data class StatusCardOptionApi(
+    val index: Int,
+    val emoji: String,
+    val activity: String,
+    val place: String? = null,
+    @SerialName("is_available")
+    val isAvailable: Boolean = false,
+    val confidence: String = "medium",
+    @SerialName("giphy_query")
+    val giphyQuery: String = "",
+    @SerialName("gif_url")
+    val gifUrl: String? = null,
 )

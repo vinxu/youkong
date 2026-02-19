@@ -8,15 +8,20 @@ import com.youkong.core.agent.worker.StatusReportTrigger
 import com.youkong.core.network.api.HomeApi
 import com.youkong.core.network.model.FriendGridItem
 import com.youkong.core.network.model.InteractionOptionItem
+import com.youkong.core.network.model.GifCacheItem
+import com.youkong.core.network.model.GifCacheRequest
 import com.youkong.core.network.model.SendInteractionRequest
 import android.content.Context
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -25,6 +30,18 @@ import java.security.MessageDigest
 import java.time.Instant
 import java.time.LocalDate
 import javax.inject.Inject
+
+/**
+ * 全局事件：通知首页 Grid 刷新（状态更新/时刻表保存后触发）
+ */
+object GridRefreshEvent {
+    private val _event = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val event = _event.asSharedFlow()
+
+    fun trigger() {
+        _event.tryEmit(Unit)
+    }
+}
 
 @HiltViewModel
 class GridHomeViewModel @Inject constructor(
@@ -65,6 +82,14 @@ class GridHomeViewModel @Inject constructor(
 
         // 观察未读消息变化
         observeUnreadCounts()
+
+        // 观察状态更新通知 → 自动刷新 Grid
+        viewModelScope.launch {
+            @OptIn(kotlinx.coroutines.FlowPreview::class)
+            GridRefreshEvent.event
+                .debounce(500)
+                .collect { refresh() }
+        }
     }
 
     // MARK: - Observe Unread Counts
@@ -216,16 +241,63 @@ class GridHomeViewModel @Inject constructor(
         }
     }
 
+    // MARK: - Send +1
+
+    fun sendPlusOne(friend: FriendGridItem) {
+        // 乐观更新：立即标记 hasPlusOned=true 并 interactionCount+1
+        _uiState.update { state ->
+            state.copy(
+                friends = state.friends.map {
+                    if (it.userId == friend.userId) it.copy(
+                        hasPlusOned = true,
+                        interactionCount = it.interactionCount + 1
+                    ) else it
+                }
+            )
+        }
+
+        viewModelScope.launch {
+            try {
+                homeApi.sendInteraction(
+                    SendInteractionRequest(
+                        receiverId = friend.userId,
+                        actionEmoji = friend.emoji,
+                        actionLabel = "+1",
+                        actionPushText = "在你的${friend.status}状态上+1",
+                    )
+                )
+                android.util.Log.d("GridHome", "✅ +1 已发送 → ${friend.nickname}")
+            } catch (e: Exception) {
+                // 失败回滚
+                _uiState.update { state ->
+                    state.copy(
+                        friends = state.friends.map {
+                            if (it.userId == friend.userId) it.copy(
+                                hasPlusOned = false,
+                                interactionCount = (it.interactionCount - 1).coerceAtLeast(0)
+                            ) else it
+                        }
+                    )
+                }
+                android.util.Log.e("GridHome", "❌ +1 发送失败: ${e.message}")
+            }
+        }
+    }
+
     // MARK: - Resolve GIF URLs
 
     private fun resolveGifUrls(friends: List<FriendGridItem>) {
+        // 收集需要解析的好友
+        data class ToResolve(val userId: String, val query: String, val cacheKey: String)
+        val toResolve = mutableListOf<ToResolve>()
+
         friends.forEach { friend ->
             if (friend.gifUrl.isNullOrEmpty() && !friend.needsSchedule) {
                 val query = friend.giphyQuery?.takeIf { it.isNotEmpty() } ?: friend.status
                 if (query.isNotEmpty()) {
                     val cacheKey = "${friend.userId}:$query"
 
-                    // 缓存命中 → 直接使用，不发起网络请求
+                    // 本地缓存命中 → 直接使用
                     val cachedUrl = gifCache[cacheKey]
                     if (cachedUrl != null) {
                         _uiState.update { state ->
@@ -235,25 +307,53 @@ class GridHomeViewModel @Inject constructor(
                                 }
                             )
                         }
-                        return@forEach
-                    }
-
-                    viewModelScope.launch {
-                        val url = fetchGifUrl(query, friend.userId)
-                        if (url != null) {
-                            gifCache[cacheKey] = url
-                            persistGifCache()
-                            _uiState.update { state ->
-                                state.copy(
-                                    friends = state.friends.map {
-                                        if (it.userId == friend.userId) it.copy(gifUrl = url, useGif = true) else it
-                                    }
-                                )
-                            }
-                        }
+                    } else {
+                        toResolve.add(ToResolve(friend.userId, query, cacheKey))
                     }
                 }
             }
+        }
+
+        if (toResolve.isEmpty()) return
+
+        // 并发解析，完成后批量写回服务器
+        viewModelScope.launch {
+            val writeBackItems = mutableListOf<GifCacheItem>()
+
+            toResolve.map { item ->
+                async {
+                    val url = fetchGifUrl(item.query, item.userId)
+                    if (url != null) {
+                        gifCache[item.cacheKey] = url
+                        _uiState.update { state ->
+                            state.copy(
+                                friends = state.friends.map {
+                                    if (it.userId == item.userId) it.copy(gifUrl = url, useGif = true) else it
+                                }
+                            )
+                        }
+                        synchronized(writeBackItems) {
+                            writeBackItems.add(GifCacheItem(friendId = item.userId, query = item.query, cosUrl = url))
+                        }
+                    }
+                }
+            }.forEach { it.await() }
+
+            if (writeBackItems.isNotEmpty()) {
+                persistGifCache()
+                // 写回服务器：其他客户端下次从 Grid API 直接拿到 cos_url
+                writeBackGifCache(writeBackItems)
+            }
+        }
+    }
+
+    private suspend fun writeBackGifCache(items: List<GifCacheItem>) {
+        try {
+            homeApi.cacheGifUrls(GifCacheRequest(items = items))
+            android.util.Log.d("GridHome", "GIF 缓存写回成功: ${items.size} 条")
+        } catch (e: Exception) {
+            // 写回失败不影响主流程
+            android.util.Log.d("GridHome", "GIF 缓存写回失败: ${e.message}")
         }
     }
 

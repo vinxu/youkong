@@ -518,6 +518,9 @@ func (s *MemoryService) SelectStatus(ctx context.Context, userID string, req *mo
 	if cached, err := s.GetCachedAnalysis(ctx, userID); err == nil && cached != nil {
 		cached.LifeStatus.Emoji = req.Emoji
 		cached.LifeStatus.Label = req.Status
+		cached.LifeStatus.GifURL = req.GifURL
+		cached.LifeStatus.GiphyQuery = req.GiphyQuery
+		cached.LifeStatus.UseGif = req.GifURL != ""
 		cached.UpdatedAt = time.Now()
 		s.cacheAnalysisResult(ctx, userID, cached)
 	} else {
@@ -530,8 +533,11 @@ func (s *MemoryService) SelectStatus(ctx context.Context, userID string, req *mo
 				Confidence:  "high",
 			},
 			LifeStatus: model.LifeStatus{
-				Emoji: req.Emoji,
-				Label: req.Status,
+				Emoji:      req.Emoji,
+				Label:      req.Status,
+				GifURL:     req.GifURL,
+				GiphyQuery: req.GiphyQuery,
+				UseGif:     req.GifURL != "",
 			},
 			UpdatedAt: time.Now(),
 		}

@@ -85,7 +85,20 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder()
             .setWorkerFactory(workerFactory)
+            .setDefaultProcessName(packageName)
             .build()
+
+    init {
+        // 华为设备 WorkManager TooManyRequestsException 保护
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            if (throwable.javaClass.name == "android.net.ConnectivityManager\$TooManyRequestsException") {
+                Log.w("YouKongApplication", "Ignored TooManyRequestsException (Huawei known issue)")
+            } else {
+                defaultHandler?.uncaughtException(thread, throwable)
+            }
+        }
+    }
 
     override fun newImageLoader(): ImageLoader {
         return ImageLoader.Builder(this)
@@ -175,12 +188,9 @@ class YouKongApplication : Application(), Configuration.Provider, ImageLoaderFac
                 .distinctUntilChanged()
                 .collect { isLoggedIn ->
                     if (isLoggedIn) {
-                        val constraints = Constraints.Builder()
-                            .setRequiredNetworkType(NetworkType.CONNECTED)
-                            .build()
                         val workRequest = PeriodicWorkRequestBuilder<StatusReportWorker>(
                             15, TimeUnit.MINUTES
-                        ).setConstraints(constraints).build()
+                        ).build()
                         workManager.enqueueUniquePeriodicWork(
                             StatusReportWorker.WORK_NAME,
                             ExistingPeriodicWorkPolicy.KEEP,

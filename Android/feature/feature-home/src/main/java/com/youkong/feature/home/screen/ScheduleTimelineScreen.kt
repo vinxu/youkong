@@ -39,6 +39,7 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import com.youkong.feature.home.viewmodel.ScheduleTimelineUiState
 import com.youkong.feature.home.viewmodel.ScheduleTimelineViewModel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -72,14 +73,6 @@ fun ScheduleTimelineScreen(
             }
     }
 
-    // 首次加载完成后滚动到底部（最新）
-    LaunchedEffect(uiState.scheduleGroups.size) {
-        if (uiState.scheduleGroups.isNotEmpty() && !uiState.isLoading) {
-            coroutineScope.launch {
-                listState.animateScrollToItem(uiState.scheduleGroups.size - 1)
-            }
-        }
-    }
 
     Column(
         modifier = Modifier
@@ -183,14 +176,6 @@ fun ScheduleTimelineContent(
             }
     }
 
-    // 首次加载完成后滚动到底部（最新）
-    LaunchedEffect(uiState.scheduleGroups.size) {
-        if (uiState.scheduleGroups.isNotEmpty() && !uiState.isLoading) {
-            coroutineScope.launch {
-                listState.animateScrollToItem(uiState.scheduleGroups.size - 1)
-            }
-        }
-    }
 
     ScheduleTimelineListContent(
         uiState = uiState,
@@ -254,24 +239,20 @@ private fun ScheduleTimelineListContent(
             }
 
             else -> {
+                val pastGroups = uiState.scheduleGroups.filter { !it.isCurrentOrFuture }
+                val futureGroups = uiState.scheduleGroups.filter { it.isCurrentOrFuture }
+
+                // reverseLayout = true: 和聊天列表一样，index 0 在底部，自然从最新状态开始显示
                 LazyColumn(
                     state = listState,
+                    reverseLayout = true,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(0.dp)
                 ) {
-                    // 加载更多指示器（顶部）
-                    if (uiState.hasMore) {
-                        item(key = "load_more_top") {
-                            LoadMoreIndicator(
-                                isLoading = uiState.isLoadingMore
-                            )
-                        }
-                    }
-
-                    // 时刻表分组（倒序，最新在底部）
+                    // index 0 → 屏幕底部：最新的未来分组（不反转，最新在前）
                     items(
-                        items = uiState.scheduleGroups.reversed(),
+                        items = futureGroups,
                         key = { it.id }
                     ) { group ->
                         ScheduleGroupView(
@@ -282,6 +263,43 @@ private fun ScheduleTimelineListContent(
                             onToggleHighlight = { item -> viewModel.toggleHighlight(item, group) },
                             onDeleteItem = { item -> viewModel.confirmDelete(item, group) }
                         )
+                    }
+
+                    // 过往折叠/展开按钮
+                    if (pastGroups.isNotEmpty()) {
+                        item(key = "past_toggle") {
+                            PastScheduleToggle(
+                                showPast = uiState.showPastSchedules,
+                                pastCount = pastGroups.size,
+                                onToggle = { viewModel.toggleShowPastSchedules() }
+                            )
+                        }
+                    }
+
+                    // 展开过往时：过往分组（不反转，最新在前）
+                    if (uiState.showPastSchedules) {
+                        items(
+                            items = pastGroups,
+                            key = { it.id }
+                        ) { group ->
+                            ScheduleGroupView(
+                                group = group,
+                                isItemExecuted = { viewModel.isItemExecuted(it, group) },
+                                isItemActive = { viewModel.isItemActive(it, group) },
+                                onEditItem = { item -> viewModel.startEditing(item, group) },
+                                onToggleHighlight = { item -> viewModel.toggleHighlight(item, group) },
+                                onDeleteItem = { item -> viewModel.confirmDelete(item, group) }
+                            )
+                        }
+
+                        // 加载更多指示器（视觉顶部）
+                        if (uiState.hasMore) {
+                            item(key = "load_more_top") {
+                                LoadMoreIndicator(
+                                    isLoading = uiState.isLoadingMore
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -421,6 +439,48 @@ private fun LoadMoreIndicator(isLoading: Boolean) {
 }
 
 @Composable
+private fun PastScheduleToggle(
+    showPast: Boolean,
+    pastCount: Int,
+    onToggle: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(vertical = 12.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "──",
+            fontFamily = FontFamily.Monospace,
+            color = CLIColors.Border
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = if (showPast) "收起过往" else "查看过往 $pastCount 天",
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            color = CLIColors.TextSecondary
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = if (showPast) "▴" else "▾",
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            color = CLIColors.TextWeak
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = "──",
+            fontFamily = FontFamily.Monospace,
+            color = CLIColors.Border
+        )
+    }
+}
+
+@Composable
 private fun ScheduleGroupView(
     group: ScheduleGroup,
     isItemExecuted: (ScheduleItem) -> Boolean,
@@ -491,6 +551,33 @@ private fun ScheduleGroupView(
                 // 所有条目都可以长按删除
                 onLongPress = { onDeleteItem(item) }
             )
+
+            // +1 用户显示
+            val plusOnes = item.plusOnes
+            if (!plusOnes.isNullOrEmpty()) {
+                Row(
+                    modifier = Modifier.padding(start = 86.dp + 10.dp, top = 2.dp),
+                ) {
+                    plusOnes.forEachIndexed { idx, user ->
+                        if (idx > 0 && idx < 2) {
+                            Text("、", fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = CLIColors.TextWeak)
+                        }
+                        if (idx < 2) {
+                            Text(
+                                text = user.nickname,
+                                fontSize = 9.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = CLIColors.Green,
+                            )
+                        }
+                    }
+                    val total = plusOnes.size
+                    if (total > 2) {
+                        Text("等${total}人", fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = CLIColors.TextWeak)
+                    }
+                    Text("+1", fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = CLIColors.TextWeak)
+                }
+            }
 
             // 连接线
             if (index < group.items.size - 1) {

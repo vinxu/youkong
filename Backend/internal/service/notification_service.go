@@ -112,6 +112,32 @@ func (s *NotificationService) SendPushToUser(ctx context.Context, userID, title,
 	return s.NotifyNewMessageToUser(ctx, userID, title, body, nil)
 }
 
+// SendInteractionPush 发送互动推送（不检查在线状态，始终发送）
+func (s *NotificationService) SendInteractionPush(ctx context.Context, recipientID, title, body string, data map[string]string) error {
+	if s.pushManager == nil || !s.pushManager.IsEnabled() {
+		return nil
+	}
+
+	tokens, err := s.deviceTokenRepo.GetActiveByUserID(ctx, recipientID)
+	if err != nil || len(tokens) == 0 {
+		return err
+	}
+
+	notification := push.NewNotification(title, body).WithBadge(1)
+	for k, v := range data {
+		notification.WithData(k, v)
+	}
+
+	results := s.pushManager.SendToTokens(ctx, tokens, notification)
+
+	invalidTokens := push.GetInvalidTokens(results)
+	if len(invalidTokens) > 0 {
+		s.deactivateInvalidTokens(ctx, invalidTokens)
+	}
+
+	return nil
+}
+
 // buildMessageNotification 构建消息通知
 func (s *NotificationService) buildMessageNotification(message *model.Message, sender *model.User) *push.Notification {
 	title := sender.Nickname

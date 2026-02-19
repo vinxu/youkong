@@ -9,7 +9,9 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class StatusOption(
     val emoji: String,
-    val status: String
+    val status: String,
+    @SerialName("gif_url")
+    val gifUrl: String? = null,
 )
 
 /**
@@ -20,7 +22,11 @@ data class SelectStatusRequest(
     val emoji: String,
     val status: String,
     @SerialName("device_data")
-    val deviceData: AgentStatusRequest? = null
+    val deviceData: AgentStatusRequest? = null,
+    @SerialName("gif_url")
+    val gifUrl: String? = null,
+    @SerialName("giphy_query")
+    val giphyQuery: String? = null,
 )
 
 /**

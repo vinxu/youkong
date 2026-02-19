@@ -42,6 +42,11 @@ interface AgentRepository {
     suspend fun inferStatusV3Respond(sessionId: String, selectedIndex: Int): Result<V3InferenceResult>
 
     /**
+     * AI 推断 4选1 选项
+     */
+    suspend fun inferOptions(request: Any, excludeActivities: List<String>? = null, sessionId: String? = null): Result<InferenceOptionsResult>
+
+    /**
      * 提交状态反馈（用户修正）
      */
     suspend fun submitStatusFeedback(feedback: StatusFeedback): Result<Unit>
@@ -82,6 +87,30 @@ data class StatusFeedback(
     val gifUrl: String? = null,
     val giphyQuery: String? = null,
     val useGif: Boolean = false,
+    val inferenceSessionId: String? = null,
+    val selectedOptionIdx: Int? = null,
+)
+
+/**
+ * 4选1 推断卡片选项
+ */
+data class StatusCardOption(
+    val index: Int,
+    val emoji: String,
+    val activity: String,
+    val place: String? = null,
+    val isAvailable: Boolean = false,
+    val confidence: String = "medium",
+    val giphyQuery: String = "",
+    val gifUrl: String? = null,
+)
+
+/**
+ * 4选1 推断结果
+ */
+data class InferenceOptionsResult(
+    val sessionId: String,
+    val options: List<StatusCardOption>,
 )
 
 /**

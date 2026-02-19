@@ -243,7 +243,9 @@ struct PosterShareView: View {
             sceneProp: nil,
             sceneSurface: nil,
             interactions: nil,
-            interactionCount: nil
+            interactionCount: nil,
+            hasPlusOned: false,
+            isSelf: false
         )
     ])
 }

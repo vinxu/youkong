@@ -40,8 +40,14 @@ type StatusScheduler struct {
 	personaService       PersonaGenerator
 	scheduleGenService   ScheduleTemplateGenerator
 	memoryDocRepo        *repository.UserMemoryDocumentRepository
+	homeService          HomeServiceGifResolver
 	ticker               *time.Ticker
 	stop                 chan struct{}
+}
+
+// HomeServiceGifResolver GIF 解析接口（避免循环依赖）
+type HomeServiceGifResolver interface {
+	ResolveAndCacheGifURL(userID, giphyQuery string)
 }
 
 // NotificationSender 通知发送接口（避免循环依赖）
@@ -96,6 +102,10 @@ func (s *StatusScheduler) SetMemoryDocRepo(repo *repository.UserMemoryDocumentRe
 // SetScheduleGenService 设置结构化时间表生成服务
 func (s *StatusScheduler) SetScheduleGenService(sgs ScheduleTemplateGenerator) {
 	s.scheduleGenService = sgs
+}
+
+func (s *StatusScheduler) SetHomeService(hs HomeServiceGifResolver) {
+	s.homeService = hs
 }
 
 // Start 启动调度器（每分钟执行一次）
@@ -381,6 +391,11 @@ func (s *StatusScheduler) updateUserStatus(ctx context.Context, userID string, i
 			fmt.Printf("[StatusScheduler] 状态已同步到首页: user=%s emoji=%s status=%s\n",
 				userID, item.Emoji, item.Status)
 		}
+
+		// 异步解析 GIF（如果 schedule item 没有 gif_url 但有 giphy_query）
+		if s.homeService != nil && item.GifURL == "" && item.GiphyQuery != "" {
+			go s.homeService.ResolveAndCacheGifURL(userID, item.GiphyQuery)
+		}
 	}
 
 	return nil
@@ -499,29 +514,39 @@ func (s *StatusScheduler) autoInferForUsersWithoutSchedule(ctx context.Context, 
 		sensorData, _ := s.redisClient.Get(ctx, sensorKey)
 		hasSensorData := sensorData != ""
 
-		// 5. 检查今天是否已有 completed schedule（避免重复创建）
+		// 5. 检查今天是否已有 completed schedule
 		existingSchedules, _ := s.scheduleRepo.GetAllByUserAndDate(ctx, userID, today)
 		var hasCompletedSchedule bool
+		var completedSchedule *model.StatusSchedule
 		for _, es := range existingSchedules {
 			if es.Status == model.ScheduleStatusCompleted {
 				hasCompletedSchedule = true
+				completedSchedule = es
 				break
 			}
 		}
-		if hasCompletedSchedule {
-			// 已有 completed schedule，复用它而不是新建
-			// 通过 maybeAutoInfer 的路径处理（需要先激活）
-			for _, es := range existingSchedules {
-				if es.Status == model.ScheduleStatusCompleted {
-					// 重新激活这个 schedule，让 maybeAutoInfer 下一轮处理
-					es.Status = model.ScheduleStatusActive
-					if err := s.scheduleRepo.Update(ctx, es); err != nil {
-						fmt.Printf("[StatusScheduler] 重新激活 schedule 失败: user=%s err=%v\n", userID, err)
-					} else {
-						fmt.Printf("[StatusScheduler] 重新激活 completed schedule: user=%s id=%d\n", userID, es.ID)
-					}
+		if hasCompletedSchedule && completedSchedule != nil {
+			// 检查 completed schedule 中是否有 item 仍在有效期内
+			// 如果用户手动设置的状态还没过期，不要覆盖
+			itemStillActive := false
+			for _, item := range completedSchedule.Items {
+				if item.StartTime <= currentTime && currentTime < item.EndTime {
+					itemStillActive = true
+					fmt.Printf("[StatusScheduler] 跳过推断（completed schedule item 仍有效）: user=%s item=%s %s-%s\n",
+						userID, item.Status, item.StartTime, item.EndTime)
+					s.redisClient.Set(ctx, lockKey, "1", 5*time.Minute) // 5 分钟后再检查
 					break
 				}
+			}
+			if itemStillActive {
+				continue // 跳过该用户
+			}
+			// 重新激活 completed schedule，让 maybeAutoInfer 下一轮处理
+			completedSchedule.Status = model.ScheduleStatusActive
+			if err := s.scheduleRepo.Update(ctx, completedSchedule); err != nil {
+				fmt.Printf("[StatusScheduler] 重新激活 schedule 失败: user=%s err=%v\n", userID, err)
+			} else {
+				fmt.Printf("[StatusScheduler] 重新激活 completed schedule: user=%s id=%d\n", userID, completedSchedule.ID)
 			}
 			continue
 		}
@@ -656,6 +681,25 @@ func (s *StatusScheduler) maybeAutoInfer(ctx context.Context, schedule *model.St
 	// 推断锁生效返回的占位符，跳过
 	if inference.Activity == "状态保持中" {
 		return
+	}
+
+	// 6.5 推断完成后重新读取 schedule（防止推断期间用户手动设状态导致叠加）
+	freshSchedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, userID, time.Now())
+	if err == nil && freshSchedule != nil {
+		schedule = freshSchedule
+		// 重新检查：如果用户在推断期间手动设了状态，当前时间已被覆盖 → 跳过
+		for _, item := range schedule.Items {
+			if !isValidTimeFormat(item.StartTime) || !isValidTimeFormat(item.EndTime) {
+				continue
+			}
+			if item.EndTime > item.StartTime {
+				if currentTime >= item.StartTime && currentTime <= item.EndTime {
+					fmt.Printf("[StatusScheduler] 推断完成但用户已手动设状态，跳过: user=%s item=%s %s-%s\n",
+						userID, item.Status, item.StartTime, item.EndTime)
+					return
+				}
+			}
+		}
 	}
 
 	// 7. 构造 ScheduleItem

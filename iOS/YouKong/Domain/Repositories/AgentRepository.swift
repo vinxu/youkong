@@ -45,8 +45,14 @@ protocol AgentRepositoryProtocol {
     /// AI 推断 V3 用户选择
     func inferStatusV3Respond(sessionId: String, selectedIndex: Int) async throws -> InferenceResponse
 
+    /// AI 推断 4选1 选项
+    func inferOptions(request: InferOptionsRequest) async throws -> InferenceOptionsResponse
+
     /// 提交状态反馈（用户修正）
     func submitStatusFeedback(request: StatusFeedbackRequest) async throws
+
+    /// 批量缓存 GIF cos_url 到服务器（写回）
+    func cacheGifUrls(items: [[String: String]]) async throws
 
     /// 获取 COS STS 临时上传凭证
     func getSTSCredentials() async throws -> STSResponse
@@ -266,8 +272,14 @@ struct LifeStatusData: Codable {
 struct StatusOption: Codable, Identifiable, Equatable {
     let emoji: String
     let status: String
+    var gifUrl: String?
 
     var id: String { "\(emoji)_\(status)" }
+
+    enum CodingKeys: String, CodingKey {
+        case emoji, status
+        case gifUrl = "gif_url"
+    }
 }
 
 /// 状态选项结果
@@ -280,11 +292,15 @@ struct SelectStatusRequest: Encodable {
     let emoji: String
     let status: String
     let deviceData: StatusReportRequest?
+    let gifUrl: String?
+    let giphyQuery: String?
 
     enum CodingKeys: String, CodingKey {
         case emoji
         case status
         case deviceData = "device_data"
+        case gifUrl = "gif_url"
+        case giphyQuery = "giphy_query"
     }
 }
 
@@ -310,10 +326,11 @@ struct ScheduleItem: Codable, Identifiable, Equatable {
     var bookingId: String?
     var withUsers: String?
     var remindBefore: Int?
+    var plusOnes: [PlusOneUser]?
 
     var id: String { "\(startTime)_\(endTime)_\(emoji)" }
 
-    init(startTime: String, endTime: String, emoji: String, status: String, executed: Bool? = nil, isAIGuess: Bool? = nil, gifUrl: String? = nil, giphyQuery: String? = nil, highlight: Bool? = nil, bookingId: String? = nil, withUsers: String? = nil, remindBefore: Int? = nil) {
+    init(startTime: String, endTime: String, emoji: String, status: String, executed: Bool? = nil, isAIGuess: Bool? = nil, gifUrl: String? = nil, giphyQuery: String? = nil, highlight: Bool? = nil, bookingId: String? = nil, withUsers: String? = nil, remindBefore: Int? = nil, plusOnes: [PlusOneUser]? = nil) {
         self.startTime = startTime
         self.endTime = endTime
         self.emoji = emoji
@@ -326,6 +343,7 @@ struct ScheduleItem: Codable, Identifiable, Equatable {
         self.bookingId = bookingId
         self.withUsers = withUsers
         self.remindBefore = remindBefore
+        self.plusOnes = plusOnes
     }
 
     enum CodingKeys: String, CodingKey {
@@ -341,6 +359,20 @@ struct ScheduleItem: Codable, Identifiable, Equatable {
         case bookingId = "booking_id"
         case withUsers = "with_users"
         case remindBefore = "remind_before"
+        case plusOnes = "plus_ones"
+    }
+}
+
+/// +1 用户简要信息
+struct PlusOneUser: Codable, Identifiable, Equatable {
+    let userId: String
+    let nickname: String
+
+    var id: String { userId }
+
+    enum CodingKeys: String, CodingKey {
+        case userId = "user_id"
+        case nickname
     }
 }
 
@@ -1001,6 +1033,62 @@ struct InferenceResponse: Codable {
     }
 }
 
+// MARK: - 4选1 推断选项
+
+/// 4选1 状态推断卡片选项
+struct StatusCardOption: Codable, Identifiable {
+    let index: Int
+    let emoji: String
+    let activity: String
+    let place: String?
+    let isAvailable: Bool
+    let confidence: String
+    let giphyQuery: String
+    var gifUrl: String?
+
+    var id: Int { index }
+
+    enum CodingKeys: String, CodingKey {
+        case index, emoji, activity, place, confidence
+        case isAvailable = "is_available"
+        case giphyQuery = "giphy_query"
+        case gifUrl = "gif_url"
+    }
+}
+
+/// 4选1 推断响应
+struct InferenceOptionsResponse: Codable {
+    let sessionId: String
+    let options: [StatusCardOption]
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId = "session_id"
+        case options
+    }
+}
+
+/// 4选1 推断请求
+struct InferOptionsRequest: Encodable {
+    let screen: ScreenRequestData?
+    let location: LocationRequestData?
+    let extendedLocation: ExtendedLocationRequestData?
+    let battery: BatteryRequestData?
+    let mode: ModeRequestData?
+    let connection: ConnectionRequestData?
+    let display: DisplayRequestData?
+    let calendar: CalendarRequestData?
+    let movement: MovementRequestData?
+    let excludeActivities: [String]?
+    let sessionId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case screen, location, battery, mode, connection, display, calendar, movement
+        case extendedLocation = "extended_location"
+        case excludeActivities = "exclude_activities"
+        case sessionId = "session_id"
+    }
+}
+
 /// 状态反馈请求（用户修正状态）
 struct StatusFeedbackRequest: Encodable {
     let originalEmoji: String?
@@ -1012,6 +1100,8 @@ struct StatusFeedbackRequest: Encodable {
     let gifUrl: String?
     let giphyQuery: String?
     let useGif: Bool
+    let inferenceSessionId: String?
+    let selectedOptionIdx: Int?
 
     enum CodingKeys: String, CodingKey {
         case originalEmoji = "original_emoji"
@@ -1023,6 +1113,8 @@ struct StatusFeedbackRequest: Encodable {
         case gifUrl = "gif_url"
         case giphyQuery = "giphy_query"
         case useGif = "use_gif"
+        case inferenceSessionId = "inference_session_id"
+        case selectedOptionIdx = "selected_option_idx"
     }
 }
 

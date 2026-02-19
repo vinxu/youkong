@@ -660,6 +660,29 @@ struct ScheduleItemView: View {
                             .foregroundColor(.cyan)
                             .lineLimit(1)
                     }
+
+                    if let plusOnes = item.plusOnes, !plusOnes.isEmpty {
+                        HStack(spacing: 0) {
+                            ForEach(Array(plusOnes.prefix(2).enumerated()), id: \.element.id) { index, user in
+                                if index > 0 {
+                                    Text("、")
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundColor(CLIColors.textWeak)
+                                }
+                                Text(user.nickname)
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(CLIColors.green)
+                            }
+                            if plusOnes.count > 2 {
+                                Text("等\(plusOnes.count)人")
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(CLIColors.textWeak)
+                            }
+                            Text("+1")
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(CLIColors.textWeak)
+                        }
+                    }
                 }
 
                 if (item.remindBefore ?? 0) > 0 {
@@ -977,6 +1000,8 @@ struct ScheduleEditSheet: View {
             .padding(.horizontal, 16)
             .padding(.top, 20)
             }
+            .scrollDismissesKeyboard(.immediately)
+            .dismissKeyboardOnTouchDown()
         }
         .background(CLIColors.background)
     }

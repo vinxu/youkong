@@ -23,7 +23,7 @@ struct LoginView: View {
                             .font(.cliHeadline)
                             .foregroundColor(CLIColors.textPrimary)
 
-                        Text("低压力社交预约工具")
+                        Text("智能日程状态管理工具")
                             .font(.cliCaption)
                             .foregroundColor(CLIColors.textSecondary)
 

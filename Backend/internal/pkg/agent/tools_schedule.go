@@ -140,10 +140,10 @@ IMPORTANT: 用户要修改特定条目时（"把开会改到4点"、"工作延�
 			Properties: map[string]ToolParam{
 				"activities": {
 					Type:        "array",
-					Description: "时刻表条目数组。每个元素：{start_time: HH:MM, end_time: HH:MM, emoji: 表情, status: 状态描述, available: 是否有空(可选bool), remind_before: 提前提醒分钟数(可选int)}",
+					Description: "时刻表条目数组。每个元素：{start_time: HH:MM, end_time: HH:MM, emoji: 表情, status: 状态描述, giphy_query: 英文GIF搜索词(必填), available: 是否有空(可选bool), remind_before: 提前提醒分钟数(可选int)}",
 					Items: &ToolParam{
 						Type:        "object",
-						Description: "时刻表条目对象。remind_before: 提前提醒分钟数，0=不提醒(默认)，常用值: 5, 10, 15, 30, 60。仅在用户明确要求提醒时设置。",
+						Description: "时刻表条目对象。giphy_query(必填): 2-4个英文关键词描述该活动视觉场景(如 cooking kitchen / office working / gym exercise / reading book / sleeping bed)。remind_before: 提前提醒分钟数，0=不提醒(默认)。",
 					},
 				},
 				"date": {
@@ -236,8 +236,12 @@ Do NOT use when:
 					Type:        "boolean",
 					Description: "标记当前时段是否有空。",
 				},
+				"giphy_query": {
+					Type:        "string",
+					Description: "2-4个英文关键词描述该状态的视觉场景（如 sleeping bed / working laptop / cooking kitchen）",
+				},
 			},
-			Required: []string{"emoji", "status"},
+			Required: []string{"emoji", "status", "giphy_query"},
 		},
 	}
 }
@@ -358,6 +362,9 @@ func ParseScheduleItems(args map[string]interface{}) ([]ScheduleItemInfo, error)
 			case int:
 				item.RemindBefore = v
 			}
+		}
+		if v, ok := itemMap["giphy_query"].(string); ok {
+			item.GiphyQuery = v
 		}
 
 		// 验证必填字段

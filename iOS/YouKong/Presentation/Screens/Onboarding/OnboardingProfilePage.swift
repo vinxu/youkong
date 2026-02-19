@@ -1,3 +1,4 @@
+import CommonCrypto
 import SwiftUI
 import Factory
 
@@ -332,6 +333,7 @@ struct OnboardingProfilePage: View {
                     StatusOptionButton(
                         option: option,
                         isSelected: viewModel.selectedStatus == option,
+                        isGifLoading: viewModel.gifLoadingIndices.contains(option.id),
                         action: {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 viewModel.selectedStatus = option
@@ -417,6 +419,7 @@ class OnboardingProfileViewModel: ObservableObject {
     @Published var visibleClues: [SensorClue] = []
     @Published var showInferring = false
     @Published var isSaving = false
+    @Published var gifLoadingIndices: Set<String> = []
 
     @Injected(\.apiClient) private var apiClient
 
@@ -497,6 +500,9 @@ class OnboardingProfileViewModel: ObservableObject {
 
         showInferring = false
         step = .choosing
+
+        // 异步获取 GIF 背景
+        Task { await fetchGifsForOptions() }
     }
 
     // MARK: - Save
@@ -523,7 +529,9 @@ class OnboardingProfileViewModel: ObservableObject {
             let request = SelectStatusRequest(
                 emoji: status.emoji,
                 status: status.status,
-                deviceData: nil
+                deviceData: nil,
+                gifUrl: status.gifUrl,
+                giphyQuery: nil
             )
             let _: SelectStatusResponse = try await apiClient.request(
                 .selectStatus(request: request)
@@ -610,6 +618,70 @@ class OnboardingProfileViewModel: ObservableObject {
         }
 
         return clues
+    }
+
+    // MARK: - GIF Fetch (gif.playa.cn proxy)
+
+    private func fetchGifsForOptions() async {
+        let needGif = statusOptions.filter { ($0.gifUrl ?? "").isEmpty }
+        gifLoadingIndices = Set(needGif.map { $0.id })
+
+        for option in needGif {
+            let query = option.status
+            let seed = "onboard_\(option.emoji)_\(query)_\(Int(Date().timeIntervalSince1970))"
+            let gifUrl = await fetchGifViaProxy(query: query, seed: seed)
+
+            if let gifUrl = gifUrl {
+                if let idx = statusOptions.firstIndex(where: { $0.id == option.id }) {
+                    statusOptions[idx].gifUrl = gifUrl
+                }
+            }
+            gifLoadingIndices.remove(option.id)
+        }
+    }
+
+    private func fetchGifViaProxy(query: String, seed: String) async -> String? {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let seedHash = md5String("\(seed)\(query)")
+
+        for attempt in 0..<3 {
+            do {
+                guard let url = URL(string: "https://gif.playa.cn/api/giphy?q=\(encoded)&seed=\(seedHash)") else { return nil }
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 15
+                let (data, _) = try await URLSession.shared.data(for: request)
+                let body = String(data: data, encoding: .utf8) ?? ""
+
+                if body.contains("FUNCTION_INVOCATION_TIMEOUT") || body.contains("\"error\"") {
+                    if attempt < 2 {
+                        try? await Task.sleep(nanoseconds: UInt64((attempt + 1) * 1_500_000_000))
+                        continue
+                    }
+                    return nil
+                }
+
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let result = json["result"] as? [String: Any],
+                   let cosUrl = result["cos_url"] as? String, !cosUrl.isEmpty {
+                    return cosUrl
+                }
+                return nil
+            } catch {
+                if attempt < 2 {
+                    try? await Task.sleep(nanoseconds: UInt64((attempt + 1) * 1_500_000_000))
+                }
+            }
+        }
+        return nil
+    }
+
+    private func md5String(_ input: String) -> String {
+        let data = input.data(using: .utf8)!
+        var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
+        data.withUnsafeBytes { bytes in
+            _ = CC_MD5(bytes.baseAddress, CC_LONG(data.count), &digest)
+        }
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Default Options

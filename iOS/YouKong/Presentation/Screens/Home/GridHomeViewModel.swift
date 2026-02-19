@@ -122,7 +122,9 @@ class GridHomeViewModel: ObservableObject {
                     needsSchedule: friend.needsSchedule ?? false,
                     sceneConfig: friend.pixelSceneConfig,
                     interactions: friend.interactions ?? [],
-                    interactionCount: friend.interactionCount ?? 0
+                    interactionCount: friend.interactionCount ?? 0,
+                    hasPlusOned: friend.hasPlusOned ?? false,
+                    isSelf: friend.isSelf ?? false
                 )
             }.sorted { $0.updatedAt > $1.updatedAt }
 
@@ -293,7 +295,9 @@ class GridHomeViewModel: ObservableObject {
                     needsSchedule: friend.needsSchedule ?? false,
                     sceneConfig: friend.pixelSceneConfig,
                     interactions: friend.interactions ?? [],
-                    interactionCount: friend.interactionCount ?? 0
+                    interactionCount: friend.interactionCount ?? 0,
+                    hasPlusOned: friend.hasPlusOned ?? false,
+                    isSelf: friend.isSelf ?? false
                 )
             }.sorted { $0.updatedAt > $1.updatedAt }
 
@@ -328,6 +332,33 @@ class GridHomeViewModel: ObservableObject {
             print("🎮 [GridHome] 互动发送成功: \(interaction.label) → \(friendId)")
         } catch {
             print("❌ [GridHome] 互动发送失败: \(error)")
+        }
+    }
+
+    // MARK: - Send +1
+
+    func sendPlusOne(friend: FriendStatus) async {
+        // 乐观更新
+        if let index = friends.firstIndex(where: { $0.id == friend.id }) {
+            friends[index].hasPlusOned = true
+            friends[index].interactionCount += 1
+        }
+
+        do {
+            try await agentRepository.sendInteraction(
+                receiverId: friend.id,
+                actionEmoji: friend.emoji,
+                actionLabel: "+1",
+                actionPushText: "在你的\(friend.status)状态上+1"
+            )
+            print("✅ [GridHome] +1 发送成功 → \(friend.nickname)")
+        } catch {
+            // 失败回滚
+            if let index = friends.firstIndex(where: { $0.id == friend.id }) {
+                friends[index].hasPlusOned = false
+                friends[index].interactionCount = max(0, friends[index].interactionCount - 1)
+            }
+            print("❌ [GridHome] +1 发送失败: \(error)")
         }
     }
 
@@ -371,7 +402,11 @@ struct FriendStatus: Identifiable, Hashable {
     // AI 互动选项
     let interactions: [InteractionOptionItem]
     // 今日互动计数
-    let interactionCount: Int
+    var interactionCount: Int
+    // 是否已对该好友当前状态 +1
+    var hasPlusOned: Bool
+    // 是否是自己
+    let isSelf: Bool
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
@@ -385,6 +420,7 @@ struct FriendStatus: Identifiable, Hashable {
         hasher.combine(needsSchedule)
         hasher.combine(sceneConfig)
         hasher.combine(interactionCount)
+        hasher.combine(hasPlusOned)
     }
 
     static func == (lhs: FriendStatus, rhs: FriendStatus) -> Bool {
@@ -398,6 +434,7 @@ struct FriendStatus: Identifiable, Hashable {
         lhs.useGif == rhs.useGif &&
         lhs.needsSchedule == rhs.needsSchedule &&
         lhs.sceneConfig == rhs.sceneConfig &&
-        lhs.interactionCount == rhs.interactionCount
+        lhs.interactionCount == rhs.interactionCount &&
+        lhs.hasPlusOned == rhs.hasPlusOned
     }
 }

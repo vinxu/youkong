@@ -68,10 +68,18 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         print("🎯 标题: \(notification.request.content.title)")
         print("🎯 内容: \(notification.request.content.body)")
 
-        // ✅ App 在前台时不显示横幅，只更新 badge
-        // UI 提示由 App 内部的未读红点系统处理
-        print("🎯 ✅ App 在前台，不显示横幅，只更新 badge")
-        completionHandler([.badge])
+        let userInfo = notification.request.content.userInfo
+        let type = userInfo["type"] as? String
+
+        if type == "interaction" {
+            // 互动通知：前台也显示横幅和声音
+            print("🎯 ✅ 互动通知，显示横幅+声音")
+            completionHandler([.banner, .sound, .badge])
+        } else {
+            // 消息通知：前台只更新 badge（UI 内部红点处理）
+            print("🎯 ✅ App 在前台，不显示横幅，只更新 badge")
+            completionHandler([.badge])
+        }
     }
 
     /// 点击通知时调用

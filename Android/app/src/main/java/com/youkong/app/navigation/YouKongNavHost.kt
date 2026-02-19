@@ -111,6 +111,9 @@ fun YouKongNavHost(
             onNavigateToChat = { userId ->
                 navController.navigateToChatWithPartner(userId)
             },
+            onNavigateToOnboarding = {
+                navController.navigateToOnboardingPermission()
+            },
         )
 
         // 好友时刻表页面

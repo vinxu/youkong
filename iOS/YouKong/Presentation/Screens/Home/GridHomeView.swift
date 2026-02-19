@@ -8,6 +8,7 @@ struct GridHomeView: View {
     @State private var showAIInference = false
     @State private var selectedTab = 0
     @Environment(\.scenePhase) private var scenePhase
+    @ObservedObject private var notificationManager = NotificationManager.shared
 
     // 按住说话相关状态
     @State private var isPressingVoiceButton = false
@@ -110,6 +111,12 @@ struct GridHomeView: View {
                 Task { await viewModel.loadGrid() }
             }
         }
+        .onChange(of: notificationManager.shouldNavigateToHome) { shouldNavigate in
+            if shouldNavigate {
+                selectedTab = 0
+                notificationManager.shouldNavigateToHome = false
+            }
+        }
         .alert("需要麦克风权限", isPresented: $showPermissionAlert) {
             Button("去设置") {
                 if let url = URL(string: UIApplication.openSettingsURLString) {
@@ -159,7 +166,9 @@ struct GridHomeView: View {
                     sceneProp: friend.sceneConfig?.prop,
                     sceneSurface: friend.sceneConfig?.surface,
                     interactions: friend.interactions.isEmpty ? nil : friend.interactions,
-                    interactionCount: friend.interactionCount
+                    interactionCount: friend.interactionCount,
+                    hasPlusOned: friend.hasPlusOned,
+                    isSelf: friend.isSelf
                 )
             })
         }
@@ -249,7 +258,7 @@ struct GridHomeView: View {
                 .fill(CLIColors.border)
                 .frame(height: 1)
 
-            // Tab 内容区域（支持左右滑动切换）
+            // Tab 内容区域（左右滑动切换）
             TabView(selection: $selectedTab) {
                 friendsTabContent
                     .tag(0)
@@ -261,7 +270,6 @@ struct GridHomeView: View {
                 .tag(1)
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
-            .dismissKeyboardOnTouchDown()
         }
         .background(CLIColors.background)
     }
@@ -311,8 +319,10 @@ struct GridHomeView: View {
                     Spacer()
                 }
             } else {
-                // 宫格内容 - 使用 List 以支持 TabView(.page) 内的下拉刷新
-                List {
+                // 宫格内容 - UIKit UIRefreshControl（原生 .refreshable 在 TabView(.page) 内不生效）
+                UIKitScrollView(onRefresh: {
+                    await viewModel.refresh()
+                }) {
                     FriendGrid(
                         friends: viewModel.friends,
                         getUnreadCount: { friendId in
@@ -323,24 +333,16 @@ struct GridHomeView: View {
                         },
                         onInteraction: { friendId, interaction in
                             Task { await viewModel.sendInteraction(to: friendId, interaction: interaction) }
+                        },
+                        onPlusOne: { friend in
+                            Task { await viewModel.sendPlusOne(friend: friend) }
                         }
                     )
                     .padding(.horizontal, 16)
                     .padding(.top, 16)
                     .padding(.bottom, 16)
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
                 .background(CLIColors.background)
-                .refreshable {
-                    await viewModel.refresh()
-                }
-                .onAppear {
-                    UIRefreshControl.appearance().tintColor = UIColor(CLIColors.green)
-                }
             }
         }
     }
@@ -590,6 +592,7 @@ struct FriendGrid: View {
     let getUnreadCount: (String) -> Int
     var onNeedsScheduleTap: (() -> Void)? = nil
     var onInteraction: ((String, InteractionOptionItem) -> Void)? = nil
+    var onPlusOne: ((FriendStatus) -> Void)? = nil
 
     private var columns: [GridItem] {
         Array(repeating: GridItem(.flexible(), spacing: 8), count: 2)
@@ -601,7 +604,8 @@ struct FriendGrid: View {
                 if friend.needsSchedule {
                     FriendCard(
                         friend: friend,
-                        unreadCount: getUnreadCount(friend.id)
+                        unreadCount: getUnreadCount(friend.id),
+                        onPlusOne: nil
                     )
                     .onTapGesture {
                         onNeedsScheduleTap?()
@@ -610,7 +614,8 @@ struct FriendGrid: View {
                     NavigationLink(value: friend) {
                         FriendCard(
                             friend: friend,
-                            unreadCount: getUnreadCount(friend.id)
+                            unreadCount: getUnreadCount(friend.id),
+                            onPlusOne: { onPlusOne?(friend) }
                         )
                     }
                     .buttonStyle(PlainButtonStyle())
@@ -625,10 +630,16 @@ struct FriendGrid: View {
 struct FriendCard: View {
     let friend: FriendStatus
     var unreadCount: Int = 0
+    var onPlusOne: (() -> Void)?
 
     private var borderColor: Color {
         if friend.isAvailable { return CLIColors.green }
         return unreadCount > 0 ? CLIColors.green : CLIColors.border
+    }
+
+    // +1 显示上限 9 个（3x3）
+    private var displayCopies: Int {
+        min(friend.interactionCount + 1, 9)
     }
 
     var body: some View {
@@ -636,79 +647,97 @@ struct FriendCard: View {
             // 底色
             (friend.isAvailable ? CLIColors.backgroundHighlight : CLIColors.backgroundSecondary)
 
-            // GIF 氛围背景（填满整个卡片）
+            // GIF 氛围背景
             if let gifUrlStr = friend.gifUrl, !gifUrlStr.isEmpty, let gifUrl = URL(string: gifUrlStr) {
                 GifImageView(url: gifUrl, contentMode: .scaleAspectFill)
                     .opacity(0.35)
             }
 
-            // 内容
-            VStack(spacing: 4) {
-                // 有空标签
-                Text(friend.isAvailable ? "[有空]" : " ")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(friend.isAvailable ? CLIColors.green : .clear)
+            // ── 卡片内容：上中下三区 ──
+            VStack(spacing: 0) {
+                // ▸ 顶部：有空标签 + 未读角标
+                HStack {
+                    if friend.isAvailable {
+                        Text("[有空]")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(CLIColors.green)
+                    }
+                    Spacer()
+                    if unreadCount > 0 {
+                        Text("[\(unreadCount)]")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(CLIColors.green)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.top, 5)
+                .frame(height: 20)
 
+                // ▸ 中部：emoji 居中（弹性空间）
                 Spacer(minLength: 4)
 
-                // 动画 emoji
                 if friend.needsSchedule {
                     Text("➕")
                         .font(.system(size: 36))
-                        .frame(width: 72, height: 72)
-                } else {
+                        .frame(height: 60)
+                } else if displayCopies <= 1 {
                     EmojiStateView(emoji: friend.emoji)
                         .frame(width: 72, height: 72)
+                } else if displayCopies == 2 {
+                    // 2 个并排，每个比单个稍小
+                    HStack(spacing: 0) {
+                        EmojiStateView(emoji: friend.emoji)
+                            .frame(width: 64, height: 64)
+                        EmojiStateView(emoji: friend.emoji)
+                            .frame(width: 64, height: 64)
+                    }
+                } else if displayCopies <= 4 {
+                    // 3-4 个，2x2 网格，每个更小
+                    EmojiStageGrid(emoji: friend.emoji, count: displayCopies, stageSize: 110)
+                } else {
+                    // 5-9 个，3x3 网格
+                    EmojiStageGrid(emoji: friend.emoji, count: displayCopies, stageSize: 120)
+                }
+
+                // +1 按钮紧跟 emoji 下方
+                if !friend.needsSchedule && !friend.hasPlusOned && !friend.isSelf {
+                    Text("+1")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(CLIColors.green)
+                        .padding(.top, 2)
+                        .onTapGesture { onPlusOne?() }
                 }
 
                 Spacer(minLength: 4)
 
-                // 昵称
-                Text(friend.nickname)
-                    .font(.system(size: 12, weight: .bold, design: .monospaced))
-                    .foregroundColor(CLIColors.textPrimary)
-                    .lineLimit(1)
-
-                // 状态
-                if friend.needsSchedule {
-                    Text("+状态")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(CLIColors.green)
+                // ▸ 底部：昵称 + 状态 + 城市（固定高度，不被挤压）
+                VStack(spacing: 2) {
+                    Text(friend.nickname)
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundColor(CLIColors.textPrimary)
                         .lineLimit(1)
-                } else {
-                    Text(friend.status)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(CLIColors.textSecondary)
-                        .lineLimit(1)
-                }
 
-                // 城市
-                if let city = friend.city, !city.isEmpty {
-                    Text(friend.isVisiting ? "📍来访·\(city)" : city)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(friend.isVisiting ? CLIColors.yellow : CLIColors.textSecondary)
-                        .lineLimit(1)
-                } else {
-                    Text(" ")
-                        .font(.system(size: 10, design: .monospaced))
-                }
-            }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 8)
-
-            // 未读角标（右上角）
-            if unreadCount > 0 {
-                VStack {
-                    HStack {
-                        Spacer()
-                        Text("[\(unreadCount)]")
-                            .font(.system(size: 10, design: .monospaced))
+                    if friend.needsSchedule {
+                        Text("+状态")
+                            .font(.system(size: 12, design: .monospaced))
                             .foregroundColor(CLIColors.green)
-                            .padding(.trailing, 4)
-                            .padding(.top, 2)
+                            .lineLimit(1)
+                    } else {
+                        Text(friend.status)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(CLIColors.textSecondary)
+                            .lineLimit(1)
                     }
-                    Spacer()
+
+                    if let city = friend.city, !city.isEmpty {
+                        Text(friend.isVisiting ? "📍来访·\(city)" : city)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(friend.isVisiting ? CLIColors.yellow : CLIColors.textSecondary)
+                            .lineLimit(1)
+                    }
                 }
+                .padding(.horizontal, 6)
+                .padding(.bottom, 12)
             }
         }
         .frame(maxWidth: .infinity)
@@ -718,6 +747,44 @@ struct FriendCard: View {
             RoundedRectangle(cornerRadius: 4)
                 .stroke(borderColor, lineWidth: 1)
         )
+    }
+}
+
+// MARK: - Emoji Stage Grid (+1 舞台效果)
+
+struct EmojiStageGrid: View {
+    let emoji: String
+    let count: Int
+    let stageSize: CGFloat
+
+    private var columns: Int {
+        Int(ceil(sqrt(Double(count))))
+    }
+    private var rows: Int {
+        Int(ceil(Double(count) / Double(columns)))
+    }
+    private var emojiSize: CGFloat {
+        stageSize / CGFloat(max(columns, rows))
+    }
+
+    var body: some View {
+        let cols = columns
+        let size = emojiSize
+        // 行间负间距让 emoji 更紧凑，节省垂直空间
+        let rowSpacing: CGFloat = rows > 1 ? -(size * 0.2) : 0
+        VStack(spacing: rowSpacing) {
+            ForEach(0..<rows, id: \.self) { row in
+                HStack(spacing: 0) {
+                    let startIdx = row * cols
+                    let colsThisRow = min(cols, count - startIdx)
+                    ForEach(0..<colsThisRow, id: \.self) { _ in
+                        EmojiStateView(emoji: emoji)
+                            .frame(width: size, height: size)
+                    }
+                }
+            }
+        }
+        .frame(width: stageSize)
     }
 }
 

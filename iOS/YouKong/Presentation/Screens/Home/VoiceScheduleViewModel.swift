@@ -497,6 +497,8 @@ class VoiceScheduleViewModel: ObservableObject {
             }
             addMessage(.system, content: "✓ 时刻表已保存！状态将按时刻表自动更新")
             state = .completed
+            // 通知首页刷新 Grid
+            NotificationCenter.default.post(name: .gridNeedsRefresh, object: nil)
 
         case .statusUpdated:
             // V4 当前状态已更新（替代旧 current_status 事件）
@@ -506,6 +508,8 @@ class VoiceScheduleViewModel: ObservableObject {
             addMessage(.aiText, content: msg)
             progressItems = []
             state = .completed
+            // 通知首页刷新 Grid（更新 GIF 等）
+            NotificationCenter.default.post(name: .gridNeedsRefresh, object: nil)
 
         case .preferenceUpdated:
             // V4 偏好设置已更新

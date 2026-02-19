@@ -20,6 +20,11 @@ func NewMemoryRepository(db *sqlx.DB) *MemoryRepository {
 	return &MemoryRepository{db: db}
 }
 
+// ExecRaw 执行原始 SQL（用于数据收集等场景）
+func (r *MemoryRepository) ExecRaw(ctx context.Context, query string, args ...interface{}) {
+	_, _ = r.db.ExecContext(ctx, query, args...)
+}
+
 // ========== CoreMemory 操作 ==========
 
 // GetCoreMemory 获取用户的核心记忆

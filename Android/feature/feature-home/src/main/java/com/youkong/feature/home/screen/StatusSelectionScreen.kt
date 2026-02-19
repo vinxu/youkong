@@ -308,7 +308,8 @@ class StatusSelectionViewModel @Inject constructor(
                     SelectStatusRequest(
                         emoji = option.emoji,
                         status = option.status,
-                        deviceData = null
+                        deviceData = null,
+                        gifUrl = option.gifUrl,
                     )
                 )
 

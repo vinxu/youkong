@@ -39,6 +39,10 @@ struct FriendGridItem: Codable, Identifiable {
     let interactions: [InteractionOptionItem]?
     // 今日互动计数
     let interactionCount: Int?
+    // 是否已对该好友当前状态 +1
+    let hasPlusOned: Bool?
+    // 是否是自己
+    let isSelf: Bool?
 
     var id: String { userId }
 
@@ -64,6 +68,8 @@ struct FriendGridItem: Codable, Identifiable {
         case sceneSurface = "scene_surface"
         case interactions
         case interactionCount = "interaction_count"
+        case hasPlusOned = "has_plus_oned"
+        case isSelf = "is_self"
     }
 
     /// 转换为 PixelSceneConfig

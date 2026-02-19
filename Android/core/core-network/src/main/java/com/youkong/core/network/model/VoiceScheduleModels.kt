@@ -52,9 +52,19 @@ data class ScheduleItem(
     @SerialName("booking_id") val bookingId: String? = null,
     @SerialName("with_users") val withUsers: String? = null,
     @SerialName("remind_before") val remindBefore: Int? = null,
+    @SerialName("plus_ones") val plusOnes: List<PlusOneUser>? = null,
 ) {
     val id: String get() = "${startTime}_${endTime}_$emoji"
 }
+
+/**
+ * +1 用户简要信息
+ */
+@Serializable
+data class PlusOneUser(
+    @SerialName("user_id") val userId: String,
+    val nickname: String,
+)
 
 /**
  * 澄清问题

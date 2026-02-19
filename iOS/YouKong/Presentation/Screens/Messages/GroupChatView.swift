@@ -45,10 +45,8 @@ struct GroupChatView: View {
                         .padding()
                         .padding(.bottom, keyboardHeight > 0 ? keyboardHeight - 100 : 0)
                     }
-                    .simultaneousGesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { _ in isInputFocused = false }
-                    )
+                    .scrollDismissesKeyboard(.immediately)
+                    .dismissKeyboardOnTouchDown()
                     .onChange(of: viewModel.messages.count) { _ in
                         withAnimation {
                             proxy.scrollTo("bottom", anchor: .bottom)

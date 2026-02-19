@@ -20,6 +20,9 @@ final class NotificationManager: ObservableObject {
     /// 是否应该跳转到聊天页面
     @Published var shouldNavigateToChat = false
 
+    /// 是否应该跳转到首页（互动通知点击）
+    @Published var shouldNavigateToHome = false
+
     /// 当前正在查看的会话 ID（用于前台时不显示通知）
     var currentConversationId: String?
 
@@ -221,12 +224,25 @@ final class NotificationManager: ObservableObject {
 
     /// 处理通知点击
     func handleNotificationTap(userInfo: [AnyHashable: Any]) {
-        guard let conversationId = userInfo["conversationId"] as? String else {
+        let type = userInfo["type"] as? String
+
+        if type == "interaction" {
+            // 互动通知：跳转首页 + 清除 badge
+            shouldNavigateToHome = true
+            clearBadge()
+            print("[Notification] Navigate to home (interaction tap)")
+            return
+        }
+
+        // 消息通知：跳转聊天（原有逻辑）
+        guard let conversationId = userInfo["conversationId"] as? String ??
+                                   userInfo["conversation_id"] as? String else {
             return
         }
 
         pendingConversationId = conversationId
         shouldNavigateToChat = true
+        clearBadge()
 
         print("[Notification] Navigate to conversation: \(conversationId)")
     }

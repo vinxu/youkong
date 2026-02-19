@@ -9,6 +9,7 @@ import com.youkong.core.agent.collector.LocationCollector
 import com.youkong.core.agent.collector.MovementCollector
 import com.youkong.core.agent.collector.ScreenUsageCollector
 import com.youkong.core.data.repository.AgentRepositoryImpl
+import com.youkong.core.domain.repository.StatusCardOption
 import com.youkong.core.domain.repository.StatusFeedback
 import com.youkong.core.domain.repository.StatusInferenceResult
 import com.youkong.core.network.model.AgentStatusRequest
@@ -32,7 +33,7 @@ import javax.inject.Inject
 
 /**
  * AI 状态推断 ViewModel
- * 使用 V3 同步推断接口（/agent/infer-status-v2）
+ * 支持 4选1 推断模式 + 编辑发布
  */
 @HiltViewModel
 class AIStatusInferenceViewModel @Inject constructor(
@@ -47,11 +48,14 @@ class AIStatusInferenceViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(AIStatusInferenceUiState())
     val uiState: StateFlow<AIStatusInferenceUiState> = _uiState.asStateFlow()
 
-    // V3 session ID（信号矛盾时用于用户选择）
-    private var v3SessionId: String? = null
+    // 已展示过的活动（用于换一批排除）
+    private var shownActivities = mutableListOf<String>()
+
+    // 缓存的传感器数据（换一批复用）
+    private var cachedSensorData: AgentStatusRequest? = null
 
     /**
-     * 开始 AI 推断（V3 同步接口）
+     * 开始 4选1 推断
      */
     fun startInference() {
         if (_uiState.value.isInferring) return
@@ -59,18 +63,22 @@ class AIStatusInferenceViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
+                    currentPhase = InferPhase.LOADING,
                     isInferring = true,
                     error = null,
+                    statusOptions = emptyList(),
+                    selectedIndex = null,
+                    inferenceSessionId = "",
                     streamingPhase = "正在收集设备数据...",
                     streamingLogs = listOf(StreamingLog("> 正在收集设备数据...", LogType.PHASE)),
-                    isAskingUser = false,
                 )
             }
-            v3SessionId = null
+            shownActivities.clear()
 
             try {
                 // 收集传感器数据
                 val sensorData = collectSensorData()
+                cachedSensorData = sensorData
 
                 // 展示收集到的传感器线索
                 _uiState.update { state ->
@@ -83,82 +91,35 @@ class AIStatusInferenceViewModel @Inject constructor(
                 _uiState.update { state ->
                     state.copy(
                         streamingPhase = "正在推断状态...",
-                        streamingLogs = state.streamingLogs + StreamingLog("▸ 正在发送数据到 AI...", LogType.PHASE),
+                        streamingLogs = state.streamingLogs +
+                            StreamingLog("▸ 正在发送数据到 AI...", LogType.PHASE) +
+                            StreamingLog("▸ AI 正在生成 4 个选项...", LogType.PHASE),
                     )
                 }
 
-                // 调用 V3 同步推断接口
-                val result = agentRepository.inferStatusV3(sensorData)
+                // 调用 4选1 推断接口
+                agentRepository.inferOptions(sensorData).fold(
+                    onSuccess = { result ->
+                        // 记录已展示的活动
+                        result.options.forEach { shownActivities.add(it.activity) }
 
-                result.fold(
-                    onSuccess = { v3Result ->
                         _uiState.update { state ->
                             state.copy(
-                                streamingLogs = state.streamingLogs + StreamingLog("▸ AI 正在分析...", LogType.PHASE),
+                                isInferring = false,
+                                currentPhase = InferPhase.OPTIONS,
+                                statusOptions = result.options,
+                                inferenceSessionId = result.sessionId,
+                                streamingLogs = state.streamingLogs +
+                                    StreamingLog("  ✓ 已生成 ${result.options.size} 个选项", LogType.TOOL_RESULT),
                             )
                         }
+                        Log.d("AIInference", "4选1 推断完成: ${result.options.size} 个选项")
 
-                        val completedResult = v3Result.result
-                        val choiceOptions = v3Result.options
-                        if (v3Result.phase == "completed" && completedResult != null) {
-                            // 逐条展示推理过程
-                            _uiState.update { state ->
-                                state.copy(
-                                    streamingLogs = state.streamingLogs + StreamingLog("▸ 推理完成", LogType.PHASE),
-                                )
-                            }
-                            kotlinx.coroutines.delay(200)
-
-                            if (!completedResult.reasoning.isNullOrEmpty()) {
-                                _uiState.update { state ->
-                                    state.copy(
-                                        streamingLogs = state.streamingLogs + StreamingLog("  │ ${completedResult.reasoning}", LogType.THINKING),
-                                    )
-                                }
-                                kotlinx.coroutines.delay(200)
-                            }
-
-                            val confLabel = when (completedResult.confidence) {
-                                "high" -> "高"; "medium" -> "中"; else -> "低"
-                            }
-                            _uiState.update { state ->
-                                state.copy(
-                                    streamingLogs = state.streamingLogs +
-                                        StreamingLog("  │ 置信度: $confLabel", LogType.THINKING) +
-                                        StreamingLog("  ✓ ${completedResult.emoji} ${completedResult.activity}", LogType.TOOL_RESULT),
-                                )
-                            }
-
-                            // 延迟 1.5s 让用户看到推理过程，再切到结果页
-                            kotlinx.coroutines.delay(1500)
-                            applyInferenceResult(completedResult)
-                            Log.d("AIInference", "V3 推断完成: ${completedResult.emoji} ${completedResult.activity}")
-                        } else if (v3Result.phase == "awaiting_choice" && !choiceOptions.isNullOrEmpty()) {
-                            // 信号矛盾，需要用户选择
-                            v3SessionId = v3Result.sessionId
-                            val optionLogs = choiceOptions.map { opt ->
-                                val reason = if (!opt.reason.isNullOrEmpty()) " - ${opt.reason}" else ""
-                                StreamingLog("    ${opt.emoji} ${opt.activity}$reason", LogType.ASK_USER)
-                            }
-                            _uiState.update { state ->
-                                state.copy(
-                                    isInferring = false,
-                                    isAskingUser = true,
-                                    askUserQuestion = v3Result.question ?: "AI 不太确定，请选择：",
-                                    askUserOptions = choiceOptions.map { "${it.emoji} ${it.activity}" },
-                                    v3SessionId = v3Result.sessionId,
-                                    streamingLogs = state.streamingLogs +
-                                        StreamingLog("? 信号矛盾，需要你来选择", LogType.ASK_USER) +
-                                        optionLogs,
-                                )
-                            }
-                            Log.d("AIInference", "V3 等待用户选择: ${choiceOptions.size} 个选项")
-                        } else {
-                            _uiState.update { it.copy(isInferring = false, error = "推断返回了未知格式") }
-                        }
+                        // 客户端补充 GIF（复用已有 Giphy 搜索）
+                        fetchGifsForOptions(result.options)
                     },
                     onFailure = { e ->
-                        Log.e("AIInference", "V3 推断失败: ${e.message}")
+                        Log.e("AIInference", "4选1 推断失败: ${e.message}")
                         _uiState.update { it.copy(isInferring = false, error = e.message) }
                     }
                 )
@@ -170,11 +131,101 @@ class AIStatusInferenceViewModel @Inject constructor(
     }
 
     /**
+     * 换一批
+     */
+    fun refreshOptions() {
+        if (_uiState.value.isRefreshing) return
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isRefreshing = true, selectedIndex = null) }
+
+            try {
+                val sensorData = cachedSensorData ?: collectSensorData()
+                val sessionId = _uiState.value.inferenceSessionId
+
+                agentRepository.inferOptions(
+                    request = sensorData,
+                    excludeActivities = shownActivities.toList(),
+                    sessionId = sessionId.ifEmpty { null },
+                ).fold(
+                    onSuccess = { result ->
+                        result.options.forEach { shownActivities.add(it.activity) }
+                        _uiState.update {
+                            it.copy(
+                                isRefreshing = false,
+                                statusOptions = result.options,
+                                inferenceSessionId = result.sessionId,
+                            )
+                        }
+                        Log.d("AIInference", "换一批完成: ${result.options.size} 个选项")
+
+                        // 客户端补充 GIF
+                        fetchGifsForOptions(result.options)
+                    },
+                    onFailure = { e ->
+                        Log.e("AIInference", "换一批失败: ${e.message}")
+                        _uiState.update { it.copy(isRefreshing = false) }
+                    }
+                )
+            } catch (e: Exception) {
+                _uiState.update { it.copy(isRefreshing = false) }
+            }
+        }
+    }
+
+    /**
+     * 选择/取消选择某个选项
+     */
+    fun selectOption(index: Int) {
+        _uiState.update {
+            it.copy(selectedIndex = if (it.selectedIndex == index) null else index)
+        }
+    }
+
+    /**
+     * 确认选择 → 进入编辑页
+     */
+    fun confirmSelection() {
+        val state = _uiState.value
+        val idx = state.selectedIndex ?: return
+        val option = state.statusOptions.find { it.index == idx } ?: return
+
+        // 构建 StatusInferenceResult
+        val inference = StatusInferenceResult(
+            emoji = option.emoji,
+            activity = option.activity,
+            place = option.place,
+            isAvailable = option.isAvailable,
+            confidence = option.confidence,
+            gifUrl = option.gifUrl,
+            giphyQuery = option.giphyQuery,
+        )
+
+        _uiState.update {
+            it.copy(
+                currentPhase = InferPhase.EDITING,
+                inference = inference,
+                editingEmoji = option.emoji,
+                editingActivity = option.activity,
+                editingPlace = option.place ?: "",
+                editingIsAvailable = option.isAvailable,
+                useGif = !option.gifUrl.isNullOrEmpty(),
+            )
+        }
+    }
+
+    /**
+     * 从编辑页返回选项页
+     */
+    fun backToOptions() {
+        _uiState.update { it.copy(currentPhase = InferPhase.OPTIONS) }
+    }
+
+    /**
      * 将传感器数据转为可读的线索日志
      */
     private fun buildSensorClues(data: AgentStatusRequest): List<StreamingLog> {
         val clues = mutableListOf<StreamingLog>()
-        // 优先显示地名，其次城市，最后 placeType
         val placeName = data.extendedLocation?.placeName
         val city = data.location?.city
         if (!placeName.isNullOrEmpty()) {
@@ -211,62 +262,21 @@ class AIStatusInferenceViewModel @Inject constructor(
      * 收集实际的传感器数据
      */
     private suspend fun collectSensorData(): AgentStatusRequest {
-        // 收集位置
-        val locationData = try {
-            locationCollector.collect()
-        } catch (e: Exception) {
-            Log.w("AIInference", "Location collect failed: ${e.message}")
-            null
-        }
-
-        // 收集设备状态
-        val deviceState = try {
-            deviceStateCollector.collect()
-        } catch (e: Exception) {
-            Log.w("AIInference", "DeviceState collect failed: ${e.message}")
-            null
-        }
-
-        // 收集运动
-        val movementData = try {
-            movementCollector.collect()
-        } catch (e: Exception) {
-            Log.w("AIInference", "Movement collect failed: ${e.message}")
-            null
-        }
-
-        // 收集日历
-        val calendarData = try {
-            calendarCollector.collect()
-        } catch (e: Exception) {
-            Log.w("AIInference", "Calendar collect failed: ${e.message}")
-            null
-        }
-
-        // 收集屏幕使用
-        val screenData = try {
-            screenUsageCollector.collect()
-        } catch (e: Exception) {
-            Log.w("AIInference", "Screen usage collect failed: ${e.message}")
-            null
-        }
+        val locationData = try { locationCollector.collect() } catch (e: Exception) { null }
+        val deviceState = try { deviceStateCollector.collect() } catch (e: Exception) { null }
+        val movementData = try { movementCollector.collect() } catch (e: Exception) { null }
+        val calendarData = try { calendarCollector.collect() } catch (e: Exception) { null }
+        val screenData = try { screenUsageCollector.collect() } catch (e: Exception) { null }
 
         return AgentStatusRequest(
             screen = screenData,
             location = locationData?.let {
-                LocationDataRequest(
-                    placeType = "unknown",
-                    atPlaceSinceMinutes = 0,
-                    city = it.city,
-                )
+                LocationDataRequest(placeType = "unknown", atPlaceSinceMinutes = 0, city = it.city)
             },
             extendedLocation = locationData?.let {
                 ExtendedLocationDataRequest(
-                    placeType = "unknown",
-                    placeName = it.placeName,
-                    atPlaceSinceMinutes = 0,
-                    latitude = it.latitude,
-                    longitude = it.longitude,
+                    placeType = "unknown", placeName = it.placeName,
+                    atPlaceSinceMinutes = 0, latitude = it.latitude, longitude = it.longitude,
                 )
             },
             battery = deviceState?.let {
@@ -277,10 +287,7 @@ class AIStatusInferenceViewModel @Inject constructor(
                 )
             },
             mode = deviceState?.let {
-                ModeDataRequest(
-                    isLowPowerMode = it.isPowerSaveMode,
-                    isFocusModeOn = it.isDoNotDisturbEnabled,
-                )
+                ModeDataRequest(isLowPowerMode = it.isPowerSaveMode, isFocusModeOn = it.isDoNotDisturbEnabled)
             },
             connection = deviceState?.let {
                 ConnectionDataRequest(
@@ -290,11 +297,7 @@ class AIStatusInferenceViewModel @Inject constructor(
                     bluetoothDeviceType = it.bluetoothDeviceType,
                 )
             },
-            display = deviceState?.let {
-                DisplayDataRequest(
-                    screenBrightness = it.screenBrightness,
-                )
-            },
+            display = deviceState?.let { DisplayDataRequest(screenBrightness = it.screenBrightness) },
             calendar = calendarData?.let {
                 com.youkong.core.network.model.CalendarDataRequest(
                     hasCurrentEvent = it.hasCurrentEvent,
@@ -317,12 +320,8 @@ class AIStatusInferenceViewModel @Inject constructor(
                 com.youkong.core.network.model.AmbientLightDataRequest(
                     lux = lux,
                     environment = when {
-                        lux < 10 -> "dark"
-                        lux < 50 -> "dim"
-                        lux < 300 -> "indoor"
-                        lux < 1000 -> "bright"
-                        lux < 10000 -> "outdoor"
-                        else -> "sunlight"
+                        lux < 10 -> "dark"; lux < 50 -> "dim"; lux < 300 -> "indoor"
+                        lux < 1000 -> "bright"; lux < 10000 -> "outdoor"; else -> "sunlight"
                     },
                 )
             },
@@ -330,79 +329,84 @@ class AIStatusInferenceViewModel @Inject constructor(
     }
 
     /**
-     * 用户选择确认（V3 awaiting_choice 响应）
+     * 为 4 个选项串行获取 GIF（通过 gif.playa.cn 代理，和首页一致）
      */
-    fun respondToAskUser(answer: String) {
-        val sessionId = v3SessionId ?: return
-        val selectedIndex = _uiState.value.askUserOptions.indexOf(answer).coerceAtLeast(0)
+    private fun fetchGifsForOptions(options: List<StatusCardOption>) {
+        // 标记所有需要加载 GIF 的选项
+        val needGif = options.filter { it.gifUrl.isNullOrEmpty() && (it.giphyQuery.isNotEmpty() || it.activity.isNotEmpty()) }
+        _uiState.update { it.copy(gifLoadingIndices = needGif.map { o -> o.index }.toSet()) }
 
+        // 串行请求避免代理并发超时（Vercel 冷启动）
         viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    isAskingUser = false,
-                    isInferring = true,
-                    streamingPhase = "正在确认选择...",
-                    streamingLogs = it.streamingLogs + StreamingLog("▸ 已选择: $answer", LogType.USER_ANSWER),
-                )
-            }
+            for (option in needGif) {
+                val query = option.giphyQuery.ifEmpty { option.activity }
+                Log.d("AIInference", "GIF搜索: index=${option.index} query=$query")
+                val gifUrl = fetchGifViaProxy(query, "opt_${option.index}")
+                Log.d("AIInference", "GIF结果: index=${option.index} url=${gifUrl?.take(60)}")
 
-            agentRepository.inferStatusV3Respond(sessionId, selectedIndex).fold(
-                onSuccess = { v3Result ->
-                    val respondResult = v3Result.result
-                    if (respondResult != null) {
-                        applyInferenceResult(respondResult)
-                        _uiState.update { state ->
-                            state.copy(
-                                streamingLogs = state.streamingLogs + StreamingLog(
-                                    "✓ ${respondResult.emoji} ${respondResult.activity}",
-                                    LogType.TOOL_RESULT
-                                ),
-                            )
-                        }
-                    } else {
-                        _uiState.update { it.copy(isInferring = false, error = "确认失败") }
-                    }
-                },
-                onFailure = { e ->
-                    Log.e("AIInference", "V3 respond 失败: ${e.message}")
-                    _uiState.update { it.copy(isInferring = false, error = e.message) }
+                _uiState.update { state ->
+                    state.copy(
+                        statusOptions = if (gifUrl != null) {
+                            state.statusOptions.map {
+                                if (it.index == option.index) it.copy(gifUrl = gifUrl) else it
+                            }
+                        } else state.statusOptions,
+                        // 移除已完成加载的 index
+                        gifLoadingIndices = state.gifLoadingIndices - option.index,
+                    )
                 }
-            )
+            }
         }
     }
 
     /**
-     * 客户端直接搜索 Giphy API
+     * 通过 gif.playa.cn 代理获取 GIF cos_url（和首页 GridHomeViewModel 一致）
+     * 失败自动重试 1 次
+     */
+    private suspend fun fetchGifViaProxy(query: String, seed: String): String? = withContext(Dispatchers.IO) {
+        repeat(2) { attempt ->
+            try {
+                val encoded = java.net.URLEncoder.encode(query, "UTF-8")
+                val seedHash = md5("$seed$query${java.time.LocalDate.now()}")
+                val conn = URL("https://gif.playa.cn/api/giphy?q=$encoded&seed=$seedHash").openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 10000
+                conn.readTimeout = 10000
+                val body = conn.inputStream.bufferedReader().readText()
+                conn.disconnect()
+                // 检查是否是错误响应
+                if (body.contains("FUNCTION_INVOCATION_TIMEOUT") || body.contains("error")) {
+                    Log.w("Giphy", "代理超时 attempt=$attempt query=$query")
+                    if (attempt == 0) {
+                        kotlinx.coroutines.delay(1000) // 等 1 秒重试
+                        return@repeat
+                    }
+                    return@withContext null
+                }
+                val json = JSONObject(body)
+                val url = json.optJSONObject("result")?.optString("cos_url")?.takeIf { it.isNotEmpty() }
+                if (url != null) return@withContext url
+            } catch (e: Exception) {
+                Log.w("Giphy", "GIF 代理请求失败 attempt=$attempt: ${e.message}")
+                if (attempt == 0) kotlinx.coroutines.delay(1000)
+            }
+        }
+        null
+    }
+
+    private fun md5(input: String): String {
+        val bytes = java.security.MessageDigest.getInstance("MD5").digest(input.toByteArray())
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * 客户端搜索 GIF（编辑页用，同样走 gif.playa.cn 代理）
      */
     private fun searchGiphyFromClient(query: String) {
         viewModelScope.launch {
             _uiState.update { it.copy(isSearchingGif = true) }
-            Log.d("Giphy", "搜索 GIF: query='$query'")
             try {
-                val gifUrl = withContext(Dispatchers.IO) {
-                    val apiKey = "Ned8bTKUTSlYen6oZXmacc1sLmlLn9U8"
-                    val encodedQuery = java.net.URLEncoder.encode(query, "UTF-8")
-                    val urlStr = "https://api.giphy.com/v1/gifs/search?api_key=$apiKey&q=$encodedQuery&limit=1&rating=g"
-                    val conn = URL(urlStr).openConnection() as java.net.HttpURLConnection
-                    conn.connectTimeout = 8000
-                    conn.readTimeout = 8000
-                    conn.requestMethod = "GET"
-                    try {
-                        val body = conn.inputStream.bufferedReader().readText()
-                        val json = JSONObject(body)
-                        val data = json.getJSONArray("data")
-                        if (data.length() > 0) {
-                            data.getJSONObject(0)
-                                .getJSONObject("images")
-                                .getJSONObject("fixed_height")
-                                .getString("url")
-                        } else null
-                    } finally {
-                        conn.disconnect()
-                    }
-                }
+                val gifUrl = fetchGifViaProxy(query, "edit_${System.currentTimeMillis()}")
                 if (gifUrl != null) {
-                    Log.d("Giphy", "GIF URL: $gifUrl")
                     _uiState.update { state ->
                         val updated = state.inference?.copy(gifUrl = gifUrl)
                         if (updated != null) state.copy(inference = updated) else state
@@ -415,101 +419,39 @@ class AIStatusInferenceViewModel @Inject constructor(
         }
     }
 
-    private fun applyInferenceResult(result: StatusInferenceResult) {
-        _uiState.update { state ->
-            state.copy(
-                isInferring = false,
-                inference = result,
-                editingEmoji = result.emoji,
-                editingActivity = result.activity,
-                editingPlace = result.place ?: "",
-                editingIsAvailable = result.isAvailable,
-                streamingPhase = null,
-            )
-        }
-    }
+    // MARK: - 编辑操作
 
-    /**
-     * 更新编辑中的 emoji
-     */
-    fun updateEmoji(emoji: String) {
-        _uiState.update { it.copy(editingEmoji = emoji) }
-    }
+    fun updateEmoji(emoji: String) { _uiState.update { it.copy(editingEmoji = emoji) } }
+    fun updateActivity(activity: String) { _uiState.update { it.copy(editingActivity = activity) } }
+    fun updatePlace(place: String) { _uiState.update { it.copy(editingPlace = place) } }
+    fun toggleIsAvailable() { _uiState.update { it.copy(editingIsAvailable = !it.editingIsAvailable) } }
+    fun startEditing() { _uiState.update { it.copy(isEditing = !it.isEditing) } }
+    fun toggleEmojiPicker() { _uiState.update { it.copy(showEmojiPicker = !it.showEmojiPicker) } }
 
-    /**
-     * 更新编辑中的活动描述
-     */
-    fun updateActivity(activity: String) {
-        _uiState.update { it.copy(editingActivity = activity) }
-    }
-
-    /**
-     * 更新编辑中的场所
-     */
-    fun updatePlace(place: String) {
-        _uiState.update { it.copy(editingPlace = place) }
-    }
-
-    /**
-     * 切换有空状态
-     */
-    fun toggleIsAvailable() {
-        _uiState.update { it.copy(editingIsAvailable = !it.editingIsAvailable) }
-    }
-
-    /**
-     * 切换文字编辑模式
-     */
-    fun startEditing() {
-        _uiState.update { it.copy(isEditing = !it.isEditing) }
-    }
-
-    /**
-     * 显示/隐藏 emoji 选择器
-     */
-    fun toggleEmojiPicker() {
-        _uiState.update { it.copy(showEmojiPicker = !it.showEmojiPicker) }
-    }
-
-    /**
-     * 切换到 GIF 模式
-     */
     fun toggleUseGif() {
         val currentState = _uiState.value
         if (currentState.useGif) {
             _uiState.update { it.copy(useGif = false) }
             return
         }
-
         _uiState.update { it.copy(useGif = true) }
-
         if (currentState.inference?.gifUrl.isNullOrEmpty()) {
             val query = currentState.inference?.giphyQuery
                 ?: currentState.inference?.activity
                 ?: currentState.editingActivity
-            if (query.isNotEmpty()) {
-                searchGiphyFromClient(query)
-            }
+            if (query.isNotEmpty()) searchGiphyFromClient(query)
         }
     }
 
-    /**
-     * 切换回 emoji 模式
-     */
-    fun setEmojiMode() {
-        _uiState.update { it.copy(useGif = false) }
-    }
+    fun setEmojiMode() { _uiState.update { it.copy(useGif = false) } }
 
     /**
      * 确认状态（发布到首页）
      */
     fun confirmStatus(onSuccess: () -> Unit) {
         if (_uiState.value.isConfirming) return
-
         val state = _uiState.value
-        val inference = state.inference
-
-        if (inference == null) {
+        val inference = state.inference ?: run {
             _uiState.update { it.copy(error = "没有可发布的状态") }
             return
         }
@@ -517,17 +459,13 @@ class AIStatusInferenceViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.update { it.copy(isConfirming = true, confirmingMessage = "发布中...") }
 
-            // 如果使用 GIF 模式且 URL 是 Giphy 的，先上传到 COS
-            val currentGifUrl = inference.gifUrl
-            var finalGifUrl = currentGifUrl
-            if (state.useGif && !currentGifUrl.isNullOrEmpty() && currentGifUrl.contains("giphy.com")) {
+            var finalGifUrl = inference.gifUrl
+            if (state.useGif && !finalGifUrl.isNullOrEmpty() && finalGifUrl.contains("giphy.com")) {
                 _uiState.update { it.copy(confirmingMessage = "正在上传 GIF...") }
-                val cosUrl = uploadGifToCOS(currentGifUrl)
+                val cosUrl = uploadGifToCOS(finalGifUrl)
                 if (cosUrl != null) {
                     finalGifUrl = cosUrl
-                    _uiState.update { s ->
-                        s.copy(inference = s.inference?.copy(gifUrl = cosUrl))
-                    }
+                    _uiState.update { s -> s.copy(inference = s.inference?.copy(gifUrl = cosUrl)) }
                 }
             }
 
@@ -541,6 +479,8 @@ class AIStatusInferenceViewModel @Inject constructor(
                 gifUrl = finalGifUrl,
                 giphyQuery = inference.giphyQuery,
                 useGif = state.useGif,
+                inferenceSessionId = state.inferenceSessionId.ifEmpty { null },
+                selectedOptionIdx = state.selectedIndex,
             )
 
             agentRepository.submitStatusFeedback(feedback).fold(
@@ -555,20 +495,13 @@ class AIStatusInferenceViewModel @Inject constructor(
         }
     }
 
-    /**
-     * 下载 Giphy GIF 并上传到后端 COS，返回 COS URL
-     */
     private suspend fun uploadGifToCOS(gifUrl: String): String? {
         return withContext(Dispatchers.IO) {
             try {
                 val conn = URL(gifUrl).openConnection() as java.net.HttpURLConnection
                 conn.connectTimeout = 10000
                 conn.readTimeout = 10000
-                val gifData = try {
-                    conn.inputStream.readBytes()
-                } finally {
-                    conn.disconnect()
-                }
+                val gifData = try { conn.inputStream.readBytes() } finally { conn.disconnect() }
                 agentRepository.uploadGifToCOS(gifData).getOrNull()
             } catch (e: Exception) {
                 Log.w("UploadGif", "失败: ${e.message}")
@@ -577,9 +510,6 @@ class AIStatusInferenceViewModel @Inject constructor(
         }
     }
 
-    /**
-     * 是否有修改
-     */
     fun hasChanges(): Boolean {
         val state = _uiState.value
         val inference = state.inference ?: return false
@@ -589,14 +519,15 @@ class AIStatusInferenceViewModel @Inject constructor(
                 state.editingPlace != (inference.place ?: "") ||
                 state.useGif
     }
+}
 
-    /**
-     * 重置状态
-     */
-    fun reset() {
-        _uiState.value = AIStatusInferenceUiState()
-        v3SessionId = null
-    }
+/**
+ * 推断阶段
+ */
+enum class InferPhase {
+    LOADING,  // 加载中
+    OPTIONS,  // 4选1 选项展示
+    EDITING,  // 编辑发布
 }
 
 /**
@@ -615,10 +546,17 @@ enum class LogType {
  * AI 状态推断 UI 状态
  */
 data class AIStatusInferenceUiState(
+    val currentPhase: InferPhase = InferPhase.LOADING,
     val isInferring: Boolean = false,
+    // 4选1 选项
+    val statusOptions: List<StatusCardOption> = emptyList(),
+    val selectedIndex: Int? = null,
+    val inferenceSessionId: String = "",
+    val isRefreshing: Boolean = false,
+    val gifLoadingIndices: Set<Int> = emptySet(), // 正在加载 GIF 的选项 index
+    // 编辑状态
     val inference: StatusInferenceResult? = null,
     val error: String? = null,
-    // 编辑状态
     val isEditing: Boolean = false,
     val editingEmoji: String = "",
     val editingActivity: String = "",
@@ -632,12 +570,12 @@ data class AIStatusInferenceUiState(
     // 流式推断状态
     val streamingPhase: String? = null,
     val streamingLogs: List<StreamingLog> = emptyList(),
-    // V3 用户选择状态
+    // GIF 模式切换
+    val useGif: Boolean = false,
+    val isSearchingGif: Boolean = false,
+    // Legacy（保留兼容）
     val isAskingUser: Boolean = false,
     val askUserQuestion: String = "",
     val askUserOptions: List<String> = emptyList(),
     val v3SessionId: String? = null,
-    // GIF 模式切换
-    val useGif: Boolean = false,
-    val isSearchingGif: Boolean = false,
 )

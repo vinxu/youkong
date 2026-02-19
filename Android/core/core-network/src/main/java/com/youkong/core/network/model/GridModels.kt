@@ -60,6 +60,12 @@ data class FriendGridItem(
     // 今日互动计数
     @SerialName("interaction_count")
     val interactionCount: Int = 0,
+    // 是否已对该好友当前状态 +1
+    @SerialName("has_plus_oned")
+    val hasPlusOned: Boolean = false,
+    // 是否是自己
+    @SerialName("is_self")
+    val isSelf: Boolean = false,
 )
 
 /**
@@ -86,6 +92,23 @@ data class SendInteractionRequest(
     val actionLabel: String,
     @SerialName("action_push_text")
     val actionPushText: String,
+)
+
+/**
+ * GIF 缓存写回请求
+ */
+@Serializable
+data class GifCacheRequest(
+    val items: List<GifCacheItem>,
+)
+
+@Serializable
+data class GifCacheItem(
+    @SerialName("friend_id")
+    val friendId: String,
+    val query: String,
+    @SerialName("cos_url")
+    val cosUrl: String,
 )
 
 /**

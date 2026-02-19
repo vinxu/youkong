@@ -399,6 +399,8 @@ class VoiceScheduleViewModel @Inject constructor(
                 }
                 addMessage(ChatMessageType.SYSTEM, "✓ 时刻表已保存！状态将按时刻表自动更新")
                 _uiState.update { it.copy(state = VoiceScheduleState.COMPLETED) }
+                // 通知首页刷新 Grid
+                GridRefreshEvent.trigger()
             }
 
             VoiceScheduleEventType.STATUS_UPDATED -> {
@@ -412,6 +414,8 @@ class VoiceScheduleViewModel @Inject constructor(
                         state = VoiceScheduleState.COMPLETED
                     )
                 }
+                // 通知首页刷新 Grid（更新 GIF 等）
+                GridRefreshEvent.trigger()
             }
 
             VoiceScheduleEventType.PREFERENCE_UPDATED -> {

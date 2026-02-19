@@ -497,6 +497,8 @@ type SelectStatusRequest struct {
 	Emoji      string                       `json:"emoji" binding:"required"`
 	Status     string                       `json:"status" binding:"required"`
 	DeviceData *ExtendedStatusReportRequest `json:"device_data,omitempty"` // 选择时的设备数据
+	GifURL     string                       `json:"gif_url,omitempty"`     // 客户端获取的 GIF URL
+	GiphyQuery string                       `json:"giphy_query,omitempty"` // Giphy 搜索词
 }
 
 // UserStatusMemory 用户状态记忆（数据库模型）

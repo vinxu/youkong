@@ -19,6 +19,12 @@ const (
 	ScheduleStatusCancelled ScheduleStatus = "cancelled"
 )
 
+// PlusOneUser +1 用户简要信息
+type PlusOneUser struct {
+	UserID   string `json:"user_id"`
+	Nickname string `json:"nickname"`
+}
+
 // ScheduleItem 时刻表条目
 type ScheduleItem struct {
 	StartTime    string `json:"start_time"`               // HH:MM 格式
@@ -33,6 +39,7 @@ type ScheduleItem struct {
 	RemindBefore int    `json:"remind_before,omitempty"`  // 提前提醒分钟数，0=不提醒
 	BookingID    string `json:"booking_id,omitempty"`     // 关联的预约 ID
 	WithUsers    string `json:"with_users,omitempty"`     // 一起的用户名（预约场景）
+	PlusOnes     []PlusOneUser `json:"plus_ones,omitempty"` // 该时段 +1 的用户列表
 }
 
 // ScheduleItems JSON 数组类型（用于数据库存储）

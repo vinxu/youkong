@@ -220,6 +220,7 @@ func main() {
 	predictionService := service.NewPredictionService(predictionRepo, scheduleRepo, memoryRepo, userProfileService, llmClient)
 	bookingService := service.NewBookingService(bookingRepo, scheduleRepo, conversationService, userRepo, notificationService, messageRepo)
 	voiceScheduleServiceV4.SetBookingService(bookingService)
+	voiceScheduleServiceV4.SetHomeService(homeService)
 
 	// 初始化互动服务
 	interactionRepo := repository.NewInteractionRepository(db)
@@ -278,6 +279,7 @@ func main() {
 	}
 	agentHandler.SetRedisClient(redisClient)                       // 设置 Redis（权限追踪）
 	agentHandler.SetUserSettingsRepo(userSettingsRepo)             // 设置用户设置（自动推测）
+	agentHandler.SetInteractionService(interactionService)         // 设置互动服务（+1 富化）
 	// 设置 STS 配置（用于客户端直传 COS）
 	// COS 密钥：优先使用 COS 专用密钥，回退到通用密钥
 	cosSecretID := cfg.Tencent.COSSecretID
@@ -310,6 +312,9 @@ func main() {
 		agentService.SetCOSClient(cosClient)
 		logger.Info("AgentService 已启用 GIF COS 缓存")
 	}
+
+	// 设置 HomeService 到 AgentService（用于手动修改状态时异步解析 GIF）
+	agentService.SetHomeService(homeService)
 
 	// 初始化模型测试服务（用于 Qwen vs Kimi vs Claude 对比测试）
 	if cfg.LLM.APIKey != "" || cfg.LLM.KimiAPIKey != "" || cfg.LLM.ClaudeAPIKey != "" {
@@ -430,6 +435,7 @@ func main() {
 			home := authorized.Group("/home")
 			{
 				home.GET("/grid", homeHandler.GetGrid)
+				home.POST("/gif-cache", homeHandler.CacheGifURLs)
 			}
 
 			// 会话消息模块
@@ -514,6 +520,7 @@ func main() {
 
 				// 当下状态推理
 				agent.POST("/infer-status", agentHandler.InferStatus)         // AI 推断当下状态
+				agent.POST("/infer-options", agentHandler.InferStatusOptions)  // 4选1 推断（生成 4 个选项）
 				agent.POST("/status-feedback", agentHandler.StatusFeedback)   // 状态反馈（用户修正）
 
 				// V2 Agent-based 状态推断
@@ -623,6 +630,7 @@ func main() {
 	statusScheduler.SetMemoryDocRepo(memoryDocRepo)
 	// 注入 V4 推断服务（用于自动推测下一状态）
 	statusScheduler.SetInferenceAgent(voiceScheduleServiceV4)
+	statusScheduler.SetHomeService(homeService)
 	logger.Info("StatusScheduler V4 推断服务已注入")
 	statusScheduler.Start()
 	defer statusScheduler.Stop()

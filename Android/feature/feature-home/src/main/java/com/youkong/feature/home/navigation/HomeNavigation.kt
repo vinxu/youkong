@@ -33,12 +33,14 @@ fun NavGraphBuilder.gridHomeScreen(
     onNavigateToSettings: () -> Unit,
     onNavigateToAddFriend: () -> Unit = {},
     onNavigateToChat: (userId: String) -> Unit = {},
+    onNavigateToOnboarding: () -> Unit = {},
 ) {
     composable(HOME_ROUTE) {
         GridHomeScreen(
             onNavigateToSettings = onNavigateToSettings,
             onNavigateToAddFriend = onNavigateToAddFriend,
             onNavigateToChat = onNavigateToChat,
+            onNavigateToOnboarding = onNavigateToOnboarding,
         )
     }
 }

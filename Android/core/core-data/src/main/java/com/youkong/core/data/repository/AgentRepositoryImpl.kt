@@ -4,12 +4,15 @@ import com.youkong.core.domain.model.Confidence
 import com.youkong.core.domain.model.FriendWithProbability
 import com.youkong.core.domain.model.UserProfile
 import com.youkong.core.domain.repository.AgentRepository
+import com.youkong.core.domain.repository.InferenceOptionsResult
+import com.youkong.core.domain.repository.StatusCardOption
 import com.youkong.core.domain.repository.StatusFeedback
 import com.youkong.core.domain.repository.StatusInferenceResult
 import com.youkong.core.domain.repository.V3InferenceOption
 import com.youkong.core.domain.repository.V3InferenceResult
 import com.youkong.core.network.api.AgentApi
 import com.youkong.core.network.api.FriendApi
+import com.youkong.core.network.api.InferOptionsApiRequest
 import com.youkong.core.network.api.InferV3RespondRequest
 import com.youkong.core.network.api.STSCredentials
 import com.youkong.core.network.api.StatusFeedbackApiRequest
@@ -91,6 +94,49 @@ class AgentRepositoryImpl @Inject constructor(
         }
     }
 
+    override suspend fun inferOptions(request: Any, excludeActivities: List<String>?, sessionId: String?): Result<InferenceOptionsResult> {
+        return try {
+            val sensorData = request as? AgentStatusRequest ?: AgentStatusRequest()
+            val apiRequest = InferOptionsApiRequest(
+                screen = sensorData.screen,
+                location = sensorData.location,
+                extendedLocation = sensorData.extendedLocation,
+                battery = sensorData.battery,
+                mode = sensorData.mode,
+                connection = sensorData.connection,
+                display = sensorData.display,
+                calendar = sensorData.calendar,
+                movement = sensorData.movement,
+                ambientLight = sensorData.ambientLight,
+                excludeActivities = excludeActivities,
+                sessionId = sessionId,
+            )
+            val response = agentApi.inferOptions(apiRequest)
+            val data = response.data
+            if (response.isSuccess && data != null) {
+                Result.success(InferenceOptionsResult(
+                    sessionId = data.sessionId,
+                    options = data.options.map { o ->
+                        StatusCardOption(
+                            index = o.index,
+                            emoji = o.emoji,
+                            activity = o.activity,
+                            place = o.place,
+                            isAvailable = o.isAvailable,
+                            confidence = o.confidence,
+                            giphyQuery = o.giphyQuery,
+                            gifUrl = o.gifUrl,
+                        )
+                    }
+                ))
+            } else {
+                Result.failure(Exception(response.message))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     override suspend fun inferStatus(): Result<StatusInferenceResult> {
         // 通过 V3 接口获取，取 completed 的 result
         return inferStatusV3(AgentStatusRequest()).map { it.result ?: StatusInferenceResult(emoji = "❓", activity = "未知") }
@@ -164,6 +210,8 @@ class AgentRepositoryImpl @Inject constructor(
                 gifUrl = feedback.gifUrl,
                 giphyQuery = feedback.giphyQuery,
                 useGif = feedback.useGif,
+                inferenceSessionId = feedback.inferenceSessionId,
+                selectedOptionIdx = feedback.selectedOptionIdx,
             )
             val response = agentApi.submitStatusFeedback(request)
             if (response.isSuccess) Result.success(Unit)

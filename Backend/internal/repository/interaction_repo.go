@@ -52,6 +52,115 @@ func (r *InteractionRepository) GetLastBetween(ctx context.Context, senderID, re
 	return &interaction, nil
 }
 
+// GetLatestPlusOneMap 批量获取某用户对每个好友最近一次 +1 的时间
+func (r *InteractionRepository) GetLatestPlusOneMap(ctx context.Context, senderID string, receiverIDs []string) (map[string]time.Time, error) {
+	result := make(map[string]time.Time)
+	if len(receiverIDs) == 0 {
+		return result, nil
+	}
+
+	query, args, err := sqlx.In(`
+		SELECT receiver_id, MAX(created_at) as latest
+		FROM interactions
+		WHERE sender_id = ? AND receiver_id IN (?) AND action_label = '+1'
+		GROUP BY receiver_id
+	`, senderID, receiverIDs)
+	if err != nil {
+		return result, err
+	}
+
+	query = r.db.Rebind(query)
+
+	type row struct {
+		ReceiverID string    `db:"receiver_id"`
+		Latest     time.Time `db:"latest"`
+	}
+	var rows []row
+	if err := r.db.SelectContext(ctx, &rows, query, args...); err != nil {
+		return result, err
+	}
+
+	for _, r := range rows {
+		result[r.ReceiverID] = r.Latest
+	}
+	return result, nil
+}
+
+// GetTodayPlusOnes 获取某用户某天收到的所有 +1 互动记录
+func (r *InteractionRepository) GetTodayPlusOnes(ctx context.Context, receiverID string, date string) ([]model.Interaction, error) {
+	var interactions []model.Interaction
+	query := `
+		SELECT * FROM interactions
+		WHERE receiver_id = ? AND action_label = '+1' AND DATE(created_at) = ?
+		ORDER BY created_at ASC
+	`
+	err := r.db.SelectContext(ctx, &interactions, query, receiverID, date)
+	return interactions, err
+}
+
+// GetPlusOnesSince 批量获取每人在指定时间之后收到的所有 +1 互动记录
+func (r *InteractionRepository) GetPlusOnesSince(ctx context.Context, receiverIDs []string, since time.Time) (map[string][]model.Interaction, error) {
+	result := make(map[string][]model.Interaction)
+	if len(receiverIDs) == 0 {
+		return result, nil
+	}
+
+	query, args, err := sqlx.In(`
+		SELECT * FROM interactions
+		WHERE receiver_id IN (?) AND action_label = '+1' AND created_at >= ?
+		ORDER BY created_at ASC
+	`, receiverIDs, since)
+	if err != nil {
+		return result, err
+	}
+
+	query = r.db.Rebind(query)
+
+	var interactions []model.Interaction
+	if err := r.db.SelectContext(ctx, &interactions, query, args...); err != nil {
+		return result, err
+	}
+
+	for _, inter := range interactions {
+		result[inter.ReceiverID] = append(result[inter.ReceiverID], inter)
+	}
+	return result, nil
+}
+
+// GetPlusOnesSinceTime 批量获取每人在指定时间之后收到的 +1 次数
+func (r *InteractionRepository) GetPlusOnesSinceTime(ctx context.Context, receiverIDs []string, sinceTime time.Time) (map[string]int, error) {
+	counts := make(map[string]int)
+	if len(receiverIDs) == 0 {
+		return counts, nil
+	}
+
+	query, args, err := sqlx.In(`
+		SELECT receiver_id, COUNT(*) as cnt
+		FROM interactions
+		WHERE receiver_id IN (?) AND action_label = '+1' AND created_at >= ?
+		GROUP BY receiver_id
+	`, receiverIDs, sinceTime)
+	if err != nil {
+		return counts, err
+	}
+
+	query = r.db.Rebind(query)
+
+	type countRow struct {
+		ReceiverID string `db:"receiver_id"`
+		Count      int    `db:"cnt"`
+	}
+	var rows []countRow
+	if err := r.db.SelectContext(ctx, &rows, query, args...); err != nil {
+		return counts, err
+	}
+
+	for _, row := range rows {
+		counts[row.ReceiverID] = row.Count
+	}
+	return counts, nil
+}
+
 // GetTodayCounts 批量获取今日每人收到的互动次数
 func (r *InteractionRepository) GetTodayCounts(ctx context.Context, receiverIDs []string) (map[string]int, error) {
 	counts := make(map[string]int)

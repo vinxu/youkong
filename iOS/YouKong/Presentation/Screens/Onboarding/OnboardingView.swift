@@ -82,7 +82,7 @@ struct WelcomeScreen: View {
                 .foregroundColor(CLIColors.green)
 
             // Slogan
-            Text("一眼谁有空，一句话约人")
+            Text("AI 感知状态，智能管理日程")
                 .font(.cliHeadline)
                 .foregroundColor(CLIColors.textSecondary)
 

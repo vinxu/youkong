@@ -191,11 +191,28 @@ class MyScheduleTimelineViewModel: ObservableObject {
     // MARK: - Refresh
 
     func refresh() async {
-        scheduleGroups = []
+        // 保留旧数据，避免切tab时出现空白loading闪烁
         hasMore = true
         oldestDate = nil
         showPastSchedules = false
-        await loadInitialData()
+
+        error = nil
+
+        async let settingsTask: () = loadSettings()
+        async let schedulesTask = agentRepository.getMyScheduleHistory(limit: pageSize, beforeDate: nil)
+
+        _ = await settingsTask
+
+        do {
+            let response = try await schedulesTask
+            scheduleGroups = response.schedules.map { ScheduleGroup(from: $0) }
+            hasMore = response.hasMore
+            oldestDate = response.oldestDate
+            isEmpty = scheduleGroups.isEmpty
+        } catch {
+            self.error = error
+            print("[MyScheduleTimeline] Refresh failed: \(error)")
+        }
     }
 
     func triggerScrollToNow() {

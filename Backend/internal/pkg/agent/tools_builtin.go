@@ -56,8 +56,9 @@ type ScheduleItemInfo struct {
 	EndTime      string `json:"end_time"`   // HH:MM 格式
 	Emoji        string `json:"emoji"`
 	Status       string `json:"status"`
-	Available    *bool  `json:"available,omitempty"`     // nil=不指定（保留原值），true=有空，false=没空
-	RemindBefore int    `json:"remind_before,omitempty"` // 提前提醒分钟数，0=不提醒
+	Available    *bool  `json:"available,omitempty"`      // nil=不指定（保留原值），true=有空，false=没空
+	RemindBefore int    `json:"remind_before,omitempty"`  // 提前提醒分钟数，0=不提醒
+	GiphyQuery   string `json:"giphy_query,omitempty"`    // 英文 GIF 搜索词
 }
 
 // UserInfo 用户信息

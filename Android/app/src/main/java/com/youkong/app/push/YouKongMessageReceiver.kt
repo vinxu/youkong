@@ -10,6 +10,7 @@ import com.tencent.android.tpush.XGPushRegisterResult
 import com.tencent.android.tpush.XGPushShowedResult
 import com.tencent.android.tpush.XGPushTextMessage
 import com.youkong.app.MainActivity
+import com.youkong.core.domain.manager.BadgeManager
 import org.json.JSONObject
 
 /**
@@ -37,6 +38,9 @@ class YouKongMessageReceiver : XGPushBaseReceiver() {
         }
 
         Log.d(TAG, "通知被点击: ${message.title}, customContent: ${message.customContent}")
+
+        // 点击通知时清除 badge
+        BadgeManager.updateBadge(context, 0)
 
         val customContent = message.customContent
         if (customContent.isNullOrEmpty()) {

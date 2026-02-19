@@ -215,6 +215,15 @@ extension APIEndpoint {
 
     // MARK: - AI Status Inference V2
 
+    /// AI 推断 4选1 选项
+    static func inferOptions(request: InferOptionsRequest) -> APIEndpoint {
+        return APIEndpoint(
+            path: "/api/v1/agent/infer-options",
+            method: .post,
+            body: request
+        )
+    }
+
     /// AI 状态推断 V2（同步版）
     static func inferStatusV2(request: StatusReportRequest) -> APIEndpoint {
         return APIEndpoint(
@@ -252,6 +261,15 @@ extension APIEndpoint {
             path: "/api/v1/agent/status-feedback",
             method: .post,
             body: request
+        )
+    }
+
+    /// 批量缓存 GIF cos_url（写回服务器）
+    static func cacheGifUrls(items: [[String: String]]) -> APIEndpoint {
+        return APIEndpoint(
+            path: "/api/v1/home/gif-cache",
+            method: .post,
+            body: ["items": items]
         )
     }
 

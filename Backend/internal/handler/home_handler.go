@@ -32,3 +32,17 @@ func (h *HomeHandler) GetGrid(c *gin.Context) {
 
 	response.Success(c, gridData)
 }
+
+// CacheGifURLs 批量缓存客户端解析的 GIF cos_url
+// POST /api/v1/home/gif-cache
+func (h *HomeHandler) CacheGifURLs(c *gin.Context) {
+	var req struct {
+		Items []service.GifCacheItem `json:"items"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.Items) == 0 {
+		response.ParamError(c, "items 不能为空")
+		return
+	}
+	cached := h.homeService.CacheGifURLs(c.Request.Context(), req.Items)
+	response.Success(c, gin.H{"cached": cached})
+}

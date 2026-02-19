@@ -34,6 +34,7 @@ class TPNSHelper @Inject constructor(
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var cachedToken: String? = null
 
     /**
      * 初始化 TPNS 推送服务
@@ -48,8 +49,9 @@ class TPNSHelper @Inject constructor(
             override fun onSuccess(data: Any?, flag: Int) {
                 val token = data as? String
                 Log.d(TAG, "TPNS 注册成功，token: $token")
-                // 上报 Token 到后端
+                // 缓存 token，登录后上报
                 if (!token.isNullOrEmpty()) {
+                    cachedToken = token
                     scope.launch {
                         uploadToken(token)
                     }
@@ -89,6 +91,13 @@ class TPNSHelper @Inject constructor(
      * 登录成功后调用，用于接收定向推送
      */
     override suspend fun bindAccount(userId: String) {
+        // 登录时重新上报 token 到后端（init 时可能还没登录导致 401）
+        val token = cachedToken ?: XGPushConfig.getToken(context)
+        if (!token.isNullOrEmpty()) {
+            Log.d(TAG, "登录后上报 token 到后端")
+            uploadToken(token)
+        }
+
         suspendCancellableCoroutine { continuation ->
             XGPushManager.bindAccount(context, userId, object : XGIOperateCallback {
                 override fun onSuccess(data: Any?, flag: Int) {

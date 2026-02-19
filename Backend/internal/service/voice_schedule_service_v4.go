@@ -47,11 +47,17 @@ type VoiceScheduleServiceV4 struct {
 	contactService  *ContactService
 	bookingService  *BookingService
 	locationService *LocationService
+	homeService     *HomeService
 }
 
 // SetBookingService 设置预约服务（延迟注入，避免循环依赖）
 func (s *VoiceScheduleServiceV4) SetBookingService(bs *BookingService) {
 	s.bookingService = bs
+}
+
+// SetHomeService 设置首页服务（用于异步 GIF 解析）
+func (s *VoiceScheduleServiceV4) SetHomeService(hs *HomeService) {
+	s.homeService = hs
 }
 
 // NewVoiceScheduleServiceV4 创建 V4 版本语音时刻表服务
@@ -308,7 +314,8 @@ func (s *VoiceScheduleServiceV4) InferStatusOptions(
 	// 构建用户消息
 	userMsg := "请分析设备信号，生成 4 个可能的状态选项"
 	if len(excludeActivities) > 0 {
-		userMsg += fmt.Sprintf("\n\n以下活动已展示过，请生成完全不同的选项：%s", strings.Join(excludeActivities, "、"))
+		userMsg += fmt.Sprintf("\n\n【重要】以下活动已经展示过，绝对不能再出现：%s\n请发挥想象力，生成 4 个完全不同的新活动选项。", strings.Join(excludeActivities, "、"))
+		fmt.Printf("[InferOptions] 换一批: exclude=%v\n", excludeActivities)
 	}
 	session.AddMessage("user", userMsg)
 
@@ -324,8 +331,8 @@ func (s *VoiceScheduleServiceV4) InferStatusOptions(
 		return nil, fmt.Errorf("LLM 未生成选项")
 	}
 
-	// 并行获取 GIF URL
-	s.fetchGifURLsBatch(ctx, options, userID)
+	// GIF 由客户端搜索（服务器无法访问 Giphy API）
+	// s.fetchGifURLsBatch(ctx, options, userID)
 
 	// 确定 session ID
 	sessionID := existingSessionID
@@ -1626,11 +1633,12 @@ func (s *VoiceScheduleServiceV4) executeUpdateSchedule(
 	newItems := make([]model.ScheduleItem, len(items))
 	for i, item := range items {
 		newItems[i] = model.ScheduleItem{
-			StartTime: item.StartTime,
-			EndTime:   item.EndTime,
-			Emoji:     item.Emoji,
-			Status:    item.Status,
-			Highlight: item.Available != nil && *item.Available,
+			StartTime:  item.StartTime,
+			EndTime:    item.EndTime,
+			Emoji:      item.Emoji,
+			Status:     item.Status,
+			Highlight:  item.Available != nil && *item.Available,
+			GiphyQuery: item.GiphyQuery,
 		}
 	}
 	// 保存 Available nil 信息用于 modify 时继承（items 切片与 newItems 索引对应）
@@ -1907,6 +1915,7 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 	emoji, _ := args["emoji"].(string)
 	status, _ := args["status"].(string)
 	highlight, _ := args["available"].(bool) // 默认 false
+	giphyQuery, _ := args["giphy_query"].(string)
 
 	if emoji == "" || status == "" {
 		return map[string]string{"error": "emoji 和 status 不能为空"}, false
@@ -1920,8 +1929,15 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 			Activity:    status,
 			IsAvailable: highlight,
 			Confidence:  "high",
+			GiphyQuery:  giphyQuery,
 			InferredAt:  time.Now().UnixMilli(),
 		}
+
+		// 异步预解析 GIF（推断模式也预热缓存，用户确认后 Grid 直接有 GIF）
+		if s.homeService != nil && giphyQuery != "" {
+			go s.homeService.ResolveAndCacheGifURL(session.UserID, giphyQuery)
+		}
+
 		fmt.Printf("[V4] 推断模式：结果暂存 session（未入库），等待用户确认发布 user=%s %s%s\n",
 			session.UserID, emoji, status)
 
@@ -1994,6 +2010,8 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 			schedule.Items[i].Emoji = emoji
 			schedule.Items[i].Status = status
 			schedule.Items[i].Highlight = highlight
+			schedule.Items[i].GiphyQuery = giphyQuery
+			schedule.Items[i].GifURL = "" // 清除旧 GIF，异步重新解析
 			schedule.Items[i].Executed = false // 重置 executed 状态
 			schedule.Items[i].IsAIGuess = false
 			found = true
@@ -2002,11 +2020,12 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 	}
 	if !found {
 		schedule.Items = append(schedule.Items, model.ScheduleItem{
-			StartTime: startTime,
-			EndTime:   endTime,
-			Emoji:     emoji,
-			Status:    status,
-			Highlight: highlight,
+			StartTime:  startTime,
+			EndTime:    endTime,
+			Emoji:      emoji,
+			Status:     status,
+			Highlight:  highlight,
+			GiphyQuery: giphyQuery,
 		})
 	}
 
@@ -2026,8 +2045,9 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 		// 同步更新首页分析缓存，让首页 grid 立即显示新状态
 		analysisResult := &model.AnalysisResult{
 			LifeStatus: model.LifeStatus{
-				Emoji: emoji,
-				Label: status,
+				Emoji:      emoji,
+				Label:      status,
+				GiphyQuery: giphyQuery,
 			},
 			Availability: model.AvailabilityAnalysis{
 				Status: "有空",
@@ -2037,6 +2057,17 @@ func (s *VoiceScheduleServiceV4) executeUpdateCurrentStatus(
 		if cacheErr := s.memoryRepo.SaveAnalysisCache(ctx, session.UserID, analysisResult); cacheErr != nil {
 			fmt.Printf("[V4] 更新分析缓存失败: %v\n", cacheErr)
 		}
+
+		// 异步解析 GIF 并回填到 schedule + analysis cache + redis gif cache
+		if s.homeService != nil && giphyQuery != "" {
+			go s.homeService.ResolveAndCacheGifURL(session.UserID, giphyQuery)
+		}
+	}
+
+	// 设置 auto_infer 锁，防止调度器立即覆盖用户手动设置的状态
+	if s.redisClient != nil {
+		lockKey := fmt.Sprintf("auto_infer:lock:%s", session.UserID)
+		s.redisClient.Set(ctx, lockKey, "1", 30*time.Minute)
 	}
 
 	// 构造消息（若覆盖了 V3 推断，告知用户）
@@ -2121,6 +2152,48 @@ func (s *VoiceScheduleServiceV4) executeSaveSchedule(
 			Message: fmt.Sprintf("%s 的时刻表已保存", dateStr),
 		})
 		fmt.Printf("[V4] 保存时刻表 %s: %d 条\n", dateStr, len(items))
+	}
+
+	// 设置 auto_infer 锁，防止调度器立即覆盖用户手动设置的时刻表
+	if s.redisClient != nil {
+		lockKey := fmt.Sprintf("auto_infer:lock:%s", session.UserID)
+		s.redisClient.Set(ctx, lockKey, "1", 30*time.Minute)
+	}
+
+	// 同步更新 analysis_cache，刷新 updated_at（清除旧 +1 计数）
+	if len(savedDates) > 0 {
+		todayStr := time.Now().Format("2006-01-02")
+		for _, dateStr := range savedDates {
+			if dateStr == todayStr {
+				// 找到当前时刻的条目，用于更新 analysis_cache
+				items := session.PendingSchedules[dateStr]
+				nowTime := time.Now().Format("15:04")
+				var currentItem *model.ScheduleItem
+				for i := range items {
+					if items[i].StartTime <= nowTime && nowTime < items[i].EndTime {
+						currentItem = &items[i]
+						break
+					}
+				}
+				if currentItem != nil {
+					analysisResult := &model.AnalysisResult{
+						LifeStatus: model.LifeStatus{
+							Emoji:      currentItem.Emoji,
+							Label:      currentItem.Status,
+							GiphyQuery: currentItem.GiphyQuery,
+						},
+						IsAIGuess: false,
+					}
+					if currentItem.Highlight {
+						analysisResult.Availability = model.AvailabilityAnalysis{Status: "有空"}
+					}
+					if cacheErr := s.memoryRepo.SaveAnalysisCache(ctx, session.UserID, analysisResult); cacheErr != nil {
+						fmt.Printf("[V4] 保存时刻表后更新分析缓存失败: %v\n", cacheErr)
+					}
+				}
+				break
+			}
+		}
 	}
 
 	// 更新会话状态（CurrentSchedule 保留最后一天的）

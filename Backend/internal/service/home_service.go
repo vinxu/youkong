@@ -2,8 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"youkong/internal/model"
@@ -70,6 +76,10 @@ type FriendGridItem struct {
 	Interactions    []model.InteractionOption `json:"interactions,omitempty"`
 	// 今日互动计数
 	InteractionCount int                     `json:"interaction_count"`
+	// 是否已对该好友当前状态 +1
+	HasPlusOned bool `json:"has_plus_oned"`
+	// 是否是自己
+	IsSelf bool `json:"is_self"`
 }
 
 // GridResponse 宫格响应
@@ -199,6 +209,7 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 			GiphyQuery:    giphyQuery,
 			UseGif:        useGif,
 			NeedsSchedule: needsSchedule,
+			IsSelf:        isSelf,
 		})
 
 		// 最多显示 16 个（包括自己）
@@ -210,7 +221,16 @@ func (s *HomeService) GetGridData(ctx context.Context, userID string) (*GridResp
 	// 8. 填充场景+互动数据
 	s.enrichFriendsWithScene(ctx, friends)
 
-	// 9. 计算宫格大小
+	// 8.5 填充 +1 状态
+	s.enrichPlusOned(ctx, userID, friends)
+
+	// 9. 为缺少 giphy_query 的好友补充英文搜索词（客户端用它快速获取 GIF）
+	s.enrichGiphyQueries(friends)
+
+	// 10. 从 Redis 缓存填充 gif_url（客户端写回的 cos_url，秒加载）
+	s.resolveGifURLsFromCache(ctx, friends)
+
+	// 11. 计算宫格大小
 	gridSize := calculateGridSize(len(friends))
 
 	return &GridResponse{
@@ -406,4 +426,316 @@ func (s *HomeService) enrichFriendsWithScene(ctx context.Context, friends []Frie
 			friends[i].InteractionCount = count
 		}
 	}
+}
+
+// enrichPlusOned 为好友列表填充：
+// 1. has_plus_oned: 当前用户是否已对该好友当前状态 +1
+// 2. interaction_count: 该好友当前状态收到的 +1 总数（覆盖旧的全天计数）
+func (s *HomeService) enrichPlusOned(ctx context.Context, userID string, friends []FriendGridItem) {
+	if s.interactionService == nil || len(friends) == 0 {
+		return
+	}
+
+	// 收集所有人（含自己）的 ID 及 updatedAt
+	allIDs := make([]string, 0, len(friends))
+	updatedAtMap := make(map[string]time.Time)
+	for _, f := range friends {
+		allIDs = append(allIDs, f.UserID)
+		if t, err := time.Parse(time.RFC3339, f.UpdatedAt); err == nil {
+			updatedAtMap[f.UserID] = t
+		}
+	}
+	if len(allIDs) == 0 {
+		return
+	}
+
+	// 批量获取我对每个好友最近 +1 时间（不含自己）
+	friendIDs := make([]string, 0, len(allIDs))
+	for _, id := range allIDs {
+		if id != userID {
+			friendIDs = append(friendIDs, id)
+		}
+	}
+	var plusOneMap map[string]time.Time
+	if len(friendIDs) > 0 {
+		plusOneMap, _ = s.interactionService.GetLatestPlusOneMap(ctx, userID, friendIDs)
+	}
+
+	// 批量获取所有人自其状态更新后收到的 +1 数
+	var earliest time.Time
+	for _, t := range updatedAtMap {
+		if earliest.IsZero() || t.Before(earliest) {
+			earliest = t
+		}
+	}
+	if earliest.IsZero() {
+		earliest = time.Now().Add(-24 * time.Hour)
+	}
+	allPlusOnes, _ := s.interactionService.GetPlusOnesSince(ctx, allIDs, earliest)
+
+	for i := range friends {
+		fid := friends[i].UserID
+		friendUpdatedAt := updatedAtMap[fid]
+
+		// has_plus_oned: 我最近的 +1 时间 >= 好友状态更新时间（仅好友，不含自己）
+		if fid != userID {
+			if latestPlusOne, ok := plusOneMap[fid]; ok {
+				if !friendUpdatedAt.IsZero() {
+					friends[i].HasPlusOned = !latestPlusOne.Before(friendUpdatedAt)
+				}
+			}
+		}
+
+		// interaction_count: 只计算当前状态期间的 +1 数（含自己）
+		count := 0
+		if interactions, ok := allPlusOnes[fid]; ok && !friendUpdatedAt.IsZero() {
+			for _, inter := range interactions {
+				if !inter.CreatedAt.Before(friendUpdatedAt) {
+					count++
+				}
+			}
+		}
+		friends[i].InteractionCount = count
+	}
+}
+
+// enrichGiphyQueries 为缺少 giphy_query 的好友补充英文搜索词
+// 服务器无法直接访问 gif.playa.cn（延迟太高），所以只生成英文关键词，
+// 客户端用 giphy_query 调 gif.playa.cn 获取 GIF（英文查询 ~500ms，中文会超时）
+func (s *HomeService) enrichGiphyQueries(friends []FriendGridItem) {
+	for i := range friends {
+		if friends[i].GiphyQuery != "" || friends[i].GifURL != "" || friends[i].NeedsSchedule {
+			continue
+		}
+		if translated := translateStatusToEnglish(friends[i].Status); translated != "" {
+			friends[i].GiphyQuery = translated
+		}
+	}
+}
+
+
+// translateStatusToEnglish 将中文状态翻译为英文 GIF 搜索词
+// 基于关键词匹配，覆盖常见活动。未匹配时返回空字符串。
+func translateStatusToEnglish(status string) string {
+	// 关键词→英文搜索词映射（按优先级排列，先匹配先返回）
+	mappings := []struct {
+		keywords []string
+		english  string
+	}{
+		{[]string{"睡觉", "睡眠", "入睡", "午睡", "休息"}, "sleeping bed"},
+		{[]string{"工作", "办公", "加班", "上班"}, "working office"},
+		{[]string{"开会", "会议"}, "meeting office"},
+		{[]string{"做饭", "煮饭", "烹饪", "炒菜"}, "cooking kitchen"},
+		{[]string{"吃饭", "用餐", "午餐", "晚餐", "早餐", "吃"}, "eating food"},
+		{[]string{"烤串", "烧烤", "撸串"}, "barbecue grill"},
+		{[]string{"火锅"}, "hotpot dining"},
+		{[]string{"咖啡"}, "coffee cafe"},
+		{[]string{"喝酒", "酒吧", "喝啤酒"}, "drinking bar"},
+		{[]string{"健身", "运动", "锻炼", "撸铁"}, "gym exercise"},
+		{[]string{"跑步", "慢跑"}, "running jogging"},
+		{[]string{"游泳"}, "swimming pool"},
+		{[]string{"瑜伽"}, "yoga stretching"},
+		{[]string{"散步", "走路", "遛弯", "逛"}, "walking outdoor"},
+		{[]string{"购物", "逛街", "超市", "商场"}, "shopping store"},
+		{[]string{"看书", "阅读", "读书", "学习"}, "reading book"},
+		{[]string{"打游戏", "游戏", "打机"}, "gaming playing"},
+		{[]string{"听音乐", "音乐"}, "listening music headphones"},
+		{[]string{"看电影", "电影", "看剧", "追剧"}, "watching movie"},
+		{[]string{"刷手机", "玩手机"}, "scrolling phone"},
+		{[]string{"开车", "驾驶", "自驾"}, "driving car"},
+		{[]string{"坐车", "地铁", "公交", "通勤"}, "commuting transit"},
+		{[]string{"飞机", "航班"}, "airplane flying"},
+		{[]string{"高铁", "火车"}, "train travel"},
+		{[]string{"旅游", "旅行", "出游"}, "traveling vacation"},
+		{[]string{"拍照", "摄影"}, "photography camera"},
+		{[]string{"画画", "绘画"}, "painting drawing"},
+		{[]string{"弹琴", "练琴", "钢琴", "吉他"}, "playing music instrument"},
+		{[]string{"唱歌", "KTV", "卡拉OK"}, "singing karaoke"},
+		{[]string{"聊天", "谈话", "聚会"}, "chatting friends"},
+		{[]string{"遛狗"}, "walking dog"},
+		{[]string{"看医生", "看病", "医院", "体检"}, "hospital doctor"},
+		{[]string{"带娃", "照顾孩子"}, "parenting baby"},
+		{[]string{"打扫", "做家务", "收拾"}, "cleaning house"},
+		{[]string{"洗澡", "淋浴"}, "shower bathroom"},
+		{[]string{"化妆", "护肤"}, "makeup beauty"},
+		{[]string{"寺庙", "拜佛"}, "temple praying"},
+		{[]string{"在家"}, "relaxing home"},
+		{[]string{"出差"}, "business trip"},
+		{[]string{"约会"}, "dating romantic"},
+	}
+
+	for _, m := range mappings {
+		for _, kw := range m.keywords {
+			if containsChinese(status, kw) {
+				return m.english
+			}
+		}
+	}
+	return ""
+}
+
+// containsChinese 检查 status 是否包含关键词
+func containsChinese(status, keyword string) bool {
+	return len(status) > 0 && len(keyword) > 0 && strings.Contains(status, keyword)
+}
+
+// ==================== GIF URL 缓存系统 ====================
+// 策略：客户端解析 gif.playa.cn 获得 cos_url 后写回服务器缓存。
+// 后续任何客户端加载 Grid 时直接从缓存返回 cos_url，无需再调 gif.playa.cn。
+
+// gifCacheKey 计算 GIF 缓存键（与 iOS/Android 客户端 seed 算法一致）
+// seed = md5(friendId + giphyQuery + today)
+func gifCacheKey(friendID, giphyQuery string) string {
+	today := time.Now().Format("2006-01-02")
+	hash := md5.Sum([]byte(friendID + giphyQuery + today))
+	seed := hex.EncodeToString(hash[:])
+	return "gif:url:" + seed
+}
+
+// resolveGifURLsFromCache 从 Redis 缓存填充缺失的 gif_url
+func (s *HomeService) resolveGifURLsFromCache(ctx context.Context, friends []FriendGridItem) {
+	if s.redisClient == nil {
+		return
+	}
+
+	for i := range friends {
+		// 已有 gif_url 或无 giphy_query → 跳过
+		if friends[i].GifURL != "" || friends[i].GiphyQuery == "" || friends[i].NeedsSchedule {
+			continue
+		}
+		cacheKey := gifCacheKey(friends[i].UserID, friends[i].GiphyQuery)
+		if cosURL, err := s.redisClient.Get(ctx, cacheKey); err == nil && cosURL != "" {
+			friends[i].GifURL = cosURL
+			friends[i].UseGif = true
+		}
+	}
+}
+
+// GifCacheItem 客户端写回的 GIF 缓存条目
+type GifCacheItem struct {
+	FriendID   string `json:"friend_id"`
+	GiphyQuery string `json:"query"`
+	CosURL     string `json:"cos_url"`
+}
+
+// FetchGifFromProxy 从 gif.playa.cn 代理获取 GIF cos_url
+// 返回 COS URL 或空字符串（失败时）
+func FetchGifFromProxy(query, seed string) string {
+	encoded := url.QueryEscape(query)
+	reqURL := fmt.Sprintf("https://gif.playa.cn/api/giphy?q=%s&seed=%s", encoded, seed)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(reqURL)
+	if err != nil {
+		fmt.Printf("[GifProxy] 请求失败: %v\n", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+
+	var result struct {
+		Result struct {
+			CosURL string `json:"cos_url"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil || result.Result.CosURL == "" {
+		fmt.Printf("[GifProxy] 解析失败: query=%s body=%s\n", query, string(body[:min(len(body), 100)]))
+		return ""
+	}
+	return result.Result.CosURL
+}
+
+// ResolveAndCacheGifURL 异步解析 GIF 并回填到 schedule + analysis cache + redis gif cache
+// 在任何状态保存后调用（go s.homeService.ResolveAndCacheGifURL(...)）
+func (s *HomeService) ResolveAndCacheGifURL(userID, giphyQuery string) {
+	if giphyQuery == "" {
+		return
+	}
+
+	// 计算 seed（与客户端一致）
+	today := time.Now().Format("2006-01-02")
+	hash := md5.Sum([]byte(userID + giphyQuery + today))
+	seed := hex.EncodeToString(hash[:])
+
+	cosURL := FetchGifFromProxy(giphyQuery, seed)
+	if cosURL == "" {
+		return
+	}
+	fmt.Printf("[GifResolve] 成功 user=%s query=%s → %s\n", userID, giphyQuery, cosURL[:60])
+
+	ctx := context.Background()
+
+	// 1. 更新 gif redis 缓存
+	cacheKey := "gif:url:" + seed
+	if s.redisClient != nil {
+		s.redisClient.Set(ctx, cacheKey, cosURL, 25*time.Hour)
+	}
+
+	// 2. 更新 schedule item 的 gif_url
+	if s.scheduleRepo != nil {
+		now := time.Now()
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		if schedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, userID, today); err == nil && schedule != nil {
+			currentTime := now.Format("15:04")
+			for i := range schedule.Items {
+				item := &schedule.Items[i]
+				if item.GiphyQuery == giphyQuery && item.GifURL == "" {
+					item.GifURL = cosURL
+					_ = s.scheduleRepo.Update(ctx, schedule)
+					break
+				}
+				// 也匹配当前时段
+				if isTimeInSlot(currentTime, item.StartTime, item.EndTime) && item.GifURL == "" {
+					item.GifURL = cosURL
+					_ = s.scheduleRepo.Update(ctx, schedule)
+					break
+				}
+			}
+		}
+	}
+
+	// 3. 更新 analysis cache 的 gif_url
+	if s.memoryRepo != nil {
+		if existing, err := s.memoryRepo.GetAnalysisCache(ctx, userID); err == nil && existing != nil {
+			if existing.LifeStatus.GifURL == "" {
+				existing.LifeStatus.GifURL = cosURL
+				existing.LifeStatus.UseGif = true
+				_ = s.memoryRepo.SaveAnalysisCache(ctx, userID, existing)
+			}
+		}
+	}
+}
+
+// isTimeInSlot 检查时间是否在时段内
+func isTimeInSlot(current, start, end string) bool {
+	if end <= start { // 跨午夜
+		return current >= start || current < end
+	}
+	return current >= start && current < end
+}
+
+// CacheGifURLs 批量缓存客户端解析的 GIF cos_url（写回接口）
+func (s *HomeService) CacheGifURLs(ctx context.Context, items []GifCacheItem) int {
+	if s.redisClient == nil {
+		return 0
+	}
+	cached := 0
+	for _, item := range items {
+		if item.FriendID == "" || item.GiphyQuery == "" || item.CosURL == "" {
+			continue
+		}
+		cacheKey := gifCacheKey(item.FriendID, item.GiphyQuery)
+		// TTL 25h：seed 含当日日期，跨天自动失效
+		if err := s.redisClient.Set(ctx, cacheKey, item.CosURL, 25*time.Hour); err == nil {
+			cached++
+		}
+	}
+	if cached > 0 {
+		fmt.Printf("[GifCache] 写入 %d 条 GIF 缓存\n", cached)
+	}
+	return cached
 }

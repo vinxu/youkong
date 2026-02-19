@@ -80,13 +80,8 @@ struct ChatView: View {
                         .padding()
                         .padding(.bottom, keyboardHeight > 0 ? keyboardHeight - 100 : 0)
                     }
-                    .simultaneousGesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { _ in
-                                // 手指按下立即收起键盘
-                                isInputFocused = false
-                            }
-                    )
+                    .scrollDismissesKeyboard(.immediately)
+                    .dismissKeyboardOnTouchDown()
                     .onChange(of: viewModel.messages.count) { _ in
                         scrollToBottom(proxy: proxy)
                     }

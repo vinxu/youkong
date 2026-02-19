@@ -206,8 +206,8 @@ class AgentRepositoryImpl: AgentRepositoryProtocol {
             actionLabel: actionLabel,
             actionPushText: actionPushText
         )
-        let endpoint = APIEndpoint(path: "/interact", method: .post, body: body)
-        let _: GenericSuccessResponse = try await apiClient.request(endpoint)
+        let endpoint = APIEndpoint(path: "/api/v1/interact", method: .post, body: body)
+        try await apiClient.requestWithEmptyResponse(endpoint)
     }
 
     func joinCard(ownerId: String, emoji: String, statusText: String) async throws -> JoinCardResponse {

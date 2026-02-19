@@ -364,6 +364,9 @@ fun GridHomeScreen(
                                             },
                                             onInteraction = { userId, interaction ->
                                                 viewModel.sendInteraction(userId, interaction)
+                                            },
+                                            onPlusOne = { friend ->
+                                                viewModel.sendPlusOne(friend)
                                             }
                                         )
                                     }
@@ -590,7 +593,8 @@ private fun CLIFriendGrid(
     getUnreadCount: (friendId: String) -> Int = { 0 },
     onFriendClick: (userId: String) -> Unit = {},
     onNeedsScheduleClick: () -> Unit = {},
-    onInteraction: (userId: String, interaction: InteractionOptionItem) -> Unit = { _, _ -> }
+    onInteraction: (userId: String, interaction: InteractionOptionItem) -> Unit = { _, _ -> },
+    onPlusOne: (FriendGridItem) -> Unit = {},
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(gridSize),
@@ -612,6 +616,7 @@ private fun CLIFriendGrid(
                         onFriendClick(friend.userId)
                     }
                 },
+                onPlusOne = { onPlusOne(friend) },
             )
         }
     }
@@ -674,6 +679,7 @@ private fun CLIFriendCard(
     unreadCount: Int = 0,
     gifImageLoader: coil.ImageLoader? = null,
     onClick: () -> Unit = {},
+    onPlusOne: () -> Unit = {},
 ) {
     val borderColor = when {
         friend.isAvailable -> CLIColors.Green
@@ -681,6 +687,9 @@ private fun CLIFriendCard(
         else -> CLIColors.Border
     }
     val bgColor = if (friend.isAvailable) CLIColors.BackgroundHighlight else CLIColors.BackgroundSecondary
+
+    // +1 显示上限 9 个（3x3）
+    val displayCopies = minOf(friend.interactionCount + 1, 9)
 
     Box(
         modifier = Modifier
@@ -690,7 +699,7 @@ private fun CLIFriendCard(
             .border(1.dp, borderColor)
             .clickable { onClick() }
     ) {
-        // GIF 氛围背景（需要 ImageDecoderDecoder 播放动画）
+        // GIF 氛围背景
         if (!friend.gifUrl.isNullOrEmpty() && gifImageLoader != null) {
             val context = LocalContext.current
             coil.compose.AsyncImage(
@@ -707,58 +716,105 @@ private fun CLIFriendCard(
             )
         }
 
+        // ── 卡片内容：上中下三区 ──
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 8.dp),
+                .fillMaxSize()
+                .padding(horizontal = 6.dp)
+                .padding(top = 5.dp, bottom = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // 有空标签
-            Text(
-                text = if (friend.isAvailable) "[有空]" else " ",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                color = if (friend.isAvailable) CLIColors.Green else androidx.compose.ui.graphics.Color.Transparent,
-                maxLines = 1
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-
-            // 动画 emoji
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.Center
+            // ▸ 顶栏：有空标签 + 未读角标
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                if (friend.needsSchedule) {
-                    Text(text = "➕", fontSize = 36.sp, maxLines = 1)
+                if (friend.isAvailable) {
+                    Text(
+                        text = "[有空]",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        color = CLIColors.Green,
+                    )
                 } else {
-                    com.youkong.core.ui.emoji.EmojiStateView(
-                        emoji = friend.emoji,
-                        modifier = Modifier.size(72.dp),
+                    Spacer(modifier = Modifier.width(1.dp))
+                }
+                if (unreadCount > 0) {
+                    Text(
+                        text = "[$unreadCount]",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        color = CLIColors.Green,
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
+            // ▸ 中部：emoji 居中（弹性空间）
+            Spacer(modifier = Modifier.weight(1f))
 
-            // 昵称
+            if (friend.needsSchedule) {
+                Text(text = "➕", fontSize = 25.sp, maxLines = 1)
+            } else if (displayCopies <= 1) {
+                com.youkong.core.ui.emoji.EmojiStateView(
+                    emoji = friend.emoji,
+                    modifier = Modifier.size(50.dp),
+                )
+            } else if (displayCopies == 2) {
+                // 2 个并排
+                Row(horizontalArrangement = Arrangement.Center) {
+                    com.youkong.core.ui.emoji.EmojiStateView(
+                        emoji = friend.emoji,
+                        modifier = Modifier.size(58.dp),
+                    )
+                    com.youkong.core.ui.emoji.EmojiStateView(
+                        emoji = friend.emoji,
+                        modifier = Modifier.size(58.dp),
+                    )
+                }
+            } else if (displayCopies <= 4) {
+                // 3-4 个
+                EmojiStageGrid(emoji = friend.emoji, count = displayCopies, emojiSize = 38)
+            } else {
+                // 5-9 个
+                EmojiStageGrid(emoji = friend.emoji, count = displayCopies, emojiSize = 36)
+            }
+
+            // +1 按钮
+            if (!friend.needsSchedule && !friend.hasPlusOned && !friend.isSelf) {
+                Text(
+                    text = "+1",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = FontFamily.Monospace,
+                    color = CLIColors.Green,
+                    modifier = Modifier
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                        ) { onPlusOne() }
+                        .padding(top = 2.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.weight(1f))
+
+            // ▸ 底部：昵称 + 状态 + 城市
             Text(
                 text = friend.nickname,
                 fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
+                fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 color = CLIColors.TextPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            Spacer(modifier = Modifier.height(2.dp))
 
-            // 状态
             if (friend.needsSchedule) {
                 Text(
                     text = "+状态",
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     color = CLIColors.Green,
                     maxLines = 1,
                 )
@@ -766,43 +822,55 @@ private fun CLIFriendCard(
                 Text(
                     text = friend.status,
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
+                    fontSize = 12.sp,
                     color = CLIColors.TextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
 
-            // 城市
             val cityText = friend.city?.takeIf { it.isNotEmpty() }
-            Text(
-                text = when {
-                    cityText != null && friend.isVisiting -> "\uD83D\uDCCD来访·$cityText"
-                    cityText != null -> cityText
-                    else -> " "
-                },
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                color = when {
-                    cityText != null && friend.isVisiting -> CLIColors.Yellow
-                    cityText != null -> CLIColors.TextSecondary
-                    else -> androidx.compose.ui.graphics.Color.Transparent
-                },
-                maxLines = 1,
-            )
+            if (cityText != null) {
+                Spacer(modifier = Modifier.height(1.dp))
+                Text(
+                    text = if (friend.isVisiting) "\uD83D\uDCCD来访·$cityText" else cityText,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    color = if (friend.isVisiting) CLIColors.Yellow else CLIColors.TextSecondary,
+                    maxLines = 1,
+                )
+            }
         }
+    }
+}
 
-        // 未读消息角标
-        if (unreadCount > 0) {
-            Text(
-                text = "[$unreadCount]",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                color = CLIColors.Green,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(end = 4.dp, top = 2.dp)
-            )
+// MARK: - Emoji Stage Grid (+1 舞台效果)
+
+@Composable
+private fun EmojiStageGrid(emoji: String, count: Int, emojiSize: Int) {
+    val columns = kotlin.math.ceil(kotlin.math.sqrt(count.toDouble())).toInt()
+    val rows = kotlin.math.ceil(count.toDouble() / columns).toInt()
+    // 多行时行间紧凑（负间距 -20%，匹配 iOS）
+    val overlapPerRow = if (rows > 1) emojiSize * 0.2f else 0f
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        var remaining = count
+        for (r in 0 until rows) {
+            Row(
+                horizontalArrangement = Arrangement.Center,
+                modifier = if (r > 0) Modifier.offset(y = -(overlapPerRow * r).dp) else Modifier,
+            ) {
+                val colsThisRow = minOf(columns, remaining)
+                for (c in 0 until colsThisRow) {
+                    com.youkong.core.ui.emoji.EmojiStateView(
+                        emoji = emoji,
+                        modifier = Modifier.size(emojiSize.dp),
+                    )
+                    remaining--
+                }
+            }
         }
     }
 }

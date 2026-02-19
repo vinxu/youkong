@@ -38,6 +38,7 @@ type AgentService struct {
 	locationService    *LocationService
 	llmClient          *llm.OpenRouterClient
 	holmesAnalyzer     *llm.HolmesAnalyzer
+	homeService        *HomeService
 }
 
 // NewAgentService 创建 Agent 服务
@@ -66,6 +67,11 @@ func NewAgentService(
 		llmClient:          llmClient,
 		holmesAnalyzer:     holmesAnalyzer,
 	}
+}
+
+// SetHomeService 设置 HomeService（用于 GIF 解析）
+func (s *AgentService) SetHomeService(homeService *HomeService) {
+	s.homeService = homeService
 }
 
 // SetCOSClient 设置 COS 客户端（用于 GIF 缓存）
@@ -1416,6 +1422,11 @@ func (s *AgentService) SaveStatusFeedback(ctx context.Context, userID string, re
 		s.updateCurrentScheduleItem(ctx, userID, finalEmoji, finalLabel, gifURL, giphyQuery)
 	}
 
+	// 异步解析 GIF：当用户手动修改状态但没有传 giphy_query 时，服务端自动生成
+	if gifURL == "" && giphyQuery == "" && s.homeService != nil && finalLabel != "" {
+		go s.resolveGifForManualStatus(userID, finalLabel)
+	}
+
 	// 更新 prev inference 缓存，标记为用户确认来源
 	if s.redisClient != nil {
 		prevInference := &model.CurrentStatusInference{
@@ -1956,3 +1967,65 @@ func (s *AgentService) MergeExistingGifInfo(ctx context.Context, userID string, 
 	// 如果反馈中没有 GIF 信息，尝试从缓存中获取
 	// 这里是 no-op 占位，确保编译通过
 }
+
+// resolveGifForManualStatus 异步为手动修改的状态生成 GIF
+// 1. 用 LLM 将中文活动翻译为英文搜索词
+// 2. 调用 homeService.ResolveAndCacheGifURL 获取并回填 GIF
+func (s *AgentService) resolveGifForManualStatus(userID, activity string) {
+	ctx := context.Background()
+
+	// 先查翻译缓存
+	cacheKey := fmt.Sprintf("giphy:query:%s", activity)
+	var giphyQuery string
+	if s.redisClient != nil {
+		if cached, err := s.redisClient.Get(ctx, cacheKey); err == nil && cached != "" {
+			giphyQuery = cached
+		}
+	}
+
+	// 缓存未命中，用 LLM 翻译
+	if giphyQuery == "" && s.llmClient != nil {
+		prompt := fmt.Sprintf(`Output 2-4 English keywords for searching a GIF matching this activity. Only output the keywords, nothing else.
+Activity: %s`, activity)
+		query, err := s.llmClient.Chat(ctx, prompt)
+		if err != nil {
+			fmt.Printf("[resolveGifForManualStatus] LLM 翻译失败 user=%s activity=%s error=%v\n", userID, activity, err)
+			return
+		}
+		giphyQuery = strings.TrimSpace(query)
+		giphyQuery = strings.Trim(giphyQuery, "\"'`")
+
+		// 缓存翻译结果
+		if giphyQuery != "" && s.redisClient != nil {
+			s.redisClient.Set(ctx, cacheKey, giphyQuery, 24*time.Hour)
+		}
+	}
+
+	if giphyQuery == "" {
+		fmt.Printf("[resolveGifForManualStatus] 无法生成 giphy_query user=%s activity=%s\n", userID, activity)
+		return
+	}
+
+	fmt.Printf("[resolveGifForManualStatus] 生成 giphy_query user=%s activity=%s → %s\n", userID, activity, giphyQuery)
+
+	// 回填 giphyQuery 到 schedule item
+	if s.scheduleRepo != nil {
+		now := time.Now()
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		if schedule, err := s.scheduleRepo.GetActiveByUserAndDate(ctx, userID, today); err == nil && schedule != nil {
+			currentTime := now.Format("15:04")
+			for i := range schedule.Items {
+				item := &schedule.Items[i]
+				if isTimeInSlot(currentTime, item.StartTime, item.EndTime) && item.GiphyQuery == "" {
+					item.GiphyQuery = giphyQuery
+					_ = s.scheduleRepo.Update(ctx, schedule)
+					break
+				}
+			}
+		}
+	}
+
+	// 解析 GIF URL 并回填到 schedule + analysis cache
+	s.homeService.ResolveAndCacheGifURL(userID, giphyQuery)
+}
+

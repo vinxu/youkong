@@ -2,6 +2,7 @@ package com.youkong.core.network.api
 
 import com.youkong.core.network.model.ApiResponse
 import com.youkong.core.network.model.CardRoomMessageResponse
+import com.youkong.core.network.model.GifCacheRequest
 import com.youkong.core.network.model.GridResponse
 import com.youkong.core.network.model.JoinCardRequest
 import com.youkong.core.network.model.JoinCardResponse
@@ -20,6 +21,9 @@ interface HomeApi {
 
     @POST("interact")
     suspend fun sendInteraction(@Body request: SendInteractionRequest): ApiResponse<Unit?>
+
+    @POST("home/gif-cache")
+    suspend fun cacheGifUrls(@Body request: GifCacheRequest): ApiResponse<Unit?>
 
     @POST("card/join")
     suspend fun joinCard(@Body request: JoinCardRequest): ApiResponse<JoinCardResponse>

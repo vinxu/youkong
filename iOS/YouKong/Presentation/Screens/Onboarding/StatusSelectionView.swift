@@ -1,3 +1,4 @@
+import CommonCrypto
 import SwiftUI
 import Factory
 
@@ -70,6 +71,7 @@ struct StatusSelectionView: View {
                         StatusOptionButton(
                             option: option,
                             isSelected: selectedOption == option,
+                            isGifLoading: viewModel.gifLoadingIndices.contains(option.id),
                             action: {
                                 withAnimation(.easeInOut(duration: 0.2)) {
                                     selectedOption = option
@@ -132,30 +134,80 @@ struct StatusSelectionView: View {
     }
 }
 
-// MARK: - Status Option Button
+// MARK: - Status Option Button (Rich Card: 动画 Emoji + GIF 背景)
 
 struct StatusOptionButton: View {
     let option: StatusOption
     let isSelected: Bool
+    var isGifLoading: Bool = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 8) {
-                Text(option.emoji)
-                    .font(.system(size: 36))
+            GeometryReader { geo in
+                ZStack {
+                    // GIF 背景
+                    if let gifUrl = option.gifUrl, !gifUrl.isEmpty, let url = URL(string: gifUrl) {
+                        GifImageView(url: url, contentMode: .scaleAspectFill) {}
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .clipped()
+                    } else {
+                        // 无 GIF 时用渐变背景
+                        LinearGradient(
+                            colors: [CLIColors.backgroundSecondary, CLIColors.background],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    }
 
-                Text(option.status)
-                    .font(.cliBody)
-                    .foregroundColor(isSelected ? CLIColors.green : CLIColors.textPrimary)
+                    // 暗化遮罩
+                    Color.black.opacity(0.35)
+
+                    // 内容
+                    VStack(spacing: 6) {
+                        EmojiStateView(emoji: option.emoji)
+                            .frame(width: 48, height: 48)
+                            .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
+                        Text(option.status)
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.white)
+                            .shadow(color: .black.opacity(0.7), radius: 2, x: 0, y: 1)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                    }
+                    .padding(8)
+
+                    // GIF 加载中指示器（右下角）
+                    if isGifLoading && (option.gifUrl == nil || option.gifUrl?.isEmpty == true) {
+                        VStack {
+                            Spacer()
+                            HStack {
+                                Spacer()
+                                HStack(spacing: 3) {
+                                    ProgressView()
+                                        .tint(.white)
+                                        .scaleEffect(0.5)
+                                    Text("GIF")
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundColor(.white.opacity(0.8))
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Color.black.opacity(0.5))
+                                .cornerRadius(8)
+                                .padding(6)
+                            }
+                        }
+                    }
+                }
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 100)
-            .background(isSelected ? CLIColors.backgroundSecondary : CLIColors.background)
+            .aspectRatio(1, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
             .overlay(
-                Rectangle()
-                    .stroke(isSelected ? CLIColors.green : CLIColors.border, lineWidth: isSelected ? 2 : 1)
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(isSelected ? CLIColors.green : Color.clear, lineWidth: 3)
             )
+            .shadow(color: isSelected ? CLIColors.green.opacity(0.3) : .clear, radius: 8)
         }
         .buttonStyle(PlainButtonStyle())
     }
@@ -169,6 +221,7 @@ class StatusSelectionViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var isSaving = false
     @Published var error: String?
+    @Published var gifLoadingIndices: Set<String> = []
 
     @Injected(\.apiClient) private var apiClient
     private let locationCollector = LocationDataCollector.shared
@@ -192,6 +245,73 @@ class StatusSelectionViewModel: ObservableObject {
         }
 
         isLoading = false
+
+        // 异步获取 GIF 背景
+        Task { await fetchGifsForOptions() }
+    }
+
+    // MARK: - GIF Fetch (gif.playa.cn proxy)
+
+    private func fetchGifsForOptions() async {
+        let needGif = options.filter { ($0.gifUrl ?? "").isEmpty }
+        gifLoadingIndices = Set(needGif.map { $0.id })
+
+        for option in needGif {
+            let query = option.status
+            let seed = "onboard_\(option.emoji)_\(query)_\(Int(Date().timeIntervalSince1970))"
+            let gifUrl = await fetchGifViaProxy(query: query, seed: seed)
+
+            if let gifUrl = gifUrl {
+                if let idx = options.firstIndex(where: { $0.id == option.id }) {
+                    options[idx].gifUrl = gifUrl
+                }
+            }
+            gifLoadingIndices.remove(option.id)
+        }
+    }
+
+    private func fetchGifViaProxy(query: String, seed: String) async -> String? {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let seedHash = md5String("\(seed)\(query)")
+
+        for attempt in 0..<3 {
+            do {
+                guard let url = URL(string: "https://gif.playa.cn/api/giphy?q=\(encoded)&seed=\(seedHash)") else { return nil }
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 15
+                let (data, _) = try await URLSession.shared.data(for: request)
+                let body = String(data: data, encoding: .utf8) ?? ""
+
+                if body.contains("FUNCTION_INVOCATION_TIMEOUT") || body.contains("\"error\"") {
+                    if attempt < 2 {
+                        try? await Task.sleep(nanoseconds: UInt64((attempt + 1) * 1_500_000_000))
+                        continue
+                    }
+                    return nil
+                }
+
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let result = json["result"] as? [String: Any],
+                   let cosUrl = result["cos_url"] as? String, !cosUrl.isEmpty {
+                    return cosUrl
+                }
+                return nil
+            } catch {
+                if attempt < 2 {
+                    try? await Task.sleep(nanoseconds: UInt64((attempt + 1) * 1_500_000_000))
+                }
+            }
+        }
+        return nil
+    }
+
+    private func md5String(_ input: String) -> String {
+        let data = input.data(using: .utf8)!
+        var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
+        data.withUnsafeBytes { bytes in
+            _ = CC_MD5(bytes.baseAddress, CC_LONG(data.count), &digest)
+        }
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     func selectStatus(option: StatusOption, profileType: String) async {
@@ -211,7 +331,9 @@ class StatusSelectionViewModel: ObservableObject {
             let request = SelectStatusRequest(
                 emoji: option.emoji,
                 status: option.status,
-                deviceData: nil
+                deviceData: nil,
+                gifUrl: option.gifUrl,
+                giphyQuery: nil
             )
             let _: SelectStatusResponse = try await apiClient.request(
                 .selectStatus(request: request)
